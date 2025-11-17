@@ -60,11 +60,17 @@ def setup_routes(
         create_db_and_tables()
         yield
 
+    get_launcher = (
+        (lambda: container_launcher_for_log_streaming)
+        if container_launcher_for_log_streaming
+        else None
+    )
+
     _setup_routes_internal(
         app=app,
         get_session=get_session,
         user_details_getter=user_details_getter,
-        container_launcher_for_log_streaming=container_launcher_for_log_streaming,
+        get_launcher=get_launcher,
         lifespan=lifespan,
     )
 
@@ -76,7 +82,7 @@ def _setup_routes_internal(
         | typing.Callable[..., abc.Iterator[orm.Session]]
     ),
     user_details_getter: typing.Callable[..., UserDetails],
-    container_launcher_for_log_streaming: "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer] | None" = None,
+    get_launcher: "typing.Callable[..., launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer]] | None" = None,
     lifespan: starlette.types.Lifespan[typing.Any] | None = None,
     pipeline_run_creation_hook: (
         typing.Callable[..., typing.Any]
@@ -209,20 +215,26 @@ def _setup_routes_internal(
         inject_session_dependency(execution_service.get_artifacts)
     )
 
+    LauncherDep = typing.Annotated[
+        "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer]",
+        fastapi.Depends(get_launcher),
+    ]
+
     @router.get(
         "/api/executions/{id}/container_log", tags=["executions"], **default_config
     )
     def get_container_log(
         id: backend_types_sql.IdType,
         session: SessionDep,
+        container_launcher: LauncherDep,
     ) -> api_server_sql.GetContainerExecutionLogResponse:
         return execution_service.get_container_execution_log(
             id=id,
             session=session,
-            container_launcher=container_launcher_for_log_streaming,
+            container_launcher=container_launcher,
         )
 
-    if container_launcher_for_log_streaming:
+    if get_launcher:
 
         @router.get(
             "/api/executions/{id}/stream_container_log",
@@ -232,10 +244,11 @@ def _setup_routes_internal(
         def stream_container_log(
             id: backend_types_sql.IdType,
             session: SessionDep,
+            container_launcher: LauncherDep,
         ):
             iterator = execution_service.stream_container_execution_log(
                 session=session,
-                container_launcher=container_launcher_for_log_streaming,
+                container_launcher=container_launcher,
                 execution_id=id,
             )
             return fastapi.responses.StreamingResponse(
