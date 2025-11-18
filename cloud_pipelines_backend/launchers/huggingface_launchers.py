@@ -46,8 +46,8 @@ class HuggingFaceJobsContainerLauncher(
         )
         self._job_timeout = job_timeout
         self._hf_job_token = hf_job_token
-        # Test the access
-        # _ = self._api_client.list_models(filter="non-existing")
+
+    def self_check(self):
         _ = self._api_client.list_jobs(namespace=self._namespace)
 
     def launch_container_task(
