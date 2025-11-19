@@ -7,6 +7,9 @@ import typing
 from typing import Any, Optional
 
 if typing.TYPE_CHECKING:
+    from cloud_pipelines.orchestration.storage_providers import (
+        interfaces as storage_provider_interfaces,
+    )
     from .launchers import interfaces as launcher_interfaces
 
 
@@ -756,8 +759,16 @@ class ExecutionNodesApiService_Sql:
                     raise RuntimeError(
                         f"Container execution {container_execution.id=} does not have log_uri. Impossible."
                     )
+                # TODO: Make the ContainerLauncher._storage_provider part of the public interface or create a better solution for log retrieval
+                # Try getting the configured storage provider from the launcher so that it has correct access credentials.
+                storage_provider = (
+                    getattr(container_launcher, "_storage_provider", None)
+                    if container_launcher
+                    else None
+                )
                 log_text = _read_container_execution_log_from_uri(
-                    container_execution.log_uri
+                    log_uri=container_execution.log_uri,
+                    storage_provider=storage_provider,
                 )
             except:
                 # Do not raise exception if the execution is in SYSTEM_ERROR state
@@ -820,18 +831,41 @@ class ExecutionNodesApiService_Sql:
                 raise RuntimeError(
                     f"Container execution {container_execution.id=} does not have log_uri. Impossible."
                 )
+            # TODO: Make the ContainerLauncher._storage_provider part of the public interface or create a better solution for log retrieval
+            # Try getting the configured storage provider from the launcher so that it has correct access credentials.
+            storage_provider = (
+                getattr(container_launcher, "_storage_provider", None)
+                if container_launcher
+                else None
+            )
             log_text = _read_container_execution_log_from_uri(
-                container_execution.log_uri
+                log_uri=container_execution.log_uri,
+                storage_provider=storage_provider,
             )
             return (line + "\n" for line in log_text.split("\n"))
 
 
-def _read_container_execution_log_from_uri(log_uri: str):
-    if "://" not in log_uri and ".." not in log_uri:
+def _read_container_execution_log_from_uri(
+    log_uri: str,
+    storage_provider: "storage_provider_interfaces.StorageProvider | None" = None,
+) -> str:
+    if ".." in log_uri:
+        raise ValueError(
+            f"_read_container_execution_log_from_uri: log_uri contains '..': {log_uri=}"
+        )
+
+    if storage_provider:
+        # TODO: Switch to storage_provider.parse_uri_get_accessor
+        uri_accessor = storage_provider.make_uri(log_uri)
+        log_text = uri_accessor.get_reader().download_as_text()
+        return log_text
+
+    if "://" not in log_uri:
         # Consider the URL to be an absolute local path (`/path` or `C:\path` or `C:/path`)
         with open(log_uri, "r") as reader:
             return reader.read()
     elif log_uri.startswith("gs://"):
+        # TODO: Switch to using storage providers.
         from google.cloud import storage
 
         gcs_client = storage.Client()
