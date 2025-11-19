@@ -42,7 +42,9 @@ class HuggingFaceJobsContainerLauncher(
         self._api_client = client or huggingface_hub.HfApi(token=hf_token)
         self._namespace: str = namespace or self._api_client.whoami()["name"]
         self._storage_provider = (
-            huggingface_repo_storage.HuggingFaceRepoStorageProvider()
+            huggingface_repo_storage.HuggingFaceRepoStorageProvider(
+                client=self._api_client
+            )
         )
         self._job_timeout = job_timeout
         self._hf_job_token = hf_job_token
@@ -402,7 +404,9 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
         if self.has_ended:
             try:
                 return (
-                    huggingface_repo_storage.HuggingFaceRepoStorageProvider()
+                    huggingface_repo_storage.HuggingFaceRepoStorageProvider(
+                        client=self._get_api_client()
+                    )
                     .make_uri(self._log_uri)
                     .get_reader()
                     .download_as_text()
