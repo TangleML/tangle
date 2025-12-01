@@ -223,7 +223,12 @@ class HuggingFaceJobsContainerLauncher(
         input_download_code = "\n".join(input_download_lines)
 
         artifact_uploader_script = f"""
-set -e -x -o pipefail
+set -e -x
+# Workaround for Dash and other shells that do not support -o pipefail.
+if (set -o pipefail 2>/dev/null); then
+    set -o pipefail
+fi
+
 # Installing uv
 url="https://astral.sh/uv/install.sh"
 if command -v curl &>/dev/null; then
