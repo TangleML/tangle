@@ -231,10 +231,10 @@ fi
 
 # Installing uv
 url="https://astral.sh/uv/install.sh"
-if command -v curl &>/dev/null; then
+if command -v curl 2>/dev/null; then
     # -s: silent, -L: follow redirects
     curl -s -L "$url" | sh
-elif command -v wget &>/dev/null; then
+elif command -v wget 2>/dev/null; then
     wget -q -O - "$url" | sh
 else
     echo "Error: Neither curl nor wget found." >&2
