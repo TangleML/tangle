@@ -148,40 +148,9 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
         return {"GitBlobHash": hasher.hexdigest()}
 
     def get_info(self, uri: HuggingFaceRepoUri) -> interfaces.DataInfo:
-        hf_url = huggingface_hub.hf_hub_url(
-            repo_type=uri.repo_type,
-            repo_id=uri.repo_id,
-            filename=uri.path,
+        repo_objects = self._client.get_paths_info(
+            repo_type=uri.repo_type, repo_id=uri.repo_id, paths=[uri.path]
         )
-
-        try:
-            file_metadata = self._client.get_hf_file_metadata(url=hf_url)
-            return interfaces.DataInfo(
-                is_dir=False,
-                total_size=file_metadata.size,
-                hashes={"GitBlobHash": file_metadata.etag},
-            )
-        except:
-            pass
-
-        path_in_repo = uri.path.rstrip("/")
-        if path_in_repo == "":
-            raise NotImplementedError(
-                "Getting the hash of the repo root is currently not supported."
-            )
-        parent_path, _, _ = path_in_repo.rpartition("/")
-
-        # HF has no API to get info about a specific folder's tree object
-        # So we have to get that info from the list of the folder's parent folder children.
-        repo_objects = [
-            x
-            for x in huggingface_hub.list_repo_tree(
-                repo_id=uri.repo_id,
-                repo_type=uri.repo_type,
-                path_in_repo=parent_path,
-            )
-            if x.path == path_in_repo
-        ]
         if not repo_objects:
             raise ValueError(f"Uri {uri} was not found.")
         if len(repo_objects) > 1:
@@ -201,7 +170,7 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
             child_repo_objects = huggingface_hub.list_repo_tree(
                 repo_id=uri.repo_id,
                 repo_type=uri.repo_type,
-                path_in_repo=path_in_repo,
+                path_in_repo=uri.path,
                 recursive=True,
             )
             total_size = sum(
