@@ -167,7 +167,7 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
             )
         elif isinstance(repo_object, hf_api.RepoFolder):
             # Calculating the total size of files in the folder
-            child_repo_objects = huggingface_hub.list_repo_tree(
+            child_repo_objects = self._client.list_repo_tree(
                 repo_id=uri.repo_id,
                 repo_type=uri.repo_type,
                 path_in_repo=uri.path,
