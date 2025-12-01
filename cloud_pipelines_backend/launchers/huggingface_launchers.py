@@ -237,8 +237,9 @@ if command -v curl 2>/dev/null; then
 elif command -v wget 2>/dev/null; then
     wget -q -O - "$url" | sh
 else
-    echo "Error: Neither curl nor wget found." >&2
-    exit 1
+    echo "Error: Neither curl nor wget was found. Trying apt-get install" >&2
+    apt-get update --quiet && apt-get install -y --no-install-recommends --quiet curl
+    curl -s -L "$url" | sh
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
