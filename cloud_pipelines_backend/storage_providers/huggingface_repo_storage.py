@@ -134,11 +134,10 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
         return pathlib.Path(cache_path).read_bytes()
 
     def exists(self, uri: HuggingFaceRepoUri) -> bool:
-        return self._client.file_exists(
-            repo_type=uri.repo_type,
-            repo_id=uri.repo_id,
-            filename=uri.path,
+        repo_objects = self._client.get_paths_info(
+            repo_type=uri.repo_type, repo_id=uri.repo_id, paths=[uri.path]
         )
+        return len(repo_objects) > 0
 
     def calculate_data_hash(self, *, data: bytes) -> dict[str, str]:
         import hashlib
