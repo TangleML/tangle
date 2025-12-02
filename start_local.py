@@ -261,7 +261,10 @@ web_app_search_dirs = [
     this_dir / ".." / "pipeline-studio-app" / "build",
     this_dir / ".." / "frontend" / "build",
     this_dir / ".." / "frontend_build",
+    this_dir / ".." / "tangle-ui" / "dist",
+    this_dir / ".." / "ui_build",
     this_dir / "pipeline-studio-app" / "build",
+    this_dir / "ui_build",
 ]
 found_frontend_build_files = False
 for web_app_dir in web_app_search_dirs:
@@ -272,6 +275,11 @@ for web_app_dir in web_app_search_dirs:
         )
         # The Web app base URL is currently static and hardcoded.
         # TODO: Remove this mount once the base URL becomes relative.
+        app.mount(
+            "/tangle-ui/",
+            staticfiles.StaticFiles(directory=web_app_dir, html=True),
+            name="static",
+        )
         app.mount(
             "/pipeline-studio-app/",
             staticfiles.StaticFiles(directory=web_app_dir, html=True),
