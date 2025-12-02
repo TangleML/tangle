@@ -3,12 +3,43 @@
 The Tangle system helps users create and run ML experiments and production pipelines.
 Any batch workflow that has beginning and end can be orchestrated via a pipeline.
 
-[Install the app](#installation)
+To learn more about Tangle, visit <https://tangleml.com>
 
-![image](https://github.com/user-attachments/assets/0ce7ccc0-dad7-4f6a-8677-f2adcd83f558)
-<!--
-[![image](https://github.com/user-attachments/assets/0ce7ccc0-dad7-4f6a-8677-f2adcd83f558)](https://tangleml-tangle.hf.space)
--->
+[![image](https://github.com/user-attachments/assets/0ce7ccc0-dad7-4f6a-8677-f2adcd83f558)](https://tangleml-tangle.hf.space/#/quick-start)
+
+## Try Tangle
+
+Tangle’s architecture allows it to run anywhere. We’re expanding the list of installation recipes.
+At this moment Tangle can be used locally (using Docker/Podman launcher) or at HuggingFace (using HuggingFace Job launcher).
+
+### Try at HuggingFace
+
+The easiest way to try Tangle is via HuggingFace.
+
+Go to [TangleML/tangle](https://tangleml-tangle.hf.space/#/quick-start) at HuggingFace and start building. Creating a pipeline does not require any registration, but to run your pipeline, you’ll need a HuggingFace account with [Pro](https://huggingface.co/pro) subscription ($9/month).
+
+### Build a pipeline
+Start with the sample XGBoost training pipeline or build a new one from scratch:
+
+*   Drag components onto canvas
+*   Connect components (outputs to inputs)
+*   Configure task arguments
+*   Submit pipeline for execution (requires login)
+*   Monitor the pipeline run in real-time
+
+### HuggingFace x Tangle integration
+
+The Tangle team has deployed Tangle to HuggingFace Spaces as a multi-tenant service, which uses HF infrastructure for storage, compute, and authentication. 
+
+The shared multi-tenant instance is live at <https://tangleml-tangle.hf.space> (or <https://huggingface.co/spaces/TangleML/tangle>).
+
+Tangle’s multi-tenant architecture maintains a central tenant database (storing user IDs, access tokens, and orchestrator configs) plus individual per-tenant SQLite databases in the main TangleML/tangle HuggingFace Space persistent storage. Each user’s pipelines run via that user’s HuggingFace Jobs, and the execution logs and output artifacts are stored in the user's own private HuggingFace Dataset repo (user/tangle_data), with clickable links in the UI to both artifacts and HuggingFace Jobs. 
+
+You can also deploy your own single-tenant instance. To do this, [duplicate](https://huggingface.co/spaces/TangleML/tangle?duplicate=true) the Tangle space to your HF account and provide a [HuggingFace token](https://huggingface.co/docs/hub/en/security-tokens). These single-tenant Tangle deployments store their database in your own HF Space persistent storage, giving you complete control and data isolation.
+
+If you duplicate Tangle to an organization, you’ll get a single-tenant multi-user Tangle deployment for your team, where multiple team members can see each other’s pipeline runs and enjoy org-wide cache.
+
+You can also deploy Tangle to other environments (local or cloud).
 
 ## Installation
 
