@@ -19,7 +19,7 @@ Any batch workflow that has beginning and end can be orchestrated via a pipeline
 
 ```shell
 git clone https://github.com/TangleML/tangle.git tangle/backend --branch stable
-git clone https://github.com/TangleML/tangle-ui.git tangle/frontend_build --branch gh_pages_stable --single-branch --depth 1
+git clone https://github.com/TangleML/tangle-ui.git tangle/ui_build --branch stable_local_build
 ```
 
 3. Start the app:
@@ -48,7 +48,7 @@ Click the "New Pipeline" button at the top to start building a new pipeline.
 
 ```shell
 git clone https://github.com/TangleML/tangle.git tangle/backend --branch stable
-git clone https://github.com/TangleML/tangle-ui.git tangle/frontend_build --branch gh_pages_stable --single-branch --depth 1
+git clone https://github.com/TangleML/tangle-ui.git tangle/ui_build --branch stable_local_build
 ```
 
 3. Start the app:
