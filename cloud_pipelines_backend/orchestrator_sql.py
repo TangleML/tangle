@@ -852,7 +852,9 @@ def _mark_all_downstream_executions_as_skipped(
         return
     seen_execution_ids.add(execution.id)
     if execution.container_execution_status in {
-        bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+        bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+        # A downstream ExecutionNode can be in "Queued" state when it's been "woken up" by one of its upstreams.
+        bts.ContainerExecutionStatus.QUEUED,
     }:
         execution.container_execution_status = bts.ContainerExecutionStatus.SKIPPED
 
