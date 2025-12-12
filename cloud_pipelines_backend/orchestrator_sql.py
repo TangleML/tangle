@@ -371,6 +371,8 @@ class OrchestratorService_Sql:
             _mark_all_downstream_executions_as_skipped(
                 session=session, execution=execution
             )
+            session.commit()
+            return
 
         # Creating new container execution
         container_execution_uuid = _generate_random_id()
