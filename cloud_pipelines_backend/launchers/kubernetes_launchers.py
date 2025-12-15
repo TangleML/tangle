@@ -508,7 +508,7 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesContainerLauncher):
         )
 
 
-class KubernetesWithGcsFuseContainerLauncher(_KubernetesContainerLauncher):
+class GoogleKubernetesEngineLauncher(_KubernetesContainerLauncher):
     """Launcher that uses GKE Kubernetes (uses GKE-gcsfuse driver for data passing)"""
 
     def __init__(
@@ -542,6 +542,11 @@ class KubernetesWithGcsFuseContainerLauncher(_KubernetesContainerLauncher):
             pod_postprocessor=final_pod_postporocessor,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_google_cloud_storage,
         )
+
+
+# For backwards compatibility
+class KubernetesWithGcsFuseContainerLauncher(GoogleKubernetesEngineLauncher):
+    pass
 
 
 class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
