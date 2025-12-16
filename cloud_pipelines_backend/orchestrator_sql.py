@@ -94,6 +94,7 @@ class OrchestratorService_Sql:
         queued_execution = session.scalar(query)
         if queued_execution:
             self._queued_executions_queue_idle = False
+            start_timestamp = time.monotonic_ns()
             _logger.info(f"Before processing {queued_execution.id=}")
             try:
                 self.internal_process_one_queued_execution(
@@ -107,7 +108,11 @@ class OrchestratorService_Sql:
                 )
                 record_system_error_exception(execution=queued_execution, exception=ex)
                 session.commit()
-            _logger.info(f"After processing {queued_execution.id=}")
+            finally:
+                duration_ms = int((time.monotonic_ns() - start_timestamp) / 1_000_000)
+                _logger.info(
+                    f"After processing {queued_execution.id=}. Duration={duration_ms}ms"
+                )
             return True
         else:
             if not self._queued_executions_queue_idle:
@@ -132,12 +137,12 @@ class OrchestratorService_Sql:
         running_container_execution = session.scalar(query)
         if running_container_execution:
             self._running_executions_queue_idle = False
+            start_timestamp = time.monotonic_ns()
+            _logger.info(f"Before processing {running_container_execution.id=}")
             try:
-                _logger.info(f"Before processing {running_container_execution.id=}")
                 self.internal_process_one_running_execution(
                     session=session, container_execution=running_container_execution
                 )
-                _logger.info(f"After processing {running_container_execution.id=}")
             except Exception as ex:
                 _logger.exception(f"Error processing {running_container_execution.id=}")
                 session.rollback()
@@ -163,6 +168,11 @@ class OrchestratorService_Sql:
                         session=session, execution=execution_node
                     )
                 session.commit()
+            finally:
+                duration_ms = int((time.monotonic_ns() - start_timestamp) / 1_000_000)
+                _logger.info(
+                    f"After processing {running_container_execution.id=}. Duration={duration_ms}ms"
+                )
             return True
         else:
             if not self._running_executions_queue_idle:
