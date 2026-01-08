@@ -15,6 +15,7 @@ from . import backend_types_sql
 from . import component_library_api_server as components_api
 from . import database_ops
 from . import errors
+from . import middleware
 
 if typing.TYPE_CHECKING:
     from .launchers import interfaces as launcher_interfaces
@@ -39,6 +40,9 @@ def setup_routes(
     container_launcher_for_log_streaming: "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer] | None" = None,
     default_component_library_owner_username: str = "admin",
 ):
+    # Setup global middleware (CORS, etc.) - must be called before routes are added
+    middleware.setup_cors_middleware(app)
+
     def get_session():
         with orm.Session(autocommit=False, autoflush=False, bind=db_engine) as session:
             yield session
