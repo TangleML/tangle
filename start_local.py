@@ -78,19 +78,29 @@ def get_user_details(request: fastapi.Request):
 
 # region: Logging configuration
 import logging.config
+from cloud_pipelines_backend.instrumentation import structured_logging
 
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": True,
     "formatters": {
         "standard": {"format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s"},
+        "with_context": {
+            "()": structured_logging.ContextAwareFormatter,
+        },
+    },
+    "filters": {
+        "context_filter": {
+            "()": structured_logging.LoggingContextFilter,
+        },
     },
     "handlers": {
         "default": {
             "level": "INFO",
-            "formatter": "standard",
+            "formatter": "with_context",
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stderr",
+            "filters": ["context_filter"],
         },
     },
     "loggers": {
@@ -205,6 +215,8 @@ from fastapi import staticfiles
 
 from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import database_ops
+from cloud_pipelines_backend.instrumentation import api_tracing
+from cloud_pipelines_backend.instrumentation import contextual_logging
 
 
 @contextlib.asynccontextmanager
@@ -230,14 +242,21 @@ app = fastapi.FastAPI(
     lifespan=lifespan,
 )
 
+# Add request context middleware for automatic request_id generation
+app.add_middleware(api_tracing.RequestContextMiddleware)
+
 
 @app.exception_handler(Exception)
 def handle_error(request: fastapi.Request, exc: BaseException):
     exception_str = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    return fastapi.responses.JSONResponse(
+    response = fastapi.responses.JSONResponse(
         status_code=503,
         content={"exception": exception_str},
     )
+    request_id = contextual_logging.get_context_metadata("request_id")
+    if request_id:
+        response.headers["x-tangle-request-id"] = request_id
+    return response
 
 
 api_router.setup_routes(
