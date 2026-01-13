@@ -269,6 +269,9 @@ def _setup_routes_internal(
     router.get("/api/pipeline_runs/", tags=["pipelineRuns"], **default_config)(
         inject_session_dependency(list_pipeline_runs_func)
     )
+    router.post("/api/pipeline_runs/search/", tags=["pipelineRuns"], **default_config)(
+        inject_session_dependency(pipeline_run_service.search)
+    )
     router.get("/api/pipeline_runs/{id}", tags=["pipelineRuns"], **default_config)(
         inject_session_dependency(pipeline_run_service.get)
     )

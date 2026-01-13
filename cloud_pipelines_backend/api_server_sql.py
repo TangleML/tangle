@@ -1,10 +1,11 @@
 import base64
 import dataclasses
 import datetime
+import enum
 import json
 import logging
 import typing
-from typing import Any, Optional
+from typing import Any, Final, Optional, Union
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -30,6 +31,103 @@ from . import component_structures as structures
 from . import backend_types_sql as bts
 from . import errors
 from .errors import ItemNotFoundError
+
+
+# ==== Annotation Filter Types for Search ====
+
+
+class GroupOperator(enum.StrEnum):
+    """Logical operators for combining filters in a group."""
+
+    AND = "and"
+    OR = "or"
+
+
+class KeyFilterOperator(enum.StrEnum):
+    """Operators for filtering by annotation key."""
+
+    CONTAINS = "contains"  # Key contains substring
+    EQUALS = "equals"  # Key equals exact string
+    EXISTS = "exists"  # Key exists (regardless of value)
+    IN_SET = "in_set"  # Key is in a set of values
+
+class ValueFilterOperator(enum.StrEnum):
+    """Operators for filtering by annotation value."""
+
+    CONTAINS = "contains"  # Value contains substring
+    EQUALS = "equals"  # Value equals exact string
+    IN_SET = "in_set"  # Value is in a set of values
+
+@dataclasses.dataclass(kw_only=True)
+class KeyFilter:
+    """Filter annotations by key patterns.
+
+    Examples:
+        - KeyFilter(operator=KeyFilterOperator.EXISTS, search_key="environment")
+          → Find runs that have an "environment" annotation
+        - KeyFilter(operator=KeyFilterOperator.CONTAINS, search_key="env", negate=True)
+          → Find runs that do NOT have any key containing "env"
+        - KeyFilter(operator=KeyFilterOperator.IN_SET, search_keys=["env", "team"])
+          → Find runs that have a key matching "env" or "team"
+    """
+
+    operator: KeyFilterOperator
+    search_key: str | None = None  # For EXISTS, EQUALS, CONTAINS operators
+    search_keys: list[str] | None = None  # For IN_SET operator
+    negate: bool = False  # If True, negates the operation (NOT EXISTS, NOT IN, etc.)
+
+
+@dataclasses.dataclass(kw_only=True)
+class ValueFilter:
+    """Filter annotations by value for a specific key.
+
+    Examples:
+        - ValueFilter(key="environment", operator=ValueFilterOperator.EQUALS, value="production")
+          → Find runs where annotation "environment" equals "production"
+        - ValueFilter(key="team", operator=ValueFilterOperator.IN_SET, values=["backend", "frontend"])
+          → Find runs where annotation "team" is either "backend" or "frontend"
+    """
+
+    key: str  # Exact key to match
+    operator: ValueFilterOperator
+    value: str | None = None  # For EQUALS, CONTAINS operators
+    values: list[str] | None = None  # For IN_SET operator
+    negate: bool = False  # If True, negates the operation
+
+
+# Type alias using Union to support forward reference
+AnnotationFilterType = Union[KeyFilter, ValueFilter, "FilterGroup"]
+
+
+@dataclasses.dataclass(kw_only=True)
+class FilterGroup:
+    """A group of filters combined with AND/OR logic.
+
+    Examples:
+        - FilterGroup(operator=GroupOperator.AND, filters=[...])
+          → All filters must match
+        - FilterGroup(operator=GroupOperator.OR, filters=[...])
+          → At least one filter must match
+        - FilterGroup(filters=[...])
+          → Defaults to AND logic when operator is not specified
+    """
+
+    # Union type for filter types that can appear in a group (recursive)
+    filters: list[AnnotationFilterType]
+    # Operator defaults to None, which is treated as AND logic
+    # TODO: add documetation why this is more user friendly
+    operator: GroupOperator | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class SearchFilters:
+    """Top-level search filters for pipeline runs.
+
+    The annotation_filters field accepts a FilterGroup that can contain
+    nested groups and individual filters for complex query logic.
+    """
+
+    annotation_filters: FilterGroup | None = None
 
 
 # ==== PipelineJobService
@@ -63,14 +161,310 @@ class GetPipelineRunResponse(PipelineRunResponse):
 class ListPipelineJobsResponse:
     pipeline_runs: list[PipelineRunResponse]
     next_page_token: str | None = None
+    debug_where_clause: str | None = None  # Populated when debug_where_clause=True in search()
 
 
 import sqlalchemy as sql
 from sqlalchemy import orm
 
 
+# Pagination constants
+OFFSET_KEY: Final[str] = "offset"
+PAGE_SIZE: Final[int] = 10
+
+
+def _compile_where_clauses_to_string(
+    session: orm.Session,
+    where_clauses: list[sql.ColumnElement[bool]],
+) -> str:
+    """Compile WHERE clauses to a SQL string for debugging.
+
+    Uses the dialect from the session's engine (SQLite, MySQL, etc.)
+    and inlines literal values for readability.
+    """
+    if not where_clauses:
+        return "(no where clauses)"
+
+    # Combine all clauses with AND
+    combined = sql.and_(*where_clauses) if len(where_clauses) > 1 else where_clauses[0]
+
+    # Get dialect from session's engine
+    dialect = session.bind.dialect if session.bind else None
+
+    try:
+        compiled = combined.compile(
+            dialect=dialect,
+            compile_kwargs={"literal_binds": True},
+        )
+        return str(compiled)
+    except Exception as e:
+        # Fallback if literal_binds fails (e.g., for complex types)
+        try:
+            compiled = combined.compile(dialect=dialect)
+            return f"{compiled} [params: {compiled.params}]"
+        except Exception:
+            return f"(failed to compile: {e})"
+
+
 class PipelineRunsApiService_Sql:
     PIPELINE_NAME_EXTRA_DATA_KEY = "pipeline_name"
+
+    def _query_pipeline_runs(
+        self,
+        *,
+        session: orm.Session,
+        where_clauses: list,
+        offset: int,
+        page_size: int,
+    ) -> list[bts.PipelineRun]:
+        """Query pipeline runs with pagination and filtering."""
+        return list(
+            session.scalars(
+                sql.select(bts.PipelineRun)
+                .where(*where_clauses)
+                .order_by(bts.PipelineRun.created_at.desc())
+                .offset(offset)
+                .limit(page_size)
+            ).all()
+        )
+
+    def _calculate_next_page_offset(
+        self,
+        *,
+        offset: int,
+        page_size: int,
+    ) -> int:
+        """Calculate the offset for the next page."""
+        return offset + page_size
+
+    def _get_next_page_token(
+        self,
+        *,
+        num_results: int,
+        page_size: int,
+        next_page_token_dict: dict[str, Any],
+    ) -> str | None:
+        """Get the next page token, or None if this is the last page."""
+        if num_results < page_size:
+            return None
+        return _encode_page_token(next_page_token_dict)
+
+    def _create_pipeline_run_response(
+        self,
+        session: orm.Session,
+        pipeline_run: bts.PipelineRun,
+        include_pipeline_names: bool = False,
+        include_execution_stats: bool = False,
+    ) -> PipelineRunResponse:
+        """Create a PipelineRunResponse with optional enrichment."""
+        response = PipelineRunResponse.from_db(pipeline_run)
+        if include_pipeline_names:
+            pipeline_name = None
+            extra_data = pipeline_run.extra_data or {}
+            if self.PIPELINE_NAME_EXTRA_DATA_KEY in extra_data:
+                pipeline_name = extra_data[self.PIPELINE_NAME_EXTRA_DATA_KEY]
+            else:
+                execution_node = session.get(
+                    bts.ExecutionNode, pipeline_run.root_execution_id
+                )
+                if execution_node:
+                    task_spec = structures.TaskSpec.from_json_dict(
+                        execution_node.task_spec
+                    )
+                    component_spec = task_spec.component_ref.spec
+                    if component_spec:
+                        pipeline_name = component_spec.name
+            response.pipeline_name = pipeline_name
+        if include_execution_stats:
+            execution_status_stats = self._calculate_execution_status_stats(
+                session=session, root_execution_id=pipeline_run.root_execution_id
+            )
+            response.execution_status_stats = {
+                status.value: count
+                for status, count in execution_status_stats.items()
+            }
+        return response
+
+    def _build_list_response(
+        self,
+        *,
+        session: orm.Session,
+        pipeline_runs: list[bts.PipelineRun],
+        next_page_token: str | None,
+        include_pipeline_names: bool = False,
+        include_execution_stats: bool = False,
+    ) -> ListPipelineJobsResponse:
+        """Build the ListPipelineJobsResponse from pipeline runs."""
+        return ListPipelineJobsResponse(
+            pipeline_runs=[
+                self._create_pipeline_run_response(
+                    session=session,
+                    pipeline_run=pipeline_run,
+                    include_pipeline_names=include_pipeline_names,
+                    include_execution_stats=include_execution_stats,
+                )
+                for pipeline_run in pipeline_runs
+            ],
+            next_page_token=next_page_token,
+        )
+
+    def _build_annotation_filter_clause(
+        self,
+        *,
+        filter: AnnotationFilterType,
+    ) -> sql.ColumnElement[bool]:
+        """Build a SQLAlchemy clause from a single annotation filter."""
+        if isinstance(filter, KeyFilter):
+            return self._build_key_filter_clause(filter=filter)
+        elif isinstance(filter, ValueFilter):
+            return self._build_value_filter_clause(filter=filter)
+        elif isinstance(filter, FilterGroup):
+            return self._build_filter_group_clause(group=filter)
+        else:
+            raise ValueError(f"Unknown filter type: {type(filter)}")
+
+    def _build_key_filter_clause(
+        self,
+        *,
+        filter: KeyFilter,
+    ) -> sql.ColumnElement[bool]:
+        """Build a SQLAlchemy clause for a KeyFilter.
+
+        KeyFilter checks for the existence or pattern of annotation keys.
+
+        Design Decision - EXISTS vs JOIN:
+            We use EXISTS subqueries instead of JOINs because:
+            1. Cleaner for complex boolean logic (AND/OR/NOT groups)
+            2. Automatically handles duplicates (no need for DISTINCT)
+            3. Easier to negate (~clause for NOT EXISTS)
+
+            The query optimizer will use the (key, value) index on
+            PipelineRunAnnotation for efficient lookups regardless of
+            whether EXISTS or JOIN is used.
+        """
+        # Base subquery to check annotation keys
+        subquery = sql.select(bts.PipelineRunAnnotation).where(
+            bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id
+        )
+
+        if filter.operator == KeyFilterOperator.EXISTS:
+            # Key exists (regardless of value)
+            subquery = subquery.where(bts.PipelineRunAnnotation.key != None)
+        elif filter.operator == KeyFilterOperator.EQUALS:
+            # Key equals exact string
+            if not filter.search_key:
+                raise ValueError("EQUALS operator requires 'search_key' to be set")
+            subquery = subquery.where(bts.PipelineRunAnnotation.key == filter.search_key)
+        elif filter.operator == KeyFilterOperator.CONTAINS:
+            # Key contains substring
+            if not filter.search_key:
+                raise ValueError("CONTAINS operator requires 'search_key' to be set")
+            subquery = subquery.where(
+                bts.PipelineRunAnnotation.key.contains(filter.search_key)
+            )
+        elif filter.operator == KeyFilterOperator.IN_SET:
+            # Key is in a set of values
+            if not filter.search_keys:
+                raise ValueError("IN_SET operator requires 'search_keys' to be set")
+            subquery = subquery.where(bts.PipelineRunAnnotation.key.in_(filter.search_keys))
+        else:
+            raise ValueError(f"Unknown KeyFilterOperator: {filter.operator}")
+
+        clause = subquery.exists()
+
+        if filter.negate:
+            clause = ~clause
+
+        return clause
+
+    def _build_value_filter_clause(
+        self,
+        *,
+        filter: ValueFilter,
+    ) -> sql.ColumnElement[bool]:
+        """Build a SQLAlchemy clause for a ValueFilter.
+
+        ValueFilter checks for value patterns on a specific key.
+
+        See _build_key_filter_clause for design decision on EXISTS vs JOIN.
+        """
+        # Base subquery: must match the exact key first
+        subquery = sql.select(bts.PipelineRunAnnotation).where(
+            bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id,
+            bts.PipelineRunAnnotation.key == filter.key,
+        )
+
+        if filter.operator == ValueFilterOperator.EQUALS:
+            # Value equals exact string
+            if filter.value is None:
+                raise ValueError("EQUALS operator requires 'value' to be set")
+            subquery = subquery.where(bts.PipelineRunAnnotation.value == filter.value)
+        elif filter.operator == ValueFilterOperator.CONTAINS:
+            # Value contains substring
+            if filter.value is None:
+                raise ValueError("CONTAINS operator requires 'value' to be set")
+            subquery = subquery.where(
+                bts.PipelineRunAnnotation.value.contains(filter.value)
+            )
+        elif filter.operator == ValueFilterOperator.IN_SET:
+            # Value is in a set of values
+            if not filter.values:
+                raise ValueError("IN_SET operator requires 'values' to be set")
+            subquery = subquery.where(
+                bts.PipelineRunAnnotation.value.in_(filter.values)
+            )
+        else:
+            raise ValueError(f"Unknown ValueFilterOperator: {filter.operator}")
+
+        clause = subquery.exists()
+
+        if filter.negate:
+            clause = ~clause
+
+        return clause
+
+    def _build_filter_group_clause(
+        self,
+        *,
+        group: FilterGroup,
+    ) -> sql.ColumnElement[bool]:
+        """Build a SQLAlchemy clause for a FilterGroup.
+
+        Combines multiple filters with AND or OR logic.
+        """
+        if not group.filters:
+            # Empty group matches everything
+            return sql.true()
+
+        clauses = [
+            self._build_annotation_filter_clause(filter=f) for f in group.filters
+        ]
+
+        if group.operator == GroupOperator.OR:
+            return sql.or_(*clauses)
+        else:
+            # If operator is missing, defaults to AND
+            return sql.and_(*clauses)
+
+    def _build_search_where_clauses(
+        self,
+        *,
+        filters: SearchFilters | None,
+    ) -> list[sql.ColumnElement[bool]]:
+        """Build where clauses from SearchFilters."""
+        where_clauses: list[sql.ColumnElement[bool]] = []
+
+        if filters is None:
+            return where_clauses
+
+        # Handle annotation filters
+        if filters.annotation_filters is not None:
+            annotation_clause = self._build_filter_group_clause(
+                group=filters.annotation_filters
+            )
+            where_clauses.append(annotation_clause)
+
+        return where_clauses
 
     def create(
         self,
@@ -156,22 +550,119 @@ class PipelineRunsApiService_Sql:
             execution_node.extra_data["desired_state"] = "TERMINATED"
         session.commit()
 
+    def search(
+        self,
+        *,
+        session: orm.Session,
+        filters: SearchFilters | None = None,
+        page_token: str | None = None,
+        include_pipeline_names: bool = False,
+        include_execution_stats: bool = False,
+        debug_where_clause: bool = False,
+    ) -> ListPipelineJobsResponse:
+        """Search pipeline runs with advanced filtering capabilities.
+
+        This is an enhanced version of `list()` that supports filtering by annotations.
+
+        **Parameters:**
+        - **filters**: Search filters including annotation filters
+        - **page_token**: Pagination token from a previous search call
+        - **include_pipeline_names**: Whether to include pipeline names in responses
+        - **include_execution_stats**: Whether to include execution statistics
+        - **debug_where_clause**: If True, includes the compiled SQL WHERE clause in the response
+
+        **Returns:** `ListPipelineJobsResponse` with matching pipeline runs.
+
+        **Example 1:** Find runs with 'environment' annotation equal to 'production'
+
+        ```python
+        search(session=session, filters=SearchFilters(
+            annotation_filters=FilterGroup(
+                operator=GroupOperator.AND,
+                filters=[
+                    ValueFilter(
+                        key="environment",
+                        operator=ValueFilterOperator.EQUALS,
+                        value="production"
+                    )
+                ]
+            )
+        ))
+        ```
+
+        **Example 2:** Find runs where 'team' is either 'backend' or 'frontend'
+
+        ```python
+        search(session=session, filters=SearchFilters(
+            annotation_filters=FilterGroup(
+                operator=GroupOperator.OR,
+                filters=[
+                    ValueFilter(
+                        key="team",
+                        operator=ValueFilterOperator.EQUALS,
+                        value="backend"
+                    ),
+                    ValueFilter(
+                        key="team",
+                        operator=ValueFilterOperator.EQUALS,
+                        value="frontend"
+                    )
+                ]
+            )
+        ))
+        ```
+        """
+        page_token_dict = _decode_page_token(page_token)
+        offset = page_token_dict.get(OFFSET_KEY, 0)
+
+        where_clauses = self._build_search_where_clauses(filters=filters)
+
+        pipeline_runs = self._query_pipeline_runs(
+            session=session,
+            where_clauses=where_clauses,
+            offset=offset,
+            page_size=PAGE_SIZE,
+        )
+
+        next_page_offset = self._calculate_next_page_offset(
+            offset=offset, page_size=PAGE_SIZE
+        )
+        next_page_token_dict = {OFFSET_KEY: next_page_offset}
+        next_page_token = self._get_next_page_token(
+            num_results=len(pipeline_runs),
+            page_size=PAGE_SIZE,
+            next_page_token_dict=next_page_token_dict,
+        )
+
+        response = self._build_list_response(
+            session=session,
+            pipeline_runs=pipeline_runs,
+            next_page_token=next_page_token,
+            include_pipeline_names=include_pipeline_names,
+            include_execution_stats=include_execution_stats,
+        )
+
+        if debug_where_clause:
+            response.debug_where_clause = _compile_where_clauses_to_string(
+                session=session,
+                where_clauses=where_clauses,
+            )
+
+        return response
+
     # Note: This method must be last to not shadow the "list" type
     def list(
         self,
         *,
         session: orm.Session,
         page_token: str | None = None,
-        # page_size: int  = 10,
         filter: str | None = None,
         current_user: str | None = None,
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
     ) -> ListPipelineJobsResponse:
         page_token_dict = _decode_page_token(page_token)
-        OFFSET_KEY = "offset"
         offset = page_token_dict.get(OFFSET_KEY, 0)
-        page_size = 10
 
         FILTER_KEY = "filter"
         if page_token:
@@ -200,58 +691,30 @@ class PipelineRunsApiService_Sql:
                     where_clauses.append(bts.PipelineRun.created_by == None)
             else:
                 raise NotImplementedError(f"Unsupported filter {filter}.")
-        pipeline_runs = list(
-            session.scalars(
-                sql.select(bts.PipelineRun)
-                .where(*where_clauses)
-                .order_by(bts.PipelineRun.created_at.desc())
-                .offset(offset)
-                .limit(page_size)
-            ).all()
+
+        pipeline_runs = self._query_pipeline_runs(
+            session=session,
+            where_clauses=where_clauses,
+            offset=offset,
+            page_size=PAGE_SIZE,
         )
-        next_page_offset = offset + page_size
+
+        next_page_offset = self._calculate_next_page_offset(
+            offset=offset, page_size=PAGE_SIZE
+        )
         next_page_token_dict = {OFFSET_KEY: next_page_offset, FILTER_KEY: filter}
-        next_page_token = _encode_page_token(next_page_token_dict)
-        if len(pipeline_runs) < page_size:
-            next_page_token = None
+        next_page_token = self._get_next_page_token(
+            num_results=len(pipeline_runs),
+            page_size=PAGE_SIZE,
+            next_page_token_dict=next_page_token_dict,
+        )
 
-        def create_pipeline_run_response(
-            pipeline_run: bts.PipelineRun,
-        ) -> PipelineRunResponse:
-            response = PipelineRunResponse.from_db(pipeline_run)
-            if include_pipeline_names:
-                pipeline_name = None
-                extra_data = pipeline_run.extra_data or {}
-                if self.PIPELINE_NAME_EXTRA_DATA_KEY in extra_data:
-                    pipeline_name = extra_data[self.PIPELINE_NAME_EXTRA_DATA_KEY]
-                else:
-                    execution_node = session.get(
-                        bts.ExecutionNode, pipeline_run.root_execution_id
-                    )
-                    if execution_node:
-                        task_spec = structures.TaskSpec.from_json_dict(
-                            execution_node.task_spec
-                        )
-                        component_spec = task_spec.component_ref.spec
-                        if component_spec:
-                            pipeline_name = component_spec.name
-                response.pipeline_name = pipeline_name
-            if include_execution_stats:
-                execution_status_stats = self._calculate_execution_status_stats(
-                    session=session, root_execution_id=pipeline_run.root_execution_id
-                )
-                response.execution_status_stats = {
-                    status.value: count
-                    for status, count in execution_status_stats.items()
-                }
-            return response
-
-        return ListPipelineJobsResponse(
-            pipeline_runs=[
-                create_pipeline_run_response(pipeline_run)
-                for pipeline_run in pipeline_runs
-            ],
+        return self._build_list_response(
+            session=session,
+            pipeline_runs=pipeline_runs,
             next_page_token=next_page_token,
+            include_pipeline_names=include_pipeline_names,
+            include_execution_stats=include_execution_stats,
         )
 
     def _calculate_execution_status_stats(
