@@ -390,6 +390,30 @@ def _setup_routes_internal(
             permissions=permissions,
         )
 
+    ### Secrets routes
+    secrets_service = api_server_sql.SecretsApiService()
+
+    router.get("/api/secrets/", tags=["secrets"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(secrets_service.list_secrets, parameter_name="user_id")
+        )
+    )
+    router.post("/api/secrets/", tags=["secrets"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(secrets_service.create_secret, parameter_name="user_id")
+        )
+    )
+    router.put("/api/secrets/{secret_id}", tags=["secrets"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(secrets_service.update_secret, parameter_name="user_id")
+        )
+    )
+    router.delete("/api/secrets/{secret_id}", tags=["secrets"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(secrets_service.delete_secret, parameter_name="user_id")
+        )
+    )
+
     ### Component library routes
 
     component_service = components_api.ComponentService()
