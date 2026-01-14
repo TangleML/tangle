@@ -269,9 +269,97 @@ def _setup_routes_internal(
     router.get("/api/pipeline_runs/", tags=["pipelineRuns"], **default_config)(
         inject_session_dependency(list_pipeline_runs_func)
     )
-    router.post("/api/pipeline_runs/search/", tags=["pipelineRuns"], **default_config)(
-        inject_session_dependency(pipeline_run_service.search)
-    )
+    router.post(
+        "/api/pipeline_runs/search/",
+        tags=["pipelineRuns"],
+        summary="Search Pipeline Runs",
+        description="""Search pipeline runs with annotation filters.
+
+## What is an Annotation?
+
+An annotation is a **key-value pair** attached to a pipeline run.
+For example the following annotations (i.e. key = value):
+- `environment` = `production`
+- `team` = `backend`
+- `priority` = `high`
+
+## Filter Types
+
+### KeyFilter - Search by annotation key
+| Operator | Description |
+|----------|-------------|
+| `exists` | Key exists (any value) |
+| `equals` | Key exactly matches string |
+| `contains` | Key contains substring |
+| `in_set` | Key matches one of multiple values |
+
+### ValueFilter - Search by annotation value (across ALL annotations)
+| Operator | Description |
+|----------|-------------|
+| `equals` | Value exactly matches string |
+| `contains` | Value contains substring |
+| `in_set` | Value matches one of multiple values |
+
+### FilterGroup - Combine filters with logic
+| Operator | Description |
+|----------|-------------|
+| `and` | ALL filters must match |
+| `or` | ANY filter must match |
+
+All filters support `negate: true` to invert the condition (e.g., NOT equals).
+
+---
+
+## Examples
+
+### 1. Key equals a string
+Find runs where annotation key equals "environment":
+```json
+{
+  "annotation_filters": {
+    "filters": [
+      {"operator": "equals", "key": "environment"}
+    ]
+  }
+}
+```
+
+### 2. Key contains substring AND value in set
+Find runs where key contains "env" AND value is "prod" or "staging":
+```json
+{
+  "annotation_filters": {
+    "filters": [
+      {"operator": "contains", "key": "env"},
+      {"operator": "in_set", "values": ["prod", "staging"]}
+    ],
+    "operator": "and"
+  }
+}
+```
+
+### 3. Complex: (key contains OR value contains) AND key NOT contains
+Find runs where (key contains "env" OR any value contains "prod") AND key NOT contains "deprecated":
+```json
+{
+  "annotation_filters": {
+    "filters": [
+      {
+        "filters": [
+          {"operator": "contains", "key": "env"},
+          {"operator": "contains", "value": "prod"}
+        ],
+        "operator": "or"
+      },
+      {"operator": "contains", "value": "deprecated", "negate": true}
+    ],
+    "operator": "and"
+  }
+}
+```
+""",
+        **default_config,
+    )(inject_session_dependency(pipeline_run_service.search))
     router.get("/api/pipeline_runs/{id}", tags=["pipelineRuns"], **default_config)(
         inject_session_dependency(pipeline_run_service.get)
     )

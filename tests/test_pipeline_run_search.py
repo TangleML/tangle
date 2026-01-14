@@ -111,7 +111,7 @@ class TestPipelineRunSearch:
                     filters=[
                         api_server_sql.KeyFilter(
                             operator=api_server_sql.KeyFilterOperator.CONTAINS,
-                            search_key="env",
+                            key="env",
                         )
                     ],
                 )
@@ -144,7 +144,7 @@ class TestPipelineRunSearch:
                     filters=[
                         api_server_sql.KeyFilter(
                             operator=api_server_sql.KeyFilterOperator.EQUALS,
-                            search_key="environment",
+                            key="environment",
                         )
                     ],
                 )
@@ -177,7 +177,7 @@ class TestPipelineRunSearch:
                     filters=[
                         api_server_sql.KeyFilter(
                             operator=api_server_sql.KeyFilterOperator.EQUALS,
-                            search_key="environment",
+                            key="environment",
                             negate=True,
                         )
                     ],
@@ -211,7 +211,7 @@ class TestPipelineRunSearch:
                     filters=[
                         api_server_sql.KeyFilter(
                             operator=api_server_sql.KeyFilterOperator.IN_SET,
-                            search_keys=["environment", "team"],
+                            keys=["environment", "team"],
                         )
                     ],
                 )
@@ -233,7 +233,10 @@ class TestPipelineRunSearch:
             assert response.debug_where_clause == expected
 
     def test_search_with_value_contains_filter(self):
-        """Test search with ValueFilter CONTAINS operator."""
+        """Test search with ValueFilter CONTAINS operator.
+
+        Searches across ALL annotation values for substring match.
+        """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
 
@@ -243,7 +246,6 @@ class TestPipelineRunSearch:
                     operator=api_server_sql.GroupOperator.AND,
                     filters=[
                         api_server_sql.ValueFilter(
-                            key="environment",
                             operator=api_server_sql.ValueFilterOperator.CONTAINS,
                             value="prod",
                         )
@@ -262,13 +264,15 @@ class TestPipelineRunSearch:
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 'FROM pipeline_run_annotation, pipeline_run \n'
                 'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation."key" = \'environment\' '
                 'AND (pipeline_run_annotation.value LIKE \'%\' || \'prod\' || \'%\'))'
             )
             assert response.debug_where_clause == expected
 
     def test_search_with_value_equals_filter(self):
-        """Test search with ValueFilter EQUALS operator."""
+        """Test search with ValueFilter EQUALS operator.
+
+        Searches across ALL annotation values for exact match.
+        """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
 
@@ -278,7 +282,6 @@ class TestPipelineRunSearch:
                     operator=api_server_sql.GroupOperator.AND,
                     filters=[
                         api_server_sql.ValueFilter(
-                            key="environment",
                             operator=api_server_sql.ValueFilterOperator.EQUALS,
                             value="production",
                         )
@@ -297,13 +300,15 @@ class TestPipelineRunSearch:
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 'FROM pipeline_run_annotation, pipeline_run \n'
                 'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation."key" = \'environment\' '
                 'AND pipeline_run_annotation.value = \'production\')'
             )
             assert response.debug_where_clause == expected
 
     def test_search_with_value_equals_negate_filter(self):
-        """Test search with ValueFilter EQUALS operator with negate=True."""
+        """Test search with ValueFilter EQUALS operator with negate=True.
+
+        Searches across ALL annotation values for exact match, then negates.
+        """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
 
@@ -313,7 +318,6 @@ class TestPipelineRunSearch:
                     operator=api_server_sql.GroupOperator.AND,
                     filters=[
                         api_server_sql.ValueFilter(
-                            key="environment",
                             operator=api_server_sql.ValueFilterOperator.EQUALS,
                             value="production",
                             negate=True,
@@ -333,13 +337,15 @@ class TestPipelineRunSearch:
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 'FROM pipeline_run_annotation, pipeline_run \n'
                 'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation."key" = \'environment\' '
                 'AND pipeline_run_annotation.value = \'production\'))'
             )
             assert response.debug_where_clause == expected
 
     def test_search_with_value_in_set_filter(self):
-        """Test search with ValueFilter IN_SET operator."""
+        """Test search with ValueFilter IN_SET operator.
+
+        Searches across ALL annotation values for set membership.
+        """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
 
@@ -349,7 +355,6 @@ class TestPipelineRunSearch:
                     operator=api_server_sql.GroupOperator.AND,
                     filters=[
                         api_server_sql.ValueFilter(
-                            key="team",
                             operator=api_server_sql.ValueFilterOperator.IN_SET,
                             values=["backend", "frontend"],
                         )
@@ -368,7 +373,6 @@ class TestPipelineRunSearch:
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 'FROM pipeline_run_annotation, pipeline_run \n'
                 'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation."key" = \'team\' '
                 'AND pipeline_run_annotation.value IN (\'backend\', \'frontend\'))'
             )
             assert response.debug_where_clause == expected
@@ -379,11 +383,11 @@ class TestPipelineRunSearch:
         Structure:
             Root Group (OR):
             ├── Group 1 (OR):
-            │   ├── KeyFilter(CONTAINS, search_key="env")
-            │   └── ValueFilter(EQUALS, key="team", value="admin", negate=True)
+            │   ├── KeyFilter(CONTAINS, key="env")
+            │   └── ValueFilter(EQUALS, value="admin", negate=True)
             └── Group 2 (AND):
-                ├── KeyFilter(EXISTS, search_key="status", negate=True)
-                └── ValueFilter(IN_SET, key="priority", values=["high", "critical"])
+                ├── KeyFilter(EXISTS, key="status", negate=True)
+                └── ValueFilter(IN_SET, values=["high", "critical"])
         """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
@@ -399,10 +403,9 @@ class TestPipelineRunSearch:
                             filters=[
                                 api_server_sql.KeyFilter(
                                     operator=api_server_sql.KeyFilterOperator.CONTAINS,
-                                    search_key="env",
+                                    key="env",
                                 ),
                                 api_server_sql.ValueFilter(
-                                    key="team",
                                     operator=api_server_sql.ValueFilterOperator.EQUALS,
                                     value="admin",
                                     negate=True,
@@ -415,11 +418,10 @@ class TestPipelineRunSearch:
                             filters=[
                                 api_server_sql.KeyFilter(
                                     operator=api_server_sql.KeyFilterOperator.EXISTS,
-                                    search_key="status",
+                                    key="status",
                                     negate=True,
                                 ),
                                 api_server_sql.ValueFilter(
-                                    key="priority",
                                     operator=api_server_sql.ValueFilterOperator.IN_SET,
                                     values=["high", "critical"],
                                 ),
@@ -439,18 +441,18 @@ class TestPipelineRunSearch:
             #
             # Root Group (OR):
             # ├── Group 1 (OR):
-            # │   ├── KeyFilter(CONTAINS, search_key="env")
-            # │   └── ValueFilter(EQUALS, key="team", value="admin", negate=True)
+            # │   ├── KeyFilter(CONTAINS, key="env")
+            # │   └── ValueFilter(EQUALS, value="admin", negate=True)
             # └── Group 2 (AND):
-            #     ├── KeyFilter(EXISTS, search_key="status", negate=True)
-            #     └── ValueFilter(IN_SET, key="priority", values=["high", "critical"])
+            #     ├── KeyFilter(EXISTS, key="status", negate=True)
+            #     └── ValueFilter(IN_SET, values=["high", "critical"])
             #
             expected = (
                 # ===== Root Group (OR) =====
                 # |
                 # |-- Group 1 (OR) ------------------------------------------
                 # |   |
-                # |   |-- Filter 1: KeyFilter(CONTAINS, search_key="env")
+                # |   |-- Filter 1: KeyFilter(CONTAINS, key="env")
                     '(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
                         'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                         'FROM pipeline_run_annotation, pipeline_run \n'
@@ -460,12 +462,11 @@ class TestPipelineRunSearch:
                 # |   OR
                     'OR '
                 # |   |
-                # |   |-- Filter 2: ValueFilter(EQUALS, key="team", value="admin", negate=True)
+                # |   |-- Filter 2: ValueFilter(EQUALS, value="admin", negate=True)
                     'NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
                         'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                         'FROM pipeline_run_annotation, pipeline_run \n'
                         'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                        'AND pipeline_run_annotation."key" = \'team\' '
                         'AND pipeline_run_annotation.value = \'admin\')) '
                 # |
                 # OR (Root level)
@@ -473,7 +474,7 @@ class TestPipelineRunSearch:
                 # |
                 # |-- Group 2 (AND) ------------------------------------------
                 # |   |
-                # |   |-- Filter 1: KeyFilter(EXISTS, search_key="status", negate=True)
+                # |   |-- Filter 1: KeyFilter(EXISTS, key="status", negate=True)
                     'NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
                         'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                         'FROM pipeline_run_annotation, pipeline_run \n'
@@ -483,12 +484,11 @@ class TestPipelineRunSearch:
                 # |   AND
                     'AND '
                 # |   |
-                # |   |-- Filter 2: ValueFilter(IN_SET, key="priority", values=["high", "critical"])
+                # |   |-- Filter 2: ValueFilter(IN_SET, values=["high", "critical"])
                     '(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
                         'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                         'FROM pipeline_run_annotation, pipeline_run \n'
                         'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                        'AND pipeline_run_annotation."key" = \'priority\' '
                         'AND pipeline_run_annotation.value IN (\'high\', \'critical\')))'
                 # ===== End Root Group =====
             )

@@ -63,32 +63,33 @@ class KeyFilter:
     """Filter annotations by key patterns.
 
     Examples:
-        - KeyFilter(operator=KeyFilterOperator.EXISTS, search_key="environment")
+        - KeyFilter(operator=KeyFilterOperator.EXISTS, key="environment")
           → Find runs that have an "environment" annotation
-        - KeyFilter(operator=KeyFilterOperator.CONTAINS, search_key="env", negate=True)
+        - KeyFilter(operator=KeyFilterOperator.CONTAINS, key="env", negate=True)
           → Find runs that do NOT have any key containing "env"
-        - KeyFilter(operator=KeyFilterOperator.IN_SET, search_keys=["env", "team"])
+        - KeyFilter(operator=KeyFilterOperator.IN_SET, keys=["env", "team"])
           → Find runs that have a key matching "env" or "team"
     """
 
     operator: KeyFilterOperator
-    search_key: str | None = None  # For EXISTS, EQUALS, CONTAINS operators
-    search_keys: list[str] | None = None  # For IN_SET operator
+    key: str | None = None  # For EXISTS, EQUALS, CONTAINS operators
+    keys: list[str] | None = None  # For IN_SET operator
     negate: bool = False  # If True, negates the operation (NOT EXISTS, NOT IN, etc.)
 
 
 @dataclasses.dataclass(kw_only=True)
 class ValueFilter:
-    """Filter annotations by value for a specific key.
+    """Filter annotations by value patterns across ALL annotation values.
 
     Examples:
-        - ValueFilter(key="environment", operator=ValueFilterOperator.EQUALS, value="production")
-          → Find runs where annotation "environment" equals "production"
-        - ValueFilter(key="team", operator=ValueFilterOperator.IN_SET, values=["backend", "frontend"])
-          → Find runs where annotation "team" is either "backend" or "frontend"
+        - ValueFilter(operator=ValueFilterOperator.EQUALS, value="production")
+          → Find runs where ANY annotation has value "production"
+        - ValueFilter(operator=ValueFilterOperator.CONTAINS, value="error")
+          → Find runs where ANY annotation value contains "error"
+        - ValueFilter(operator=ValueFilterOperator.IN_SET, values=["high", "critical"])
+          → Find runs where ANY annotation value is "high" or "critical"
     """
 
-    key: str  # Exact key to match
     operator: ValueFilterOperator
     value: str | None = None  # For EQUALS, CONTAINS operators
     values: list[str] | None = None  # For IN_SET operator
@@ -352,21 +353,21 @@ class PipelineRunsApiService_Sql:
             subquery = subquery.where(bts.PipelineRunAnnotation.key != None)
         elif filter.operator == KeyFilterOperator.EQUALS:
             # Key equals exact string
-            if not filter.search_key:
-                raise ValueError("EQUALS operator requires 'search_key' to be set")
-            subquery = subquery.where(bts.PipelineRunAnnotation.key == filter.search_key)
+            if not filter.key:
+                raise ValueError("EQUALS operator requires 'key' to be set")
+            subquery = subquery.where(bts.PipelineRunAnnotation.key == filter.key)
         elif filter.operator == KeyFilterOperator.CONTAINS:
             # Key contains substring
-            if not filter.search_key:
-                raise ValueError("CONTAINS operator requires 'search_key' to be set")
+            if not filter.key:
+                raise ValueError("CONTAINS operator requires 'key' to be set")
             subquery = subquery.where(
-                bts.PipelineRunAnnotation.key.contains(filter.search_key)
+                bts.PipelineRunAnnotation.key.contains(filter.key)
             )
         elif filter.operator == KeyFilterOperator.IN_SET:
             # Key is in a set of values
-            if not filter.search_keys:
-                raise ValueError("IN_SET operator requires 'search_keys' to be set")
-            subquery = subquery.where(bts.PipelineRunAnnotation.key.in_(filter.search_keys))
+            if not filter.keys:
+                raise ValueError("IN_SET operator requires 'keys' to be set")
+            subquery = subquery.where(bts.PipelineRunAnnotation.key.in_(filter.keys))
         else:
             raise ValueError(f"Unknown KeyFilterOperator: {filter.operator}")
 
@@ -384,14 +385,13 @@ class PipelineRunsApiService_Sql:
     ) -> sql.ColumnElement[bool]:
         """Build a SQLAlchemy clause for a ValueFilter.
 
-        ValueFilter checks for value patterns on a specific key.
+        ValueFilter searches across ALL annotation values for matching patterns.
 
         See _build_key_filter_clause for design decision on EXISTS vs JOIN.
         """
-        # Base subquery: must match the exact key first
+        # Base subquery - searches across all annotation values
         subquery = sql.select(bts.PipelineRunAnnotation).where(
             bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id,
-            bts.PipelineRunAnnotation.key == filter.key,
         )
 
         if filter.operator == ValueFilterOperator.EQUALS:
@@ -573,15 +573,28 @@ class PipelineRunsApiService_Sql:
 
         **Returns:** `ListPipelineJobsResponse` with matching pipeline runs.
 
-        **Example 1:** Find runs with 'environment' annotation equal to 'production'
+        **Example 1:** Find runs that have an 'environment' annotation key
 
         ```python
         search(session=session, filters=SearchFilters(
             annotation_filters=FilterGroup(
-                operator=GroupOperator.AND,
+                filters=[
+                    KeyFilter(
+                        operator=KeyFilterOperator.EQUALS,
+                        key="environment"
+                    )
+                ]
+            )
+        ))
+        ```
+
+        **Example 2:** Find runs where ANY annotation value equals 'production'
+
+        ```python
+        search(session=session, filters=SearchFilters(
+            annotation_filters=FilterGroup(
                 filters=[
                     ValueFilter(
-                        key="environment",
                         operator=ValueFilterOperator.EQUALS,
                         value="production"
                     )
@@ -590,22 +603,15 @@ class PipelineRunsApiService_Sql:
         ))
         ```
 
-        **Example 2:** Find runs where 'team' is either 'backend' or 'frontend'
+        **Example 3:** Find runs where ANY annotation value contains 'error'
 
         ```python
         search(session=session, filters=SearchFilters(
             annotation_filters=FilterGroup(
-                operator=GroupOperator.OR,
                 filters=[
                     ValueFilter(
-                        key="team",
-                        operator=ValueFilterOperator.EQUALS,
-                        value="backend"
-                    ),
-                    ValueFilter(
-                        key="team",
-                        operator=ValueFilterOperator.EQUALS,
-                        value="frontend"
+                        operator=ValueFilterOperator.CONTAINS,
+                        value="error"
                     )
                 ]
             )

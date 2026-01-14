@@ -468,6 +468,9 @@ class ContainerExecution(_TableBase):
 PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME: Final[str] = (
     "ix_pipeline_run_annotation_key_value"
 )
+PIPELINE_RUN_ANNOTATION_VALUE_INDEX_NAME: Final[str] = (
+    "ix_pipeline_run_annotation_value"
+)
 
 class PipelineRunAnnotation(_TableBase):
     __tablename__ = "pipeline_run_annotation"
@@ -486,6 +489,12 @@ class PipelineRunAnnotation(_TableBase):
         sql.Index(
             PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME,
             "key",
+            "value",
+        ),
+        # Index for searching pipeline runs by annotation value only (across all keys)
+        # Enables efficient queries like "find runs where any annotation value='production'"
+        sql.Index(
+            PIPELINE_RUN_ANNOTATION_VALUE_INDEX_NAME,
             "value",
         ),
     )
