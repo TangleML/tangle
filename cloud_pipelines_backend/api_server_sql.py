@@ -310,119 +310,88 @@ class PipelineRunsApiService_Sql:
             next_page_token=next_page_token,
         )
 
-    def _build_annotation_filter_clause(
-        self,
-        *,
-        filter: AnnotationFilterType,
-    ) -> sql.ColumnElement[bool]:
-        """Build a SQLAlchemy clause from a single annotation filter."""
-        if isinstance(filter, KeyFilter):
-            return self._build_key_filter_clause(filter=filter)
-        elif isinstance(filter, ValueFilter):
-            return self._build_value_filter_clause(filter=filter)
-        elif isinstance(filter, FilterGroup):
-            return self._build_filter_group_clause(group=filter)
-        else:
-            raise ValueError(f"Unknown filter type: {type(filter)}")
-
-    def _build_key_filter_clause(
+    def _build_key_filter_condition(
         self,
         *,
         filter: KeyFilter,
     ) -> sql.ColumnElement[bool]:
-        """Build a SQLAlchemy clause for a KeyFilter.
+        """Build a SQLAlchemy condition for a KeyFilter.
 
-        KeyFilter checks for the existence or pattern of annotation keys.
+        Returns just the WHERE condition (not wrapped in EXISTS).
+        The condition is applied to the same annotation row when combined
+        with other filters in a FilterGroup.
 
-        Design Decision - EXISTS vs JOIN:
-            We use EXISTS subqueries instead of JOINs because:
-            1. Cleaner for complex boolean logic (AND/OR/NOT groups)
-            2. Automatically handles duplicates (no need for DISTINCT)
-            3. Easier to negate (~clause for NOT EXISTS)
+        Args:
+            filter: KeyFilter with operator, key/keys, and optional negate flag.
 
-            The query optimizer will use the (key, value) index on
-            PipelineRunAnnotation for efficient lookups regardless of
-            whether EXISTS or JOIN is used.
+        Returns:
+            A SQLAlchemy condition expression for the key filter.
         """
-        # Base subquery to check annotation keys
-        subquery = sql.select(bts.PipelineRunAnnotation).where(
-            bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id
-        )
-
         if filter.operator == KeyFilterOperator.EXISTS:
             # Key exists (regardless of value)
-            subquery = subquery.where(bts.PipelineRunAnnotation.key != None)
+            condition = bts.PipelineRunAnnotation.key != None
         elif filter.operator == KeyFilterOperator.EQUALS:
             # Key equals exact string
             if not filter.key:
                 raise ValueError("EQUALS operator requires 'key' to be set")
-            subquery = subquery.where(bts.PipelineRunAnnotation.key == filter.key)
+            condition = bts.PipelineRunAnnotation.key == filter.key
         elif filter.operator == KeyFilterOperator.CONTAINS:
             # Key contains substring
             if not filter.key:
                 raise ValueError("CONTAINS operator requires 'key' to be set")
-            subquery = subquery.where(
-                bts.PipelineRunAnnotation.key.contains(filter.key)
-            )
+            condition = bts.PipelineRunAnnotation.key.contains(filter.key)
         elif filter.operator == KeyFilterOperator.IN_SET:
             # Key is in a set of values
             if not filter.keys:
                 raise ValueError("IN_SET operator requires 'keys' to be set")
-            subquery = subquery.where(bts.PipelineRunAnnotation.key.in_(filter.keys))
+            condition = bts.PipelineRunAnnotation.key.in_(filter.keys)
         else:
             raise ValueError(f"Unknown KeyFilterOperator: {filter.operator}")
 
-        clause = subquery.exists()
-
         if filter.negate:
-            clause = ~clause
+            condition = ~condition
 
-        return clause
+        return condition
 
-    def _build_value_filter_clause(
+    def _build_value_filter_condition(
         self,
         *,
         filter: ValueFilter,
     ) -> sql.ColumnElement[bool]:
-        """Build a SQLAlchemy clause for a ValueFilter.
+        """Build a SQLAlchemy condition for a ValueFilter.
 
-        ValueFilter searches across ALL annotation values for matching patterns.
+        Returns just the WHERE condition (not wrapped in EXISTS).
+        The condition is applied to the same annotation row when combined
+        with other filters in a FilterGroup.
 
-        See _build_key_filter_clause for design decision on EXISTS vs JOIN.
+        Args:
+            filter: ValueFilter with operator, value/values, and optional negate flag.
+
+        Returns:
+            A SQLAlchemy condition expression for the value filter.
         """
-        # Base subquery - searches across all annotation values
-        subquery = sql.select(bts.PipelineRunAnnotation).where(
-            bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id,
-        )
-
         if filter.operator == ValueFilterOperator.EQUALS:
             # Value equals exact string
             if filter.value is None:
                 raise ValueError("EQUALS operator requires 'value' to be set")
-            subquery = subquery.where(bts.PipelineRunAnnotation.value == filter.value)
+            condition = bts.PipelineRunAnnotation.value == filter.value
         elif filter.operator == ValueFilterOperator.CONTAINS:
             # Value contains substring
             if filter.value is None:
                 raise ValueError("CONTAINS operator requires 'value' to be set")
-            subquery = subquery.where(
-                bts.PipelineRunAnnotation.value.contains(filter.value)
-            )
+            condition = bts.PipelineRunAnnotation.value.contains(filter.value)
         elif filter.operator == ValueFilterOperator.IN_SET:
             # Value is in a set of values
             if not filter.values:
                 raise ValueError("IN_SET operator requires 'values' to be set")
-            subquery = subquery.where(
-                bts.PipelineRunAnnotation.value.in_(filter.values)
-            )
+            condition = bts.PipelineRunAnnotation.value.in_(filter.values)
         else:
             raise ValueError(f"Unknown ValueFilterOperator: {filter.operator}")
 
-        clause = subquery.exists()
-
         if filter.negate:
-            clause = ~clause
+            condition = ~condition
 
-        return clause
+        return condition
 
     def _build_filter_group_clause(
         self,
@@ -431,20 +400,80 @@ class PipelineRunsApiService_Sql:
     ) -> sql.ColumnElement[bool]:
         """Build a SQLAlchemy clause for a FilterGroup.
 
-        Combines multiple filters with AND or OR logic.
+        Design Decision - Single EXISTS per group:
+            All simple filters (KeyFilter, ValueFilter) within the same group
+            are merged into a SINGLE EXISTS subquery. This ensures that all
+            conditions are checked against the SAME annotation row.
+
+            Nested FilterGroups get their OWN separate EXISTS subquery,
+            which is then combined with the parent group using AND/OR.
+
+            This enables "same row" semantics for queries like:
+            - annotation[key] == value (key and value in same row)
+            - key contains 'env' AND value equals 'prod' (same row)
+
+        Args:
+            group: FilterGroup containing filters and an optional operator.
+
+        Returns:
+            A SQLAlchemy EXISTS clause (or combined clauses for nested groups).
         """
         if not group.filters:
             # Empty group matches everything
             return sql.true()
 
-        clauses = [
-            self._build_annotation_filter_clause(filter=f) for f in group.filters
-        ]
+        # Separate simple filters from nested groups
+        simple_filters: list[KeyFilter | ValueFilter] = []
+        nested_groups: list[FilterGroup] = []
+
+        for f in group.filters:
+            if isinstance(f, FilterGroup):
+                nested_groups.append(f)
+            elif isinstance(f, (KeyFilter, ValueFilter)):
+                simple_filters.append(f)
+            else:
+                raise ValueError(f"Unknown filter type: {type(f)}")
+
+        clauses: list[sql.ColumnElement[bool]] = []
+
+        # Build SINGLE EXISTS for all simple filters in this group
+        if simple_filters:
+            # Base subquery for annotation table
+            subquery = sql.select(bts.PipelineRunAnnotation).where(
+                bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id
+            )
+
+            # Build conditions for each simple filter
+            conditions: list[sql.ColumnElement[bool]] = []
+            for f in simple_filters:
+                if isinstance(f, KeyFilter):
+                    conditions.append(self._build_key_filter_condition(filter=f))
+                elif isinstance(f, ValueFilter):
+                    conditions.append(self._build_value_filter_condition(filter=f))
+
+            # Combine conditions with group operator (AND/OR)
+            if group.operator == GroupOperator.OR:
+                combined_condition = sql.or_(*conditions)
+            else:
+                # Default to AND if operator is not specified
+                combined_condition = sql.and_(*conditions)
+
+            # Add combined condition to subquery and wrap in EXISTS
+            subquery = subquery.where(combined_condition)
+            clauses.append(subquery.exists())
+
+        # Build SEPARATE EXISTS for each nested group (recursive)
+        for nested in nested_groups:
+            clauses.append(self._build_filter_group_clause(group=nested))
+
+        # Combine all clauses (simple filters EXISTS + nested group EXISTS)
+        if len(clauses) == 1:
+            return clauses[0]
 
         if group.operator == GroupOperator.OR:
             return sql.or_(*clauses)
         else:
-            # If operator is missing, defaults to AND
+            # Default to AND if operator is not specified
             return sql.and_(*clauses)
 
     def _build_search_where_clauses(

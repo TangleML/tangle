@@ -166,7 +166,13 @@ class TestPipelineRunSearch:
             assert response.debug_where_clause == expected
 
     def test_search_with_key_equals_negate_filter(self):
-        """Test search with KeyFilter EQUALS operator with negate=True."""
+        """Test search with KeyFilter EQUALS operator with negate=True.
+
+        With the merged approach, negate=True negates the condition WITHIN
+        the EXISTS (key != 'environment'), not the entire EXISTS.
+
+        This finds runs where some annotation has a key that is NOT 'environment'.
+        """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
 
@@ -190,12 +196,13 @@ class TestPipelineRunSearch:
                 debug_where_clause=True,
             )
 
+            # negate=True produces: key != 'environment' (within the EXISTS)
             expected = (
-                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 "FROM pipeline_run_annotation, pipeline_run \n"
                 "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
-                "AND pipeline_run_annotation.\"key\" = 'environment'))"
+                "AND pipeline_run_annotation.\"key\" != 'environment')"
             )
             assert response.debug_where_clause == expected
 
@@ -307,7 +314,10 @@ class TestPipelineRunSearch:
     def test_search_with_value_equals_negate_filter(self):
         """Test search with ValueFilter EQUALS operator with negate=True.
 
-        Searches across ALL annotation values for exact match, then negates.
+        With the merged approach, negate=True negates the condition WITHIN
+        the EXISTS (value != 'production'), not the entire EXISTS.
+
+        This finds runs where some annotation has a value that is NOT 'production'.
         """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
@@ -332,12 +342,13 @@ class TestPipelineRunSearch:
                 debug_where_clause=True,
             )
 
+            # negate=True produces: value != 'production' (within the EXISTS)
             expected = (
-                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 "FROM pipeline_run_annotation, pipeline_run \n"
                 "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
-                "AND pipeline_run_annotation.value = 'production'))"
+                "AND pipeline_run_annotation.value != 'production')"
             )
             assert response.debug_where_clause == expected
 
@@ -377,15 +388,84 @@ class TestPipelineRunSearch:
             )
             assert response.debug_where_clause == expected
 
+    def test_search_with_key_in_set_and_value_contains_negate(self):
+        """Test search with KeyFilter IN_SET and ValueFilter CONTAINS (negate=True).
+
+        This tests the "same row" semantics: find runs where some annotation
+        has a key in ['environment', 'team'] AND that same annotation's value
+        does NOT contain 'error'.
+
+        Structure:
+            Group (AND):
+            ├── KeyFilter(IN_SET, keys=["environment", "team"])
+            └── ValueFilter(CONTAINS, value="error", negate=True)
+        """
+        session_factory = _initialize_db_and_get_session_factory()
+        service = api_server_sql.PipelineRunsApiService_Sql()
+
+        with session_factory() as session:
+            filters = api_server_sql.SearchFilters(
+                annotation_filters=api_server_sql.FilterGroup(
+                    operator=api_server_sql.GroupOperator.AND,
+                    filters=[
+                        api_server_sql.KeyFilter(
+                            operator=api_server_sql.KeyFilterOperator.IN_SET,
+                            keys=["environment", "team"],
+                        ),
+                        api_server_sql.ValueFilter(
+                            operator=api_server_sql.ValueFilterOperator.CONTAINS,
+                            value="error",
+                            negate=True,
+                        ),
+                    ],
+                )
+            )
+
+            response = service.search(
+                session=session,
+                filters=filters,
+                debug_where_clause=True,
+            )
+
+            # Expected SQL structure:
+            #
+            # Single EXISTS with both conditions (same row semantics):
+            # ├── KeyFilter(IN_SET, keys=["environment", "team"])
+            # │   → key IN ('environment', 'team')
+            # └── ValueFilter(CONTAINS, value="error", negate=True)
+            #     → value NOT LIKE '%error%'
+            #
+            expected = (
+                # ===== Single EXISTS (same row) =====
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                # |
+                # |-- Condition 1: KeyFilter(IN_SET, keys=["environment", "team"])
+                "AND pipeline_run_annotation.\"key\" IN ('environment', 'team') "
+                # |
+                # |-- AND (combining conditions in same row)
+                # |
+                # |-- Condition 2: ValueFilter(CONTAINS, value="error", negate=True)
+                "AND (pipeline_run_annotation.value NOT LIKE '%' || 'error' || '%'))"
+                # ===== End Single EXISTS =====
+            )
+            assert response.debug_where_clause == expected
+
     def test_search_with_complex_nested_filters(self):
         """Test search with complex nested filter groups.
 
+        With the merged approach:
+        - Each nested FilterGroup produces ONE EXISTS with merged conditions
+        - The root group combines the nested groups' EXISTS with OR
+
         Structure:
             Root Group (OR):
-            ├── Group 1 (OR):
+            ├── Group 1 (OR) → ONE EXISTS with OR-ed conditions
             │   ├── KeyFilter(CONTAINS, key="env")
             │   └── ValueFilter(EQUALS, value="admin", negate=True)
-            └── Group 2 (AND):
+            └── Group 2 (AND) → ONE EXISTS with AND-ed conditions
                 ├── KeyFilter(EXISTS, key="status", negate=True)
                 └── ValueFilter(IN_SET, values=["high", "critical"])
         """
@@ -437,59 +517,50 @@ class TestPipelineRunSearch:
                 debug_where_clause=True,
             )
 
-            # Expected SQL structure:
+            # Expected SQL structure (merged approach):
             #
             # Root Group (OR):
-            # ├── Group 1 (OR):
-            # │   ├── KeyFilter(CONTAINS, key="env")
-            # │   └── ValueFilter(EQUALS, value="admin", negate=True)
-            # └── Group 2 (AND):
-            #     ├── KeyFilter(EXISTS, key="status", negate=True)
-            #     └── ValueFilter(IN_SET, values=["high", "critical"])
+            # ├── Group 1 EXISTS (OR):
+            # │   └── (key LIKE '%env%') OR (value != 'admin')
+            # └── Group 2 EXISTS (AND):
+            #     └── (key IS NULL) AND (value IN ('high', 'critical'))
             #
             expected = (
                 # ===== Root Group (OR) =====
                 # |
-                # |-- Group 1 (OR) ------------------------------------------
-                # |   |
-                # |   |-- Filter 1: KeyFilter(CONTAINS, key="env")
+                # |-- Group 1: ONE EXISTS with OR-ed conditions ----------------
                 "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 "FROM pipeline_run_annotation, pipeline_run \n"
-                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
-                "AND (pipeline_run_annotation.\"key\" LIKE '%' || 'env' || '%'))) "
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id AND "
                 # |   |
-                # |   OR
+                # |   |-- Combined OR condition (wrapped in parentheses)
+                # |   |-- Condition 1: KeyFilter(CONTAINS, key="env")
+                "((pipeline_run_annotation.\"key\" LIKE '%' || 'env' || '%') "
+                # |   |
+                # |   OR (within same EXISTS)
                 "OR "
                 # |   |
-                # |   |-- Filter 2: ValueFilter(EQUALS, value="admin", negate=True)
-                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
-                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                "FROM pipeline_run_annotation, pipeline_run \n"
-                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
-                "AND pipeline_run_annotation.value = 'admin')) "
+                # |   |-- Condition 2: ValueFilter(EQUALS, value="admin", negate=True)
+                "pipeline_run_annotation.value != 'admin'))) "
                 # |
-                # OR (Root level)
+                # OR (Root level - between Group 1 and Group 2)
                 "OR "
                 # |
-                # |-- Group 2 (AND) ------------------------------------------
-                # |   |
-                # |   |-- Filter 1: KeyFilter(EXISTS, key="status", negate=True)
-                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                # |-- Group 2: ONE EXISTS with AND-ed conditions ---------------
+                "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 "FROM pipeline_run_annotation, pipeline_run \n"
-                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
-                'AND pipeline_run_annotation."key" IS NOT NULL)) '
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id AND "
                 # |   |
-                # |   AND
+                # |   |-- Condition 1: KeyFilter(EXISTS, negate=True)
+                "pipeline_run_annotation.\"key\" IS NULL "
+                # |   |
+                # |   AND (within same EXISTS)
                 "AND "
                 # |   |
-                # |   |-- Filter 2: ValueFilter(IN_SET, values=["high", "critical"])
-                "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
-                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                "FROM pipeline_run_annotation, pipeline_run \n"
-                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
-                "AND pipeline_run_annotation.value IN ('high', 'critical')))"
+                # |   |-- Condition 2: ValueFilter(IN_SET, values=["high", "critical"])
+                "pipeline_run_annotation.value IN ('high', 'critical')))"
                 # ===== End Root Group =====
             )
             assert response.debug_where_clause == expected
