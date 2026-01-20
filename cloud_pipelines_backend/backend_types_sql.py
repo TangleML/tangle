@@ -465,12 +465,14 @@ class ContainerExecution(_TableBase):
         ),
     )
 
+
 PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME: Final[str] = (
     "ix_pipeline_run_annotation_key_value"
 )
 PIPELINE_RUN_ANNOTATION_VALUE_INDEX_NAME: Final[str] = (
     "ix_pipeline_run_annotation_value"
 )
+
 
 class PipelineRunAnnotation(_TableBase):
     __tablename__ = "pipeline_run_annotation"

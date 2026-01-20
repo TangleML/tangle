@@ -55,10 +55,10 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
                 'AND pipeline_run_annotation."key" IS NOT NULL)'
             )
             assert response.debug_where_clause == expected
@@ -91,10 +91,10 @@ class TestPipelineRunSearch:
 
             # Should produce the same result as test_search_with_key_exists_filter
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
                 'AND pipeline_run_annotation."key" IS NOT NULL)'
             )
             assert response.debug_where_clause == expected
@@ -124,11 +124,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND (pipeline_run_annotation."key" LIKE \'%\' || \'env\' || \'%\'))'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND (pipeline_run_annotation.\"key\" LIKE '%' || 'env' || '%'))"
             )
             assert response.debug_where_clause == expected
 
@@ -157,11 +157,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation."key" = \'environment\')'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.\"key\" = 'environment')"
             )
             assert response.debug_where_clause == expected
 
@@ -191,11 +191,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation."key" = \'environment\'))'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.\"key\" = 'environment'))"
             )
             assert response.debug_where_clause == expected
 
@@ -224,11 +224,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation."key" IN (\'environment\', \'team\'))'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.\"key\" IN ('environment', 'team'))"
             )
             assert response.debug_where_clause == expected
 
@@ -260,11 +260,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND (pipeline_run_annotation.value LIKE \'%\' || \'prod\' || \'%\'))'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND (pipeline_run_annotation.value LIKE '%' || 'prod' || '%'))"
             )
             assert response.debug_where_clause == expected
 
@@ -296,11 +296,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation.value = \'production\')'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.value = 'production')"
             )
             assert response.debug_where_clause == expected
 
@@ -333,11 +333,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation.value = \'production\'))'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.value = 'production'))"
             )
             assert response.debug_where_clause == expected
 
@@ -369,11 +369,11 @@ class TestPipelineRunSearch:
             )
 
             expected = (
-                'EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
+                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                'FROM pipeline_run_annotation, pipeline_run \n'
-                'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                'AND pipeline_run_annotation.value IN (\'backend\', \'frontend\'))'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.value IN ('backend', 'frontend'))"
             )
             assert response.debug_where_clause == expected
 
@@ -453,43 +453,43 @@ class TestPipelineRunSearch:
                 # |-- Group 1 (OR) ------------------------------------------
                 # |   |
                 # |   |-- Filter 1: KeyFilter(CONTAINS, key="env")
-                    '(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
-                        'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                        'FROM pipeline_run_annotation, pipeline_run \n'
-                        'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                        'AND (pipeline_run_annotation."key" LIKE \'%\' || \'env\' || \'%\'))) '
+                "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND (pipeline_run_annotation.\"key\" LIKE '%' || 'env' || '%'))) "
                 # |   |
                 # |   OR
-                    'OR '
+                "OR "
                 # |   |
                 # |   |-- Filter 2: ValueFilter(EQUALS, value="admin", negate=True)
-                    'NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
-                        'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                        'FROM pipeline_run_annotation, pipeline_run \n'
-                        'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                        'AND pipeline_run_annotation.value = \'admin\')) '
+                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.value = 'admin')) "
                 # |
                 # OR (Root level)
-                'OR '
+                "OR "
                 # |
                 # |-- Group 2 (AND) ------------------------------------------
                 # |   |
                 # |   |-- Filter 1: KeyFilter(EXISTS, key="status", negate=True)
-                    'NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
-                        'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                        'FROM pipeline_run_annotation, pipeline_run \n'
-                        'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                        'AND pipeline_run_annotation."key" IS NOT NULL)) '
+                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                'AND pipeline_run_annotation."key" IS NOT NULL)) '
                 # |   |
                 # |   AND
-                    'AND '
+                "AND "
                 # |   |
                 # |   |-- Filter 2: ValueFilter(IN_SET, values=["high", "critical"])
-                    '(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, '
-                        'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
-                        'FROM pipeline_run_annotation, pipeline_run \n'
-                        'WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id '
-                        'AND pipeline_run_annotation.value IN (\'high\', \'critical\')))'
+                "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.value IN ('high', 'critical')))"
                 # ===== End Root Group =====
             )
             assert response.debug_where_clause == expected

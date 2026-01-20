@@ -32,7 +32,6 @@ from . import backend_types_sql as bts
 from . import errors
 from .errors import ItemNotFoundError
 
-
 # ==== Annotation Filter Types for Search ====
 
 
@@ -51,12 +50,14 @@ class KeyFilterOperator(enum.StrEnum):
     EXISTS = "exists"  # Key exists (regardless of value)
     IN_SET = "in_set"  # Key is in a set of values
 
+
 class ValueFilterOperator(enum.StrEnum):
     """Operators for filtering by annotation value."""
 
     CONTAINS = "contains"  # Value contains substring
     EQUALS = "equals"  # Value equals exact string
     IN_SET = "in_set"  # Value is in a set of values
+
 
 @dataclasses.dataclass(kw_only=True)
 class KeyFilter:
@@ -162,12 +163,13 @@ class GetPipelineRunResponse(PipelineRunResponse):
 class ListPipelineJobsResponse:
     pipeline_runs: list[PipelineRunResponse]
     next_page_token: str | None = None
-    debug_where_clause: str | None = None  # Populated when debug_where_clause=True in search()
+    debug_where_clause: str | None = (
+        None  # Populated when debug_where_clause=True in search()
+    )
 
 
 import sqlalchemy as sql
 from sqlalchemy import orm
-
 
 # Pagination constants
 OFFSET_KEY: Final[str] = "offset"
@@ -281,8 +283,7 @@ class PipelineRunsApiService_Sql:
                 session=session, root_execution_id=pipeline_run.root_execution_id
             )
             response.execution_status_stats = {
-                status.value: count
-                for status, count in execution_status_stats.items()
+                status.value: count for status, count in execution_status_stats.items()
             }
         return response
 

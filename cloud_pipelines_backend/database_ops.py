@@ -78,12 +78,13 @@ def migrate_db(db_engine: sqlalchemy.Engine):
         if index.name == "ix_execution_node_container_execution_cache_key":
             index.create(db_engine, checkfirst=True)
 
-    # TODO: I believe we should create an index for the Annotation key 
+    # TODO: I believe we should create an index for the Annotation key
     # column and migrate existing data?
     #
     # Migration for annotation filtering feature
     for index in bts.PipelineRunAnnotation.__table__.indexes:
-        if index.name == bts.PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME:
-            index.create(db_engine, checkfirst=True)
-        if index.name == bts.PIPELINE_RUN_ANNOTATION_VALUE_INDEX_NAME:
+        if index.name in [
+            bts.PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME,
+            bts.PIPELINE_RUN_ANNOTATION_VALUE_INDEX_NAME,
+        ]:
             index.create(db_engine, checkfirst=True)
