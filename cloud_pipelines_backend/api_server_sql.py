@@ -1,10 +1,13 @@
 import base64
 import dataclasses
 import datetime
+import enum
 import json
 import logging
 import typing
 from typing import Any, Optional
+
+import pydantic  # type: ignore[import-unresolved]
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -30,6 +33,80 @@ from . import component_structures as structures
 from . import backend_types_sql as bts
 from . import errors
 from .errors import ItemNotFoundError
+
+# ==== Annotation Filter Types for Search ====
+
+
+class GroupOperator(enum.StrEnum):
+    """Logical operators for combining filters in a group."""
+
+    AND = "and"
+    OR = "or"
+
+
+class FilterOperator(enum.StrEnum):
+    """Operators for filtering by annotation key or value."""
+
+    CONTAINS = "contains"  # Contains substring
+    EQUALS = "equals"  # Equals exact string
+    IN_SET = "in_set"  # Is in a set of values
+
+
+class TextFilter(pydantic.BaseModel):
+    """Filter by text pattern.
+
+    Examples:
+        - TextFilter(operator=FilterOperator.EQUALS, text="environment")
+        - TextFilter(operator=FilterOperator.CONTAINS, text="env")
+        - TextFilter(operator=FilterOperator.IN_SET, texts=["prod", "staging"])
+        - TextFilter(operator=FilterOperator.EQUALS, text="test", negate=True)
+    """
+
+    operator: FilterOperator
+    text: str | None = None  # For EQUALS, CONTAINS operators
+    texts: list[str] | None = None  # For IN_SET operator
+    negate: bool = False  # If True, negates the operation
+
+
+class AnnotationFilter(pydantic.BaseModel):
+    """Filter annotations by key and optionally by value.
+
+    Examples:
+        - AnnotationFilter(key=TextFilter(operator=FilterOperator.EQUALS, text="environment"))
+          → Find runs that have an "environment" annotation key
+        - AnnotationFilter(
+              key=TextFilter(operator=FilterOperator.EQUALS, text="environment"),
+              value=TextFilter(operator=FilterOperator.EQUALS, text="production")
+          )
+          → Find runs with annotation key "environment" and value "production"
+    """
+
+    key: TextFilter
+    value: TextFilter | None = None
+
+
+class AnnotationFilterGroup(pydantic.BaseModel):
+    """A flat group of AnnotationFilters combined with AND/OR logic.
+
+    Each AnnotationFilter matches a single annotation row (key + optional value).
+    The group operator determines how multiple filters are combined.
+
+    Examples:
+        - AnnotationFilterGroup(filters=[...])
+          → Defaults to OR logic (match ANY filter)
+        - AnnotationFilterGroup(operator=GroupOperator.AND, filters=[...])
+          → All filters must match (match ALL filters)
+        - AnnotationFilterGroup(operator=GroupOperator.OR, filters=[...])
+          → At least one filter must match
+
+    SQL Pattern:
+        filters=[AF(key="env", value="prod"), AF(key="team")]
+        → EXISTS(key='env' AND value='prod') OR EXISTS(key='team')
+    """
+
+    filters: list[AnnotationFilter]
+    # Operator defaults to None, which is treated as OR logic.
+    operator: GroupOperator | None = None
 
 
 # ==== PipelineJobService
@@ -63,14 +140,140 @@ class GetPipelineRunResponse(PipelineRunResponse):
 class ListPipelineJobsResponse:
     pipeline_runs: list[PipelineRunResponse]
     next_page_token: str | None = None
+    debug_where_clause: str | None = (
+        None  # Populated when debug_where_clause=True in search()
+    )
 
 
 import sqlalchemy as sql
 from sqlalchemy import orm
 
 
+def _compile_where_clauses_to_string(
+    session: orm.Session,
+    where_clauses: list[sql.ColumnElement[bool]],
+) -> str:
+    """Compile WHERE clauses to a SQL string for debugging.
+
+    Uses the dialect from the session's engine (SQLite, MySQL, etc.)
+    and inlines literal values for readability.
+    """
+    if not where_clauses:
+        return "(no where clauses)"
+
+    # Combine all clauses with AND
+    combined = sql.and_(*where_clauses) if len(where_clauses) > 1 else where_clauses[0]
+
+    # Get dialect from session's engine
+    dialect = session.bind.dialect if session.bind else None
+
+    try:
+        compiled = combined.compile(
+            dialect=dialect,
+            compile_kwargs={"literal_binds": True},
+        )
+        return str(compiled)
+    except Exception as e:
+        # Fallback if literal_binds fails (e.g., for complex types)
+        try:
+            compiled = combined.compile(dialect=dialect)
+            return f"{compiled} [params: {compiled.params}]"
+        except Exception:
+            return f"(failed to compile: {e})"
+
+
 class PipelineRunsApiService_Sql:
     PIPELINE_NAME_EXTRA_DATA_KEY = "pipeline_name"
+
+    def _build_annotation_filter(
+        self,
+        *,
+        filter: TextFilter,
+        column: sql.ColumnElement[str],
+    ) -> sql.ColumnElement[bool]:
+        """Build a SQLAlchemy condition for a TextFilter.
+
+        Args:
+            filter: TextFilter with operator, text/texts, and optional negate flag.
+            column: The SQLAlchemy column to apply the filter to.
+
+        Returns:
+            A SQLAlchemy condition expression for the filter.
+        """
+        if filter.operator == FilterOperator.EQUALS:
+            if filter.text is None:
+                raise ValueError("EQUALS operator requires 'text' to be set")
+            condition = column == filter.text
+        elif filter.operator == FilterOperator.CONTAINS:
+            if filter.text is None:
+                raise ValueError("CONTAINS operator requires 'text' to be set")
+            condition = column.contains(filter.text)
+        elif filter.operator == FilterOperator.IN_SET:
+            if not filter.texts:
+                raise ValueError("IN_SET operator requires 'texts' to be set")
+            condition = column.in_(filter.texts)
+        else:
+            raise ValueError(f"Unknown FilterOperator: {filter.operator}")
+
+        if filter.negate:
+            condition = ~condition
+
+        return condition
+
+    def _build_annotation_where_clauses(
+        self,
+        *,
+        filters: AnnotationFilterGroup | None,
+    ) -> list[sql.ColumnElement[bool]]:
+        """Build WHERE clauses from AnnotationFilterGroup.
+
+        For annotation filters, each AnnotationFilter creates an EXISTS subquery
+        that checks the key (and optionally value) on the SAME annotation row.
+        Multiple AnnotationFilters are combined with the group operator (OR by default).
+
+        Example: filters=[AF(key="env", value="prod"), AF(key="team", value="ml")]
+        Produces: EXISTS(...key='env' AND value='prod') OR EXISTS(...key='team' AND value='ml')
+        """
+        where_clauses: list[sql.ColumnElement[bool]] = []
+
+        if filters is None or not filters.filters:
+            return where_clauses
+
+        # Build EXISTS clause for each AnnotationFilter
+        exists_clauses: list[sql.ColumnElement[bool]] = []
+        for af in filters.filters:
+            # Base subquery joining to parent PipelineRun
+            subquery = sql.select(bts.PipelineRunAnnotation).where(
+                bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id
+            )
+
+            # Add key filter (required)
+            subquery = subquery.where(
+                self._build_annotation_filter(
+                    filter=af.key, column=bts.PipelineRunAnnotation.key
+                )
+            )
+
+            # Add value filter (optional) - same row semantics
+            if af.value is not None:
+                subquery = subquery.where(
+                    self._build_annotation_filter(
+                        filter=af.value, column=bts.PipelineRunAnnotation.value
+                    )
+                )
+
+            exists_clauses.append(subquery.exists())
+
+        # Combine EXISTS clauses with group operator
+        if len(exists_clauses) == 1:
+            where_clauses.append(exists_clauses[0])
+        elif filters.operator == GroupOperator.AND:
+            where_clauses.append(sql.and_(*exists_clauses))
+        else:
+            # Default to OR if operator is not specified
+            where_clauses.append(sql.or_(*exists_clauses))
+
+        return where_clauses
 
     def create(
         self,
@@ -162,12 +365,107 @@ class PipelineRunsApiService_Sql:
         *,
         session: orm.Session,
         page_token: str | None = None,
-        # page_size: int  = 10,
         filter: str | None = None,
         current_user: str | None = None,
+        annotation_filter: str | None = None,
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
+        debug_where_clause: bool = False,
     ) -> ListPipelineJobsResponse:
+        """List pipeline runs with optional filtering.
+
+        **Parameters:**
+
+        - **filter**: Simple key:value filter string (e.g., "created_by:alice")
+        - **annotation_filter**: JSON string for annotation filtering
+        - **page_token**: Pagination token from previous response
+        - **include_pipeline_names**: Include pipeline names in response
+        - **include_execution_stats**: Include execution statistics
+        - **debug_where_clause**: If True, includes compiled SQL WHERE clause
+
+        **Returns:** `ListPipelineJobsResponse` with matching pipeline runs.
+
+        ---
+
+        ## API Usage
+
+        ### Annotation Filter JSON Format
+
+        The `annotation_filter` parameter accepts a JSON-encoded string.
+
+        ### TextFilter Operators
+
+        | Operator | Description |
+        |----------|-------------|
+        | `equals` | Exactly matches string (`text` field) |
+        | `contains` | Contains substring (`text` field) |
+        | `in_set` | Matches one of multiple values (`texts` field) |
+
+        All filters support `negate: true` to invert the condition.
+
+        ---
+
+        ### Example 1: Key contains substring
+
+        Find runs with annotation key containing "env":
+
+        ```json
+        {"filters": [{"key": {"operator": "contains", "text": "env"}}]}
+        ```
+
+        ### Example 2: Key-value pair with in_set
+
+        Find runs where key is "environment" and value is one of ["prod", "staging"]:
+
+        ```json
+        {
+          "filters": [
+            {
+              "key": {"operator": "equals", "text": "environment"},
+              "value": {"operator": "in_set", "texts": ["prod", "staging"]}
+            }
+          ]
+        }
+        ```
+
+        ### Example 3: Multiple filters with OR (default)
+
+        Find runs where key contains "env" OR key is in ["team", "owner"]:
+
+        ```json
+        {
+          "filters": [
+            {"key": {"operator": "contains", "text": "env"}},
+            {"key": {"operator": "in_set", "texts": ["team", "owner"]}}
+          ]
+        }
+        ```
+
+        ### Example 4: Multiple filters with AND
+
+        Find runs that have BOTH conditions:
+
+        ```json
+        {
+          "operator": "and",
+          "filters": [
+            {
+              "key": {"operator": "equals", "text": "environment"},
+              "value": {"operator": "contains", "text": "prod"}
+            },
+            {"key": {"operator": "contains", "text": "team"}}
+          ]
+        }
+        ```
+
+        ---
+
+        **Performance Note:**
+
+        WHERE clause ordering: Simple column filters (indexed) are applied first,
+        then EXISTS subqueries (annotation filters). Database optimizer may reorder,
+        but explicit ordering documents intent and helps simpler optimizers.
+        """
         page_token_dict = _decode_page_token(page_token)
         OFFSET_KEY = "offset"
         offset = page_token_dict.get(OFFSET_KEY, 0)
@@ -176,7 +474,18 @@ class PipelineRunsApiService_Sql:
         FILTER_KEY = "filter"
         if page_token:
             filter = page_token_dict.get(FILTER_KEY, None)
-        where_clauses = []
+
+        # Parse annotation_filter JSON string if provided
+        parsed_annotation_filter: AnnotationFilterGroup | None = None
+        if annotation_filter:
+            try:
+                parsed_annotation_filter = AnnotationFilterGroup.model_validate_json(
+                    annotation_filter
+                )
+            except pydantic.ValidationError as e:
+                raise ApiServiceError(f"Invalid annotation_filter: {e}")
+
+        where_clauses: list[sql.ColumnElement[bool]] = []
         parsed_filter = _parse_filter(filter) if filter else {}
         for key, value in parsed_filter.items():
             if key == "_text":
@@ -184,9 +493,6 @@ class PipelineRunsApiService_Sql:
             elif key == "created_by":
                 if value == "me":
                     if current_user is None:
-                        # raise ApiServiceError(
-                        #     f"The `created_by:me` filter requires `current_user`."
-                        # )
                         current_user = ""
                     value = current_user
                     # TODO: Maybe make this a bit more robust.
@@ -200,6 +506,13 @@ class PipelineRunsApiService_Sql:
                     where_clauses.append(bts.PipelineRun.created_by == None)
             else:
                 raise NotImplementedError(f"Unsupported filter {filter}.")
+
+        if parsed_annotation_filter:
+            annotation_clauses = self._build_annotation_where_clauses(
+                filters=parsed_annotation_filter
+            )
+            where_clauses.extend(annotation_clauses)
+
         pipeline_runs = list(
             session.scalars(
                 sql.select(bts.PipelineRun)
@@ -209,6 +522,7 @@ class PipelineRunsApiService_Sql:
                 .limit(page_size)
             ).all()
         )
+
         next_page_offset = offset + page_size
         next_page_token_dict = {OFFSET_KEY: next_page_offset, FILTER_KEY: filter}
         next_page_token = _encode_page_token(next_page_token_dict)
@@ -246,13 +560,21 @@ class PipelineRunsApiService_Sql:
                 }
             return response
 
-        return ListPipelineJobsResponse(
+        response = ListPipelineJobsResponse(
             pipeline_runs=[
                 create_pipeline_run_response(pipeline_run)
                 for pipeline_run in pipeline_runs
             ],
             next_page_token=next_page_token,
         )
+
+        if debug_where_clause:
+            response.debug_where_clause = _compile_where_clauses_to_string(
+                session=session,
+                where_clauses=where_clauses,
+            )
+
+        return response
 
     def _calculate_execution_status_stats(
         self, session: orm.Session, root_execution_id: bts.IdType
