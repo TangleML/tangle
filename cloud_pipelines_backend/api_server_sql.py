@@ -428,15 +428,15 @@ class PipelineRunsApiService_Sql:
         }
         ```
 
-        ### Example 3: Multiple filters with OR (default)
+        ### Example 3: Multiple filters with OR (default) + negate
 
-        Find runs where key contains "env" OR key is in ["team", "owner"]:
+        Find runs where key contains "env" OR key is NOT "deprecated":
 
         ```json
         {
           "filters": [
             {"key": {"operator": "contains", "text": "env"}},
-            {"key": {"operator": "in_set", "texts": ["team", "owner"]}}
+            {"key": {"operator": "equals", "text": "deprecated", "negate": true}}
           ]
         }
         ```
