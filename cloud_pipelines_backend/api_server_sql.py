@@ -141,7 +141,7 @@ class ListPipelineJobsResponse:
     pipeline_runs: list[PipelineRunResponse]
     next_page_token: str | None = None
     debug_where_clause: str | None = (
-        None  # Populated when debug_where_clause=True in search()
+        None  # Populated when debug_where_clause=True in list()
     )
 
 
