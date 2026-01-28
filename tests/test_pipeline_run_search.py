@@ -44,7 +44,7 @@ class TestPipelineRunListAnnotationFilter:
         """Test annotation filtering with JSON string: key CONTAINS operator.
 
         JSON Input:
-            {"filters": [{"key": {"operator": "contains", "text": "env"}}]}
+            {"annotation_filters": [{"key": {"operator": "contains", "text": "env"}}]}
 
         Expected WHERE clause:
             EXISTS (... WHERE key LIKE '%env%')
@@ -55,7 +55,11 @@ class TestPipelineRunListAnnotationFilter:
         with session_factory() as session:
             # JSON string input (as received from API)
             json_input = json.dumps(
-                {"filters": [{"key": {"operator": "contains", "text": "env"}}]}
+                {
+                    "annotation_filters": [
+                        {"key": {"operator": "contains", "text": "env"}}
+                    ]
+                }
             )
 
             response = service.list(
@@ -77,7 +81,7 @@ class TestPipelineRunListAnnotationFilter:
         """Test annotation filtering with JSON string: key EQUALS operator.
 
         JSON Input:
-            {"filters": [{"key": {"operator": "equals", "text": "environment"}}]}
+            {"annotation_filters": [{"key": {"operator": "equals", "text": "environment"}}]}
 
         Expected WHERE clause:
             EXISTS (... WHERE key = 'environment')
@@ -87,7 +91,11 @@ class TestPipelineRunListAnnotationFilter:
 
         with session_factory() as session:
             json_input = json.dumps(
-                {"filters": [{"key": {"operator": "equals", "text": "environment"}}]}
+                {
+                    "annotation_filters": [
+                        {"key": {"operator": "equals", "text": "environment"}}
+                    ]
+                }
             )
 
             response = service.list(
@@ -109,7 +117,7 @@ class TestPipelineRunListAnnotationFilter:
         """Test annotation filtering with JSON string: key EQUALS with negate=true.
 
         JSON Input:
-            {"filters": [{"key": {"operator": "equals", "text": "environment", "negate": true}}]}
+            {"annotation_filters": [{"key": {"operator": "equals", "text": "environment", "negate": true}}]}
 
         Expected WHERE clause:
             EXISTS (... WHERE key != 'environment')
@@ -120,7 +128,7 @@ class TestPipelineRunListAnnotationFilter:
         with session_factory() as session:
             json_input = json.dumps(
                 {
-                    "filters": [
+                    "annotation_filters": [
                         {
                             "key": {
                                 "operator": "equals",
@@ -151,7 +159,7 @@ class TestPipelineRunListAnnotationFilter:
         """Test annotation filtering with JSON string: key IN_SET operator.
 
         JSON Input:
-            {"filters": [{"key": {"operator": "in_set", "texts": ["environment", "team"]}}]}
+            {"annotation_filters": [{"key": {"operator": "in_set", "texts": ["environment", "team"]}}]}
 
         Expected WHERE clause:
             EXISTS (... WHERE key IN ('environment', 'team'))
@@ -162,7 +170,7 @@ class TestPipelineRunListAnnotationFilter:
         with session_factory() as session:
             json_input = json.dumps(
                 {
-                    "filters": [
+                    "annotation_filters": [
                         {
                             "key": {
                                 "operator": "in_set",
@@ -193,7 +201,7 @@ class TestPipelineRunListAnnotationFilter:
 
         JSON Input:
             {
-              "filters": [{
+              "annotation_filters": [{
                 "key": {"operator": "equals", "text": "environment"},
                 "value": {"operator": "equals", "text": "production"}
               }]
@@ -208,7 +216,7 @@ class TestPipelineRunListAnnotationFilter:
         with session_factory() as session:
             json_input = json.dumps(
                 {
-                    "filters": [
+                    "annotation_filters": [
                         {
                             "key": {"operator": "equals", "text": "environment"},
                             "value": {"operator": "equals", "text": "production"},
@@ -238,7 +246,7 @@ class TestPipelineRunListAnnotationFilter:
 
         JSON Input:
             {
-              "filters": [
+              "annotation_filters": [
                 {"key": {"operator": "equals", "text": "environment"},
                  "value": {"operator": "equals", "text": "production"}},
                 {"key": {"operator": "equals", "text": "team"},
@@ -255,7 +263,7 @@ class TestPipelineRunListAnnotationFilter:
         with session_factory() as session:
             json_input = json.dumps(
                 {
-                    "filters": [
+                    "annotation_filters": [
                         {
                             "key": {"operator": "equals", "text": "environment"},
                             "value": {"operator": "equals", "text": "production"},
@@ -297,7 +305,7 @@ class TestPipelineRunListAnnotationFilter:
         JSON Input:
             {
               "operator": "and",
-              "filters": [
+              "annotation_filters": [
                 {"key": {"operator": "contains", "text": "env"},
                  "value": {"operator": "in_set", "texts": ["prod", "staging"]}},
                 {"key": {"operator": "equals", "text": "team"},
@@ -317,7 +325,7 @@ class TestPipelineRunListAnnotationFilter:
             json_input = json.dumps(
                 {
                     "operator": "and",
-                    "filters": [
+                    "annotation_filters": [
                         {
                             "key": {"operator": "contains", "text": "env"},
                             "value": {
@@ -367,7 +375,7 @@ class TestPipelineRunListAnnotationFilter:
         EXISTS subqueries (annotation filters) for performance optimization.
 
         Filter input: created_by:alice
-        Annotation filter: {"filters": [{"key": {"operator": "equals", "text": "env"}}]}
+        Annotation filter: {"annotation_filters": [{"key": {"operator": "equals", "text": "env"}}]}
 
         Expected WHERE clause order:
             1. pipeline_run.created_by = 'alice'  (simple, indexed)
@@ -378,7 +386,7 @@ class TestPipelineRunListAnnotationFilter:
 
         with session_factory() as session:
             json_input = json.dumps(
-                {"filters": [{"key": {"operator": "equals", "text": "env"}}]}
+                {"annotation_filters": [{"key": {"operator": "equals", "text": "env"}}]}
             )
 
             response = service.list(
@@ -417,8 +425,8 @@ class TestPipelineRunListAnnotationFilter:
             assert "Invalid annotation_filter" in str(exc_info.value)
             assert "Invalid JSON" in str(exc_info.value)
 
-    def test_list_with_missing_filters_key_raises_error(self):
-        """Test that JSON without 'filters' key raises ApiServiceError."""
+    def test_list_with_missing_annotation_filters_key_raises_error(self):
+        """Test that JSON without 'annotation_filters' key raises ApiServiceError."""
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
 
@@ -430,9 +438,9 @@ class TestPipelineRunListAnnotationFilter:
                     debug_where_clause=True,
                 )
 
-            # Pydantic's error message indicates 'filters' field is required
+            # Pydantic's error message indicates 'annotation_filters' field is required
             assert "Invalid annotation_filter" in str(exc_info.value)
-            assert "filters" in str(exc_info.value)
+            assert "annotation_filters" in str(exc_info.value)
 
 
 if __name__ == "__main__":

@@ -92,19 +92,19 @@ class AnnotationFilterGroup(pydantic.BaseModel):
     The group operator determines how multiple filters are combined.
 
     Examples:
-        - AnnotationFilterGroup(filters=[...])
+        - AnnotationFilterGroup(annotation_filters=[...])
           → Defaults to OR logic (match ANY filter)
-        - AnnotationFilterGroup(operator=GroupOperator.AND, filters=[...])
+        - AnnotationFilterGroup(operator=GroupOperator.AND, annotation_filters=[...])
           → All filters must match (match ALL filters)
-        - AnnotationFilterGroup(operator=GroupOperator.OR, filters=[...])
+        - AnnotationFilterGroup(operator=GroupOperator.OR, annotation_filters=[...])
           → At least one filter must match
 
     SQL Pattern:
-        filters=[AF(key="env", value="prod"), AF(key="team")]
+        annotation_filters=[AF(key="env", value="prod"), AF(key="team")]
         → EXISTS(key='env' AND value='prod') OR EXISTS(key='team')
     """
 
-    filters: list[AnnotationFilter]
+    annotation_filters: list[AnnotationFilter]
     # Operator defaults to None, which is treated as OR logic.
     operator: GroupOperator | None = None
 
@@ -231,17 +231,17 @@ class PipelineRunsApiService_Sql:
         that checks the key (and optionally value) on the SAME annotation row.
         Multiple AnnotationFilters are combined with the group operator (OR by default).
 
-        Example: filters=[AF(key="env", value="prod"), AF(key="team", value="ml")]
+        Example: annotation_filters=[AF(key="env", value="prod"), AF(key="team", value="ml")]
         Produces: EXISTS(...key='env' AND value='prod') OR EXISTS(...key='team' AND value='ml')
         """
         where_clauses: list[sql.ColumnElement[bool]] = []
 
-        if filters is None or not filters.filters:
+        if filters is None or not filters.annotation_filters:
             return where_clauses
 
         # Build EXISTS clause for each AnnotationFilter
         exists_clauses: list[sql.ColumnElement[bool]] = []
-        for af in filters.filters:
+        for af in filters.annotation_filters:
             # Base subquery joining to parent PipelineRun
             subquery = sql.select(bts.PipelineRunAnnotation).where(
                 bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id
@@ -410,7 +410,7 @@ class PipelineRunsApiService_Sql:
         Find runs with annotation key containing "env":
 
         ```json
-        {"filters": [{"key": {"operator": "contains", "text": "env"}}]}
+        {"annotation_filters": [{"key": {"operator": "contains", "text": "env"}}]}
         ```
 
         ### Example 2: Key-value pair with in_set
@@ -419,7 +419,7 @@ class PipelineRunsApiService_Sql:
 
         ```json
         {
-          "filters": [
+          "annotation_filters": [
             {
               "key": {"operator": "equals", "text": "environment"},
               "value": {"operator": "in_set", "texts": ["prod", "staging"]}
@@ -434,7 +434,7 @@ class PipelineRunsApiService_Sql:
 
         ```json
         {
-          "filters": [
+          "annotation_filters": [
             {"key": {"operator": "contains", "text": "env"}},
             {"key": {"operator": "equals", "text": "deprecated", "negate": true}}
           ]
@@ -448,7 +448,7 @@ class PipelineRunsApiService_Sql:
         ```json
         {
           "operator": "and",
-          "filters": [
+          "annotation_filters": [
             {
               "key": {"operator": "equals", "text": "environment"},
               "value": {"operator": "contains", "text": "prod"}
