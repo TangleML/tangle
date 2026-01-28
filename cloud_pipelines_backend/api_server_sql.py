@@ -233,6 +233,15 @@ class PipelineRunsApiService_Sql:
 
         Example: annotation_filters=[AF(key="env", value="prod"), AF(key="team", value="ml")]
         Produces: EXISTS(...key='env' AND value='prod') OR EXISTS(...key='team' AND value='ml')
+
+        Negate Behavior:
+
+        | key.negate | value.negate | SQL                                 | Result                          |
+        |------------|--------------|-------------------------------------|---------------------------------|
+        | false      | false        | EXISTS(key='X' AND value='Y')       | Has X=Y                         |
+        | false      | true         | EXISTS(key='X' AND value!='Y')      | Has X with value not Y          |
+        | true       | false        | NOT EXISTS(key='X' AND value='Y')   | Doesn't have X=Y                |
+        | true       | true         | NOT EXISTS(key='X' AND value='Y')   | Same (value.negate ignored)     |
         """
         where_clauses: list[sql.ColumnElement[bool]] = []
 
@@ -240,6 +249,9 @@ class PipelineRunsApiService_Sql:
             return where_clauses
 
         # Build EXISTS clause for each AnnotationFilter
+        # key.negate controls EXISTS vs NOT EXISTS
+        # value.negate negates the condition inside (only when key.negate=false)
+        # When key.negate=true, value.negate is ignored for intuitive "doesn't have X=Y" behavior
         exists_clauses: list[sql.ColumnElement[bool]] = []
         for af in filters.annotation_filters:
             # Base subquery joining to parent PipelineRun
@@ -247,22 +259,50 @@ class PipelineRunsApiService_Sql:
                 bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id
             )
 
-            # Add key filter (required)
+            # Add key filter WITHOUT negation (always positive match inside subquery)
+            # key.negate will be applied at the EXISTS level
+            key_filter_no_negate = TextFilter(
+                operator=af.key.operator,
+                text=af.key.text,
+                texts=af.key.texts,
+                negate=False,
+            )
             subquery = subquery.where(
                 self._build_annotation_filter(
-                    filter=af.key, column=bts.PipelineRunAnnotation.key
+                    filter=key_filter_no_negate, column=bts.PipelineRunAnnotation.key
                 )
             )
 
-            # Add value filter (optional) - same row semantics
+            # Add value filter (optional)
+            # When key.negate=true (NOT EXISTS), ignore value.negate for intuitive behavior
             if af.value is not None:
-                subquery = subquery.where(
-                    self._build_annotation_filter(
-                        filter=af.value, column=bts.PipelineRunAnnotation.value
+                if af.key.negate:
+                    # NOT EXISTS: always use positive value match inside
+                    value_filter_no_negate = TextFilter(
+                        operator=af.value.operator,
+                        text=af.value.text,
+                        texts=af.value.texts,
+                        negate=False,
                     )
-                )
+                    subquery = subquery.where(
+                        self._build_annotation_filter(
+                            filter=value_filter_no_negate,
+                            column=bts.PipelineRunAnnotation.value,
+                        )
+                    )
+                else:
+                    # EXISTS: respect value.negate for "has X with value != Y" queries
+                    subquery = subquery.where(
+                        self._build_annotation_filter(
+                            filter=af.value, column=bts.PipelineRunAnnotation.value
+                        )
+                    )
 
-            exists_clauses.append(subquery.exists())
+            # key.negate controls EXISTS vs NOT EXISTS
+            if af.key.negate:
+                exists_clauses.append(~subquery.exists())  # NOT EXISTS
+            else:
+                exists_clauses.append(subquery.exists())  # EXISTS
 
         # Combine EXISTS clauses with group operator
         if len(exists_clauses) == 1:
@@ -427,6 +467,14 @@ class PipelineRunsApiService_Sql:
         | `in_set` | Matches one of multiple values (`texts` field) |
 
         All filters support `negate: true` to invert the condition.
+
+        **Key vs Value Negation:**
+
+        - `key.negate=true`: Uses `NOT EXISTS` - finds runs that do NOT have matching annotation
+        - `value.negate=true`: Negates the value condition (only when `key.negate=false`)
+
+        Note: When `key.negate=true`, `value.negate` is ignored for intuitive behavior.
+        This ensures "doesn't have X=Y" queries work correctly.
 
         ---
 

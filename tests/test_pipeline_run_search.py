@@ -120,7 +120,10 @@ class TestPipelineRunListAnnotationFilter:
             {"annotation_filters": [{"key": {"operator": "equals", "text": "environment", "negate": true}}]}
 
         Expected WHERE clause:
-            EXISTS (... WHERE key != 'environment')
+            NOT EXISTS (... WHERE key = 'environment')
+
+        key.negate=true means "runs that do NOT have this key" -> NOT EXISTS
+        The condition inside stays positive (key = 'environment').
         """
         session_factory = _initialize_db_and_get_session_factory()
         service = api_server_sql.PipelineRunsApiService_Sql()
@@ -147,11 +150,11 @@ class TestPipelineRunListAnnotationFilter:
             )
 
             expected = (
-                "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
                 'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
                 "FROM pipeline_run_annotation, pipeline_run \n"
                 "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
-                "AND pipeline_run_annotation.\"key\" != 'environment')"
+                "AND pipeline_run_annotation.\"key\" = 'environment'))"
             )
             assert response.debug_where_clause == expected
 
@@ -238,6 +241,113 @@ class TestPipelineRunListAnnotationFilter:
                 "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
                 "AND pipeline_run_annotation.\"key\" = 'environment' "
                 "AND pipeline_run_annotation.value = 'production')"
+            )
+            assert response.debug_where_clause == expected
+
+    def test_list_with_key_negate_and_value_filter_json(self):
+        """Test annotation filtering: key negate + value -> NOT EXISTS.
+
+        JSON Input:
+            {
+              "annotation_filters": [{
+                "key": {"operator": "equals", "text": "environment", "negate": true},
+                "value": {"operator": "equals", "text": "production"}
+              }]
+            }
+
+        Expected WHERE clause:
+            NOT EXISTS (... WHERE key = 'environment' AND value = 'production')
+
+        Meaning: runs that do NOT have key=environment with value=production
+        """
+        session_factory = _initialize_db_and_get_session_factory()
+        service = api_server_sql.PipelineRunsApiService_Sql()
+
+        with session_factory() as session:
+            json_input = json.dumps(
+                {
+                    "annotation_filters": [
+                        {
+                            "key": {
+                                "operator": "equals",
+                                "text": "environment",
+                                "negate": True,
+                            },
+                            "value": {"operator": "equals", "text": "production"},
+                        }
+                    ]
+                }
+            )
+
+            response = service.list(
+                session=session,
+                annotation_filter=json_input,
+                debug_where_clause=True,
+            )
+
+            expected = (
+                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.\"key\" = 'environment' "
+                "AND pipeline_run_annotation.value = 'production'))"
+            )
+            assert response.debug_where_clause == expected
+
+    def test_list_with_key_negate_and_value_negate_filter_json(self):
+        """Test annotation filtering: key negate + value negate -> NOT EXISTS (value.negate ignored).
+
+        JSON Input:
+            {
+              "annotation_filters": [{
+                "key": {"operator": "equals", "text": "environment", "negate": true},
+                "value": {"operator": "equals", "text": "production", "negate": true}
+              }]
+            }
+
+        Expected WHERE clause:
+            NOT EXISTS (... WHERE key = 'environment' AND value = 'production')
+
+        Note: value.negate is ignored when key.negate=true for intuitive "doesn't have X=Y" behavior.
+        Meaning: runs that do NOT have key=environment with value=production
+        """
+        session_factory = _initialize_db_and_get_session_factory()
+        service = api_server_sql.PipelineRunsApiService_Sql()
+
+        with session_factory() as session:
+            json_input = json.dumps(
+                {
+                    "annotation_filters": [
+                        {
+                            "key": {
+                                "operator": "equals",
+                                "text": "environment",
+                                "negate": True,
+                            },
+                            "value": {
+                                "operator": "equals",
+                                "text": "production",
+                                "negate": True,
+                            },
+                        }
+                    ]
+                }
+            )
+
+            response = service.list(
+                session=session,
+                annotation_filter=json_input,
+                debug_where_clause=True,
+            )
+
+            expected = (
+                "NOT (EXISTS (SELECT pipeline_run_annotation.pipeline_run_id, "
+                'pipeline_run_annotation."key", pipeline_run_annotation.value \n'
+                "FROM pipeline_run_annotation, pipeline_run \n"
+                "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+                "AND pipeline_run_annotation.\"key\" = 'environment' "
+                "AND pipeline_run_annotation.value = 'production'))"
             )
             assert response.debug_where_clause == expected
 
