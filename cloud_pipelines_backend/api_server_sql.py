@@ -275,6 +275,31 @@ class PipelineRunsApiService_Sql:
 
         return where_clauses
 
+    def _apply_annotation_filter(
+        self,
+        *,
+        annotation_filter: str | None,
+        where_clauses: list[sql.ColumnElement[bool]],
+    ) -> None:
+        """Parse annotation_filter JSON and add WHERE clauses.
+
+        Args:
+            annotation_filter: JSON string for annotation filtering, or None.
+            where_clauses: List to append WHERE clauses to (modified in place).
+
+        Raises:
+            ApiServiceError: If the JSON is invalid or malformed.
+        """
+        if not annotation_filter:
+            return
+
+        try:
+            parsed = AnnotationFilterGroup.model_validate_json(annotation_filter)
+            annotation_clauses = self._build_annotation_where_clauses(filters=parsed)
+            where_clauses.extend(annotation_clauses)
+        except pydantic.ValidationError as e:
+            raise ApiServiceError(f"Invalid annotation_filter: {e}")
+
     def create(
         self,
         session: orm.Session,
@@ -475,16 +500,6 @@ class PipelineRunsApiService_Sql:
         if page_token:
             filter = page_token_dict.get(FILTER_KEY, None)
 
-        # Parse annotation_filter JSON string if provided
-        parsed_annotation_filter: AnnotationFilterGroup | None = None
-        if annotation_filter:
-            try:
-                parsed_annotation_filter = AnnotationFilterGroup.model_validate_json(
-                    annotation_filter
-                )
-            except pydantic.ValidationError as e:
-                raise ApiServiceError(f"Invalid annotation_filter: {e}")
-
         where_clauses: list[sql.ColumnElement[bool]] = []
         parsed_filter = _parse_filter(filter) if filter else {}
         for key, value in parsed_filter.items():
@@ -507,11 +522,10 @@ class PipelineRunsApiService_Sql:
             else:
                 raise NotImplementedError(f"Unsupported filter {filter}.")
 
-        if parsed_annotation_filter:
-            annotation_clauses = self._build_annotation_where_clauses(
-                filters=parsed_annotation_filter
-            )
-            where_clauses.extend(annotation_clauses)
+        self._apply_annotation_filter(
+            annotation_filter=annotation_filter,
+            where_clauses=where_clauses,
+        )
 
         pipeline_runs = list(
             session.scalars(
