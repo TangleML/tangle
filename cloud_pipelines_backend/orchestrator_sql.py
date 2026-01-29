@@ -20,7 +20,7 @@ from . import backend_types_sql as bts
 from . import component_structures as structures
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
-
+from .instrumentation import contextual_logging
 
 _logger = logging.getLogger(__name__)
 
@@ -95,24 +95,29 @@ class OrchestratorService_Sql:
         if queued_execution:
             self._queued_executions_queue_idle = False
             start_timestamp = time.monotonic_ns()
-            _logger.info(f"Before processing {queued_execution.id=}")
-            try:
-                self.internal_process_one_queued_execution(
-                    session=session, execution=queued_execution
-                )
-            except Exception as ex:
-                _logger.exception(f"Error processing {queued_execution.id=}")
-                session.rollback()
-                queued_execution.container_execution_status = (
-                    bts.ContainerExecutionStatus.SYSTEM_ERROR
-                )
-                record_system_error_exception(execution=queued_execution, exception=ex)
-                session.commit()
-            finally:
-                duration_ms = int((time.monotonic_ns() - start_timestamp) / 1_000_000)
-                _logger.info(
-                    f"After processing {queued_execution.id=}. Duration={duration_ms}ms"
-                )
+
+            with contextual_logging.logging_context(execution_id=queued_execution.id):
+                _logger.info("Before processing queued execution")
+                try:
+                    self.internal_process_one_queued_execution(
+                        session=session, execution=queued_execution
+                    )
+                except Exception as ex:
+                    _logger.exception("Error processing queued execution")
+                    session.rollback()
+                    queued_execution.container_execution_status = (
+                        bts.ContainerExecutionStatus.SYSTEM_ERROR
+                    )
+                    record_system_error_exception(
+                        execution=queued_execution, exception=ex
+                    )
+                    session.commit()
+                finally:
+                    duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
+                    _logger.info(
+                        f"After processing queued execution (duration: {duration_ms}ms)"
+                    )
+
             return True
         else:
             if not self._queued_executions_queue_idle:
@@ -138,41 +143,58 @@ class OrchestratorService_Sql:
         if running_container_execution:
             self._running_executions_queue_idle = False
             start_timestamp = time.monotonic_ns()
-            _logger.info(f"Before processing {running_container_execution.id=}")
-            try:
-                self.internal_process_one_running_execution(
-                    session=session, container_execution=running_container_execution
-                )
-            except Exception as ex:
-                _logger.exception(f"Error processing {running_container_execution.id=}")
-                session.rollback()
-                running_container_execution.status = (
-                    bts.ContainerExecutionStatus.SYSTEM_ERROR
-                )
-                # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
-                session.commit()
-                # Mark our ExecutionNode as SYSTEM_ERROR
-                execution_nodes = running_container_execution.execution_nodes
-                for execution_node in execution_nodes:
-                    execution_node.container_execution_status = (
+
+            execution_node_ids = list(
+                session.scalars(
+                    sql.select(bts.ExecutionNode.id).where(
+                        bts.ExecutionNode.container_execution_id
+                        == running_container_execution.id
+                    )
+                ).all()
+            )
+
+            with contextual_logging.logging_context(
+                container_execution_id=running_container_execution.id,
+                execution_node_ids=execution_node_ids,
+            ):
+                _logger.info("Before processing running container execution")
+                try:
+                    self.internal_process_one_running_execution(
+                        session=session,
+                        container_execution=running_container_execution,
+                    )
+                except Exception as ex:
+                    _logger.exception("Error processing running container execution")
+                    session.rollback()
+                    running_container_execution.status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
                     )
-                    record_system_error_exception(
-                        execution=execution_node, exception=ex
+                    # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
+                    session.commit()
+
+                    # Mark our ExecutionNode as SYSTEM_ERROR
+                    execution_nodes = running_container_execution.execution_nodes
+                    for execution_node in execution_nodes:
+                        execution_node.container_execution_status = (
+                            bts.ContainerExecutionStatus.SYSTEM_ERROR
+                        )
+                        record_system_error_exception(
+                            execution=execution_node, exception=ex
+                        )
+                    # Doing an intermediate commit here because it's most important to mark the problematic node as SYSTEM_ERROR.
+                    session.commit()
+
+                    # Skip downstream executions
+                    for execution_node in execution_nodes:
+                        _mark_all_downstream_executions_as_skipped(
+                            session=session, execution=execution_node
+                        )
+                    session.commit()
+                finally:
+                    duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
+                    _logger.info(
+                        f"After processing running container execution (duration: {duration_ms}ms)"
                     )
-                # Doing an intermediate commit here because it's most important to mark the problematic node as SYSTEM_ERROR.
-                session.commit()
-                # Skip downstream executions
-                for execution_node in execution_nodes:
-                    _mark_all_downstream_executions_as_skipped(
-                        session=session, execution=execution_node
-                    )
-                session.commit()
-            finally:
-                duration_ms = int((time.monotonic_ns() - start_timestamp) / 1_000_000)
-                _logger.info(
-                    f"After processing {running_container_execution.id=}. Duration={duration_ms}ms"
-                )
             return True
         else:
             if not self._running_executions_queue_idle:
@@ -286,7 +308,7 @@ class OrchestratorService_Sql:
             # There must be at least one SUCCEEDED/RUNNING/PENDING since non_purged_candidates is non-empty.
             old_execution = non_purged_candidates[-1]
             _logger.info(
-                f"Execution {execution.id=} will reuse the {old_execution.id=} with "
+                f"Reusing cached execution node {old_execution.id} with "
                 f"{old_execution.container_execution_id=}, {old_execution.container_execution_status=}"
             )
             # Reusing the execution:
@@ -589,19 +611,15 @@ class OrchestratorService_Sql:
             terminated = False
             if votes_to_not_terminate:
                 _logger.info(
-                    f"Not terminating container execution {container_execution.id=} since some other executions ({[execution_node.id for execution_node in votes_to_not_terminate]}) are still using it."
+                    f"Not terminating container execution since some other executions ({[execution_node.id for execution_node in votes_to_not_terminate]}) are still using it."
                 )
             else:
-                _logger.info(
-                    f"Terminating container execution {container_execution.id}."
-                )
+                _logger.info("Terminating container execution.")
                 # We should preserve the logs before terminating/deleting the container
                 try:
                     _retry(lambda: launched_container.upload_log())
                 except:
-                    _logger.exception(
-                        f"Error uploading logs for {container_execution.id=} before termination."
-                    )
+                    _logger.exception("Error uploading logs before termination.")
                 # Requesting container termination.
                 # Termination might not happen immediately (e.g. Kubernetes has grace period).
                 launched_container.terminate()
@@ -613,7 +631,7 @@ class OrchestratorService_Sql:
             # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
             for execution_node in votes_to_terminate:
                 _logger.info(
-                    f"Cancelling execution {execution_node.id} ({container_execution.id=}) and skipping all downstream executions."
+                    f"Cancelling execution {execution_node.id} and skipping all downstream executions."
                 )
                 execution_node.container_execution_status = (
                     bts.ContainerExecutionStatus.CANCELLED
@@ -641,24 +659,22 @@ class OrchestratorService_Sql:
             reloaded_launched_container.status
         )
         if new_status == previous_status:
-            _logger.info(
-                f"Container execution {container_execution.id} remains in {new_status} state."
-            )
+            _logger.info(f"Container execution remains in {new_status} state.")
             return
         _logger.info(
-            f"Container execution {container_execution.id} is now in state {new_status} (was {previous_status})."
+            f"Container execution is now in state {new_status} (was {previous_status})."
         )
         session.rollback()
         container_execution.updated_at = current_time
         execution_nodes = container_execution.execution_nodes
         if not execution_nodes:
             raise OrchestratorError(
-                f"Could not find ExecutionNode associated with ContainerExecution. {container_execution.id=}"
+                f"Could not find ExecutionNode associated with ContainerExecution."
             )
         if len(execution_nodes) > 1:
             execution_node_ids = [execution.id for execution in execution_nodes]
             _logger.warning(
-                f"ContainerExecution is associated with multiple ExecutionNodes: {container_execution.id=}, {execution_node_ids=}"
+                f"ContainerExecution is associated with multiple ExecutionNodes: {execution_node_ids=}"
             )
 
         if new_status == launcher_interfaces.ContainerStatus.RUNNING:
@@ -727,7 +743,7 @@ class OrchestratorService_Sql:
             if missing_output_names:
                 # Marking the container execution as FAILED (even though the program itself has completed successfully)
                 container_execution.status = bts.ContainerExecutionStatus.FAILED
-                orchestration_error_message = f"Container execution {container_execution.id} is marked as FAILED due to missing outputs: {missing_output_names}."
+                orchestration_error_message = f"Container execution is marked as FAILED due to missing outputs: {missing_output_names}."
                 _logger.error(orchestration_error_message)
                 _record_orchestration_error_message(
                     container_execution=container_execution,
@@ -828,7 +844,7 @@ class OrchestratorService_Sql:
                 )
         else:
             _logger.error(
-                f"Container execution {container_execution.id} is now in unexpected state {new_status}. System error. {container_execution=}"
+                f"Container execution is now in unexpected state {new_status}. System error. {container_execution=}"
             )
             # This SYSTEM_ERROR will be handled by the outer exception handler
             raise OrchestratorError(

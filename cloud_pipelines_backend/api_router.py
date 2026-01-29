@@ -15,6 +15,7 @@ from . import backend_types_sql
 from . import component_library_api_server as components_api
 from . import database_ops
 from . import errors
+from .instrumentation import contextual_logging
 
 if typing.TYPE_CHECKING:
     from .launchers import interfaces as launcher_interfaces
@@ -95,17 +96,25 @@ def _setup_routes_internal(
 
     @app.exception_handler(errors.ItemNotFoundError)
     def handle_not_found_error(request: fastapi.Request, exc: errors.ItemNotFoundError):
-        return fastapi.responses.JSONResponse(
+        response = fastapi.responses.JSONResponse(
             status_code=404,
             content={"message": str(exc)},
         )
+        request_id = contextual_logging.get_context_metadata("request_id")
+        if request_id:
+            response.headers["x-tangle-request-id"] = request_id
+        return response
 
     @app.exception_handler(errors.PermissionError)
     def handle_permission_error(request: fastapi.Request, exc: errors.PermissionError):
-        return fastapi.responses.JSONResponse(
+        response = fastapi.responses.JSONResponse(
             status_code=403,
             content={"message": str(exc)},
         )
+        request_id = contextual_logging.get_context_metadata("request_id")
+        if request_id:
+            response.headers["x-tangle-request-id"] = request_id
+        return response
 
     get_user_details_dependency = fastapi.Depends(user_details_getter)
 

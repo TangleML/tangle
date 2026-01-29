@@ -5,6 +5,8 @@ import fastapi
 
 from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import database_ops
+from cloud_pipelines_backend.instrumentation import api_tracing
+from cloud_pipelines_backend.instrumentation import contextual_logging
 
 app = fastapi.FastAPI(
     title="Cloud Pipelines API",
@@ -12,14 +14,21 @@ app = fastapi.FastAPI(
     separate_input_output_schemas=False,
 )
 
+# Add request context middleware for automatic request_id generation
+app.add_middleware(api_tracing.RequestContextMiddleware)
+
 
 @app.exception_handler(Exception)
 def handle_error(request: fastapi.Request, exc: BaseException):
     exception_str = traceback.format_exception(type(exc), exc, exc.__traceback__)
-    return fastapi.responses.JSONResponse(
+    response = fastapi.responses.JSONResponse(
         status_code=503,
         content={"exception": exception_str},
     )
+    request_id = contextual_logging.get_context_metadata("request_id")
+    if request_id:
+        response.headers["x-tangle-request-id"] = request_id
+    return response
 
 
 DEFAULT_DATABASE_URI = "sqlite:///db.sqlite"
