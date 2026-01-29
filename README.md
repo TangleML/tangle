@@ -145,6 +145,22 @@ This backend consists of the API Server and the Orchestrator.
 The API Server receives API requests and accesses the database to fulfill them.
 The API documentation can be accessed at [http://localhost:8000/docs](http://localhost:8000/docs).
 
+## CORS Middleware
+
+### Purpose
+
+The CORS (Cross-Origin Resource Sharing) middleware allows web browsers to make requests to the Tangle API from different origins (domains). This is essential for:
+- Local development (frontend on `localhost:3000`, backend on `localhost:8000`)
+- Production deployments where the frontend and backend are on different domains
+- Multi-tenant deployments with multiple frontend URLs
+
+### How It Works
+
+1. **Environment Variable Configuration**: Origins are specified in the `TANGLE_CORS_ALLOWED_ORIGINS` environment variable as a comma-separated list
+2. **Request Validation**: For each incoming request, the middleware checks the `Origin` header from the browser
+3. **Dynamic Response**: If the origin is in the allowed list, the server responds with `Access-Control-Allow-Origin` set to that specific origin
+4. **Security**: Only pre-approved origins receive CORS headers, preventing unauthorized cross-origin access
+
 ### Orchestrator
 
 The Orchestrator works independently from the API Server.
