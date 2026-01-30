@@ -15,7 +15,6 @@ from .. import component_structures as structures
 from . import container_component_utils
 from . import interfaces
 
-
 _logger = logging.getLogger(__name__)
 
 _MAX_INPUT_VALUE_SIZE = 10000
@@ -370,6 +369,7 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
             output_uris=output_uris,
             log_uri=log_uri,
         )
+
 
 def _parse_docker_time(date_string: str) -> datetime.datetime:
     # Workaround for Python <3.11 failing to parse timestamps that include nanoseconds:

@@ -14,7 +14,6 @@ from .. import component_structures as structures
 from . import container_component_utils
 from . import interfaces
 
-
 _logger = logging.getLogger(__name__)
 
 _MAX_INPUT_VALUE_SIZE = 10000
