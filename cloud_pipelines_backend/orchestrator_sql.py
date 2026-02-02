@@ -118,6 +118,11 @@ class OrchestratorService_Sql:
                     record_system_error_exception(
                         execution=queued_execution, exception=ex
                     )
+                    # Track execution completion metrics
+                    _track_execution_completion(
+                        execution_node=queued_execution,
+                        container_execution=queued_execution.container_execution,
+                    )
                     # Track pipeline completion if this is a root execution
                     _track_pipeline_completion_if_root(
                         session=session, execution_node=queued_execution
@@ -332,6 +337,8 @@ class OrchestratorService_Sql:
                 f"Reusing cached execution node {old_execution.id} with "
                 f"{old_execution.container_execution_id=}, {old_execution.container_execution_status=}"
             )
+            # Track cache hit
+            metrics.track_cache_hit()
             # Reusing the execution:
             if not execution.extra_data:
                 execution.extra_data = {}
@@ -420,6 +427,11 @@ class OrchestratorService_Sql:
             )
             execution.container_execution_status = (
                 bts.ContainerExecutionStatus.CANCELLED
+            )
+            # Track execution completion metrics
+            _track_execution_completion(
+                execution_node=execution,
+                container_execution=execution.container_execution,
             )
             # Track pipeline completion if this is a root execution
             _track_pipeline_completion_if_root(
@@ -551,6 +563,11 @@ class OrchestratorService_Sql:
                     bts.ContainerExecutionStatus.SYSTEM_ERROR
                 )
                 record_system_error_exception(execution=execution, exception=ex)
+                # Track execution completion metrics
+                _track_execution_completion(
+                    execution_node=execution,
+                    container_execution=None,
+                )
                 # Track pipeline completion if this is a root execution
                 _track_pipeline_completion_if_root(
                     session=session, execution_node=execution
@@ -664,6 +681,11 @@ class OrchestratorService_Sql:
                 )
                 execution_node.container_execution_status = (
                     bts.ContainerExecutionStatus.CANCELLED
+                )
+                # Track execution completion metrics
+                _track_execution_completion(
+                    execution_node=execution_node,
+                    container_execution=container_execution,
                 )
                 # Track pipeline completion if this is a root execution
                 _track_pipeline_completion_if_root(
@@ -788,6 +810,11 @@ class OrchestratorService_Sql:
                     execution_node.container_execution_status = (
                         bts.ContainerExecutionStatus.FAILED
                     )
+                    # Track execution completion metrics
+                    _track_execution_completion(
+                        execution_node=execution_node,
+                        container_execution=container_execution,
+                    )
                     # Track pipeline completion if this is a root execution
                     _track_pipeline_completion_if_root(
                         session=session, execution_node=execution_node
@@ -834,6 +861,11 @@ class OrchestratorService_Sql:
                     execution_node.container_execution_status = (
                         bts.ContainerExecutionStatus.SUCCEEDED
                     )
+                    # Track execution completion metrics
+                    _track_execution_completion(
+                        execution_node=execution_node,
+                        container_execution=container_execution,
+                    )
                     # Track pipeline completion if this is a root execution
                     _track_pipeline_completion_if_root(
                         session=session, execution_node=execution_node
@@ -879,6 +911,11 @@ class OrchestratorService_Sql:
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
                     bts.ContainerExecutionStatus.FAILED
+                )
+                # Track execution completion metrics
+                _track_execution_completion(
+                    execution_node=execution_node,
+                    container_execution=container_execution,
                 )
                 # Track pipeline completion if this is a root execution
                 _track_pipeline_completion_if_root(
@@ -928,6 +965,11 @@ def _mark_all_downstream_executions_as_skipped(
         bts.ContainerExecutionStatus.QUEUED,
     }:
         execution.container_execution_status = bts.ContainerExecutionStatus.SKIPPED
+        # Track execution completion metrics
+        _track_execution_completion(
+            execution_node=execution,
+            container_execution=None,
+        )
 
     # for artifact_node in execution.output_artifact_nodes:
     #     for downstream_execution in artifact_node.downstream_executions:
@@ -1027,6 +1069,43 @@ def record_system_error_exception(execution: bts.ExecutionNode, exception: Excep
     execution.extra_data[
         bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY
     ] = traceback.format_exc()
+
+
+def _track_execution_completion(
+    execution_node: bts.ExecutionNode,
+    container_execution: bts.ContainerExecution | None = None,
+):
+    """
+    Track execution node completion metrics.
+
+    Args:
+        execution_node: Execution node that reached a terminal state
+        container_execution: Optional container execution for duration calculation
+    """
+    status = execution_node.container_execution_status
+
+    # Map execution status to metric status
+    status_map = {
+        bts.ContainerExecutionStatus.SUCCEEDED: "succeeded",
+        bts.ContainerExecutionStatus.FAILED: "failed",
+        bts.ContainerExecutionStatus.CANCELLED: "cancelled",
+        bts.ContainerExecutionStatus.SYSTEM_ERROR: "system_error",
+        bts.ContainerExecutionStatus.SKIPPED: "skipped",
+    }
+
+    metric_status = status_map.get(status)
+    if metric_status:
+        # Calculate duration if container execution is available
+        duration_seconds = None
+        if container_execution and container_execution.created_at:
+            end_time = container_execution.ended_at or _get_current_time()
+            duration = end_time - container_execution.created_at
+            duration_seconds = duration.total_seconds()
+
+        metrics.track_execution_completed(
+            status=metric_status,
+            duration_seconds=duration_seconds,
+        )
 
 
 def _track_pipeline_completion_if_root(
