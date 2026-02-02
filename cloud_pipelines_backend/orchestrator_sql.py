@@ -21,6 +21,7 @@ from . import component_structures as structures
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import contextual_logging
+from .instrumentation import metrics
 
 _logger = logging.getLogger(__name__)
 
@@ -110,6 +111,10 @@ class OrchestratorService_Sql:
                     )
                     record_system_error_exception(
                         execution=queued_execution, exception=ex
+                    )
+                    # Track pipeline completion if this is a root execution
+                    _track_pipeline_completion_if_root(
+                        session=session, execution_node=queued_execution
                     )
                     session.commit()
                 finally:
@@ -400,6 +405,10 @@ class OrchestratorService_Sql:
             execution.container_execution_status = (
                 bts.ContainerExecutionStatus.CANCELLED
             )
+            # Track pipeline completion if this is a root execution
+            _track_pipeline_completion_if_root(
+                session=session, execution_node=execution
+            )
             _mark_all_downstream_executions_as_skipped(
                 session=session, execution=execution
             )
@@ -526,6 +535,10 @@ class OrchestratorService_Sql:
                     bts.ContainerExecutionStatus.SYSTEM_ERROR
                 )
                 record_system_error_exception(execution=execution, exception=ex)
+                # Track pipeline completion if this is a root execution
+                _track_pipeline_completion_if_root(
+                    session=session, execution_node=execution
+                )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution
                 )
@@ -635,6 +648,10 @@ class OrchestratorService_Sql:
                 )
                 execution_node.container_execution_status = (
                     bts.ContainerExecutionStatus.CANCELLED
+                )
+                # Track pipeline completion if this is a root execution
+                _track_pipeline_completion_if_root(
+                    session=session, execution_node=execution_node
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
@@ -755,6 +772,10 @@ class OrchestratorService_Sql:
                     execution_node.container_execution_status = (
                         bts.ContainerExecutionStatus.FAILED
                     )
+                    # Track pipeline completion if this is a root execution
+                    _track_pipeline_completion_if_root(
+                        session=session, execution_node=execution_node
+                    )
                     _mark_all_downstream_executions_as_skipped(
                         session=session, execution=execution_node
                     )
@@ -797,6 +818,10 @@ class OrchestratorService_Sql:
                     execution_node.container_execution_status = (
                         bts.ContainerExecutionStatus.SUCCEEDED
                     )
+                    # Track pipeline completion if this is a root execution
+                    _track_pipeline_completion_if_root(
+                        session=session, execution_node=execution_node
+                    )
                     # TODO: Optimize
                     for output_name, artifact_node in session.execute(
                         sql.select(bts.OutputArtifactLink.output_name, bts.ArtifactNode)
@@ -838,6 +863,10 @@ class OrchestratorService_Sql:
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
                     bts.ContainerExecutionStatus.FAILED
+                )
+                # Track pipeline completion if this is a root execution
+                _track_pipeline_completion_if_root(
+                    session=session, execution_node=execution_node
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
@@ -982,6 +1011,56 @@ def record_system_error_exception(execution: bts.ExecutionNode, exception: Excep
     execution.extra_data[
         bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY
     ] = traceback.format_exc()
+
+
+def _track_pipeline_completion_if_root(
+    session: orm.Session,
+    execution_node: bts.ExecutionNode,
+):
+    """
+    Check if execution is a root execution and track pipeline completion metrics.
+
+    Args:
+        session: Database session
+        execution_node: Execution node that reached a terminal state
+    """
+    # Check if this execution is a root execution of a pipeline run
+    pipeline_run = session.scalar(
+        sql.select(bts.PipelineRun).where(
+            bts.PipelineRun.root_execution_id == execution_node.id
+        )
+    )
+
+    if pipeline_run:
+        # This is a root execution - track pipeline completion
+        status = execution_node.container_execution_status
+
+        # Map execution status to pipeline status
+        status_map = {
+            bts.ContainerExecutionStatus.SUCCEEDED: "succeeded",
+            bts.ContainerExecutionStatus.FAILED: "failed",
+            bts.ContainerExecutionStatus.CANCELLED: "cancelled",
+            bts.ContainerExecutionStatus.SYSTEM_ERROR: "failed",
+            bts.ContainerExecutionStatus.SKIPPED: "cancelled",
+        }
+
+        pipeline_status = status_map.get(status)
+        if pipeline_status:
+            # Update pipeline run updated_at timestamp
+            current_time = _get_current_time()
+            pipeline_run.updated_at = current_time
+
+            # Calculate duration
+            duration_seconds = None
+            if pipeline_run.created_at:
+                duration = current_time - pipeline_run.created_at
+                duration_seconds = duration.total_seconds()
+
+            metrics.track_pipeline_completed(
+                status=pipeline_status,
+                created_by=pipeline_run.created_by,
+                duration_seconds=duration_seconds,
+            )
 
 
 def _record_orchestration_error_message(

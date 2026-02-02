@@ -90,6 +90,82 @@ def get_meter():
     return _meter
 
 
+# Pipeline Run Metrics
+_pipeline_runs_counter = None
+_pipeline_run_duration_histogram = None
+
+
+def get_pipeline_metrics():
+    """Get or create pipeline run metrics."""
+    global _pipeline_runs_counter, _pipeline_run_duration_histogram
+
+    meter = get_meter()
+    if meter is None:
+        return None, None
+
+    if _pipeline_runs_counter is None:
+        _pipeline_runs_counter = meter.create_counter(
+            name="pipeline_runs_total",
+            description="Total number of pipeline runs by status",
+            unit="1",
+        )
+
+    if _pipeline_run_duration_histogram is None:
+        _pipeline_run_duration_histogram = meter.create_histogram(
+            name="pipeline_run_duration_seconds",
+            description="Duration of pipeline runs in seconds",
+            unit="s",
+        )
+
+    return _pipeline_runs_counter, _pipeline_run_duration_histogram
+
+
+def track_pipeline_created(created_by: str | None = None):
+    """Track pipeline run creation."""
+    counter, _ = get_pipeline_metrics()
+    if counter:
+        counter.add(
+            1,
+            {
+                "status": "running",
+                "created_by": created_by or "unknown",
+            },
+        )
+
+
+def track_pipeline_completed(
+    status: str,
+    created_by: str | None = None,
+    duration_seconds: float | None = None,
+):
+    """
+    Track pipeline run completion.
+
+    Args:
+        status: Terminal status (succeeded/failed/cancelled)
+        created_by: Username who created the pipeline
+        duration_seconds: Total pipeline duration from creation to completion
+    """
+    counter, histogram = get_pipeline_metrics()
+
+    if counter:
+        counter.add(
+            1,
+            {
+                "status": status,
+                "created_by": created_by or "unknown",
+            },
+        )
+
+    if histogram and duration_seconds is not None:
+        histogram.record(
+            duration_seconds,
+            {
+                "status": status,
+            },
+        )
+
+
 class HTTPMetricsMiddleware(BaseHTTPMiddleware):
     """
     Middleware to track HTTP request metrics.
