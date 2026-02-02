@@ -7,6 +7,8 @@ from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend.instrumentation import api_tracing
 from cloud_pipelines_backend.instrumentation import contextual_logging
+from cloud_pipelines_backend.instrumentation import metrics
+from cloud_pipelines_backend.instrumentation import otel_tracing
 
 app = fastapi.FastAPI(
     title="Cloud Pipelines API",
@@ -14,8 +16,17 @@ app = fastapi.FastAPI(
     separate_input_output_schemas=False,
 )
 
+# Configure OpenTelemetry tracing
+otel_tracing.setup_api_tracing(app)
+
+# Configure OpenTelemetry metrics
+metrics.setup_metrics(app)
+
 # Add request context middleware for automatic request_id generation
 app.add_middleware(api_tracing.RequestContextMiddleware)
+
+# Add HTTP metrics middleware
+app.add_middleware(metrics.HTTPMetricsMiddleware)
 
 
 @app.exception_handler(Exception)
