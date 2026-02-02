@@ -103,8 +103,14 @@ class OrchestratorService_Sql:
                     self.internal_process_one_queued_execution(
                         session=session, execution=queued_execution
                     )
+                    # Track successful processing
+                    metrics.track_executions_processed(
+                        queue_type="queued", found_work=True
+                    )
                 except Exception as ex:
                     _logger.exception("Error processing queued execution")
+                    # Track processing error
+                    metrics.track_queue_processing_error(queue_type="queued")
                     session.rollback()
                     queued_execution.container_execution_status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
@@ -128,6 +134,8 @@ class OrchestratorService_Sql:
             if not self._queued_executions_queue_idle:
                 self._queued_executions_queue_idle = True
                 _logger.debug(f"No queued executions found")
+            # Track that queue sweep found no work
+            metrics.track_executions_processed(queue_type="queued", found_work=False)
             return False
 
     def internal_process_running_executions_queue(self, session: orm.Session):
@@ -168,8 +176,14 @@ class OrchestratorService_Sql:
                         session=session,
                         container_execution=running_container_execution,
                     )
+                    # Track successful processing
+                    metrics.track_executions_processed(
+                        queue_type="running", found_work=True
+                    )
                 except Exception as ex:
                     _logger.exception("Error processing running container execution")
+                    # Track processing error
+                    metrics.track_queue_processing_error(queue_type="running")
                     session.rollback()
                     running_container_execution.status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
@@ -205,6 +219,8 @@ class OrchestratorService_Sql:
             if not self._running_executions_queue_idle:
                 _logger.debug(f"No running container executions found")
                 self._running_executions_queue_idle = True
+            # Track that queue sweep found no work
+            metrics.track_executions_processed(queue_type="running", found_work=False)
             return False
 
     def internal_process_one_queued_execution(
