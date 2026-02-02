@@ -414,6 +414,40 @@ def track_database_query_duration(operation: str, duration_seconds: float):
         histogram.record(duration_seconds, {"operation": operation.lower()})
 
 
+# Orchestrator Error Tracking
+_orchestrator_errors_counter = None
+
+
+def get_orchestrator_errors_counter():
+    """Get or create orchestrator errors counter."""
+    global _orchestrator_errors_counter
+
+    meter = get_meter()
+    if meter is None:
+        return None
+
+    if _orchestrator_errors_counter is None:
+        _orchestrator_errors_counter = meter.create_counter(
+            name="orchestrator_errors_total",
+            description="Total number of orchestrator errors by type",
+            unit="1",
+        )
+
+    return _orchestrator_errors_counter
+
+
+def track_orchestrator_error(error_type: str):
+    """
+    Track orchestrator error by type.
+
+    Args:
+        error_type: Type of error (system_error/launch_error/missing_outputs)
+    """
+    counter = get_orchestrator_errors_counter()
+    if counter:
+        counter.add(1, {"error_type": error_type})
+
+
 class HTTPMetricsMiddleware(BaseHTTPMiddleware):
     """
     Middleware to track HTTP request metrics.
