@@ -1,6 +1,54 @@
+import logging
+import time
+
 import sqlalchemy
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
 from . import backend_types_sql as bts
+from .instrumentation import metrics
+
+logger = logging.getLogger(__name__)
+
+# Slow query threshold for logging (in seconds)
+_SLOW_QUERY_LOG_THRESHOLD = 1.0
+
+# Slow query threshold for metrics (in seconds)
+_SLOW_QUERY_METRIC_THRESHOLD = 0.01
+
+
+@event.listens_for(Engine, "before_cursor_execute")
+def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    """Record query start time."""
+    context._query_start_time = time.time()
+
+
+@event.listens_for(Engine, "after_cursor_execute")
+def _after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    """Track slow queries and log very slow ones."""
+    duration = time.time() - context._query_start_time
+
+    # Only track queries that exceed the metric threshold (10ms)
+    if duration > _SLOW_QUERY_METRIC_THRESHOLD:
+        # Extract operation type from SQL statement
+        operation = statement.strip().split()[0].upper() if statement else "UNKNOWN"
+        metrics.track_database_query_duration(
+            operation=operation,
+            duration_seconds=duration,
+        )
+
+    # Log very slow queries with full SQL for debugging
+    if duration > _SLOW_QUERY_LOG_THRESHOLD:
+        logger.warning(
+            "Slow database query detected",
+            extra={
+                "duration_seconds": duration,
+                "operation": (
+                    statement.strip().split()[0].upper() if statement else "UNKNOWN"
+                ),
+                "query": statement,
+            },
+        )
 
 
 def create_db_engine_and_migrate_db(

@@ -379,6 +379,41 @@ def track_container_execution_duration(
         )
 
 
+# Database Performance Metrics
+_db_query_duration_histogram = None
+
+
+def get_database_performance_metrics():
+    """Get or create database performance metrics."""
+    global _db_query_duration_histogram
+
+    meter = get_meter()
+    if meter is None:
+        return None
+
+    if _db_query_duration_histogram is None:
+        _db_query_duration_histogram = meter.create_histogram(
+            name="db_query_duration_seconds",
+            description="Duration of slow database queries (>10ms) in seconds",
+            unit="s",
+        )
+
+    return _db_query_duration_histogram
+
+
+def track_database_query_duration(operation: str, duration_seconds: float):
+    """
+    Track database query duration (only for slow queries >10ms).
+
+    Args:
+        operation: SQL operation type (select/insert/update/delete)
+        duration_seconds: Query duration
+    """
+    histogram = get_database_performance_metrics()
+    if histogram:
+        histogram.record(duration_seconds, {"operation": operation.lower()})
+
+
 class HTTPMetricsMiddleware(BaseHTTPMiddleware):
     """
     Middleware to track HTTP request metrics.
