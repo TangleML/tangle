@@ -166,6 +166,65 @@ def track_pipeline_completed(
         )
 
 
+# Orchestrator Queue Metrics
+_orchestrator_processing_errors_counter = None
+_orchestrator_executions_processed_counter = None
+
+
+def get_orchestrator_queue_metrics():
+    """Get or create orchestrator queue metrics."""
+    global _orchestrator_processing_errors_counter, _orchestrator_executions_processed_counter
+
+    meter = get_meter()
+    if meter is None:
+        return None, None
+
+    if _orchestrator_processing_errors_counter is None:
+        _orchestrator_processing_errors_counter = meter.create_counter(
+            name="orchestrator_queue_processing_errors_total",
+            description="Total number of orchestrator queue processing errors",
+            unit="1",
+        )
+
+    if _orchestrator_executions_processed_counter is None:
+        _orchestrator_executions_processed_counter = meter.create_counter(
+            name="orchestrator_executions_processed_total",
+            description="Total number of executions processed by orchestrator queues",
+            unit="1",
+        )
+
+    return (
+        _orchestrator_processing_errors_counter,
+        _orchestrator_executions_processed_counter,
+    )
+
+
+def track_queue_processing_error(queue_type: str):
+    """Track orchestrator queue processing error."""
+    error_counter, _ = get_orchestrator_queue_metrics()
+    if error_counter:
+        error_counter.add(1, {"queue_type": queue_type})
+
+
+def track_executions_processed(queue_type: str, found_work: bool):
+    """
+    Track executions processed by orchestrator queue.
+
+    Args:
+        queue_type: Type of queue (queued/running)
+        found_work: Whether the queue found work to process
+    """
+    _, processed_counter = get_orchestrator_queue_metrics()
+    if processed_counter:
+        processed_counter.add(
+            1,
+            {
+                "queue_type": queue_type,
+                "found_work": str(found_work).lower(),
+            },
+        )
+
+
 class HTTPMetricsMiddleware(BaseHTTPMiddleware):
     """
     Middleware to track HTTP request metrics.
