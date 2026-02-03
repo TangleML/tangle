@@ -225,6 +225,72 @@ def track_executions_processed(queue_type: str, found_work: bool):
         )
 
 
+# Execution Node Metrics
+_execution_nodes_counter = None
+_execution_node_duration_histogram = None
+_execution_cache_hits_counter = None
+
+
+def get_execution_node_metrics():
+    """Get or create execution node metrics."""
+    global _execution_nodes_counter, _execution_node_duration_histogram, _execution_cache_hits_counter
+
+    meter = get_meter()
+    if meter is None:
+        return None, None, None
+
+    if _execution_nodes_counter is None:
+        _execution_nodes_counter = meter.create_counter(
+            name="execution_nodes_total",
+            description="Total number of execution nodes by terminal status",
+            unit="1",
+        )
+
+    if _execution_node_duration_histogram is None:
+        _execution_node_duration_histogram = meter.create_histogram(
+            name="execution_node_duration_seconds",
+            description="Duration of execution nodes in seconds",
+            unit="s",
+        )
+
+    if _execution_cache_hits_counter is None:
+        _execution_cache_hits_counter = meter.create_counter(
+            name="execution_cache_hits_total",
+            description="Total number of execution cache hits",
+            unit="1",
+        )
+
+    return (
+        _execution_nodes_counter,
+        _execution_node_duration_histogram,
+        _execution_cache_hits_counter,
+    )
+
+
+def track_execution_completed(status: str, duration_seconds: float | None = None):
+    """
+    Track execution node completion.
+
+    Args:
+        status: Terminal status (succeeded/failed/skipped/system_error/cancelled)
+        duration_seconds: Total execution duration from creation to terminal state
+    """
+    counter, histogram, _ = get_execution_node_metrics()
+
+    if counter:
+        counter.add(1, {"status": status})
+
+    if histogram and duration_seconds is not None:
+        histogram.record(duration_seconds, {"status": status})
+
+
+def track_cache_hit():
+    """Track execution cache hit."""
+    _, _, cache_counter = get_execution_node_metrics()
+    if cache_counter:
+        cache_counter.add(1)
+
+
 class HTTPMetricsMiddleware(BaseHTTPMiddleware):
     """
     Middleware to track HTTP request metrics.
