@@ -111,6 +111,8 @@ class OrchestratorService_Sql:
                     _logger.exception("Error processing queued execution")
                     # Track processing error
                     metrics.track_queue_processing_error(queue_type="queued")
+                    # Track system error
+                    metrics.track_orchestrator_error(error_type="system_error")
                     session.rollback()
                     queued_execution.container_execution_status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
@@ -189,6 +191,8 @@ class OrchestratorService_Sql:
                     _logger.exception("Error processing running container execution")
                     # Track processing error
                     metrics.track_queue_processing_error(queue_type="running")
+                    # Track system error
+                    metrics.track_orchestrator_error(error_type="system_error")
                     session.rollback()
                     running_container_execution.status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
@@ -566,6 +570,8 @@ class OrchestratorService_Sql:
                 launcher_class_name=launcher_class_name,
                 success=False,
             )
+            # Track launch error
+            metrics.track_orchestrator_error(error_type="launch_error")
             session.rollback()
             with session.begin():
                 # Logs whole exception
@@ -818,6 +824,8 @@ class OrchestratorService_Sql:
             if missing_output_names:
                 # Marking the container execution as FAILED (even though the program itself has completed successfully)
                 container_execution.status = bts.ContainerExecutionStatus.FAILED
+                # Track missing outputs error
+                metrics.track_orchestrator_error(error_type="missing_outputs")
                 # Track container execution duration
                 if container_execution.started_at and container_execution.ended_at:
                     duration = (
