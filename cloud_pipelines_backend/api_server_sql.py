@@ -30,6 +30,7 @@ from . import component_structures as structures
 from . import backend_types_sql as bts
 from . import errors
 from .errors import ItemNotFoundError
+from .instrumentation import metrics
 
 
 # ==== PipelineJobService
@@ -111,6 +112,10 @@ class PipelineRunsApiService_Sql:
             session.commit()
 
         session.refresh(pipeline_run)
+
+        # Track pipeline creation metric
+        metrics.track_pipeline_created(created_by=created_by)
+
         return PipelineRunResponse.from_db(pipeline_run)
 
     def get(self, session: orm.Session, id: bts.IdType) -> PipelineRunResponse:
