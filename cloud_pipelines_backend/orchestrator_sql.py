@@ -536,6 +536,7 @@ class OrchestratorService_Sql:
             container_execution_uuid
         )
 
+        launcher_class_name = self._launcher.__class__.__name__
         try:
             launched_container: launcher_interfaces.LaunchedContainer = (
                 self._launcher.launch_container_task(
@@ -547,6 +548,11 @@ class OrchestratorService_Sql:
                     annotations=full_annotations,
                 )
             )
+            # Track successful container launch
+            metrics.track_container_launch(
+                launcher_class_name=launcher_class_name,
+                success=True,
+            )
             if launched_container.status not in (
                 launcher_interfaces.ContainerStatus.PENDING,
                 launcher_interfaces.ContainerStatus.RUNNING,
@@ -555,6 +561,11 @@ class OrchestratorService_Sql:
                     f"Unexpected status of just launched container: {launched_container.status=}, {launched_container=}"
                 )
         except Exception as ex:
+            # Track failed container launch
+            metrics.track_container_launch(
+                launcher_class_name=launcher_class_name,
+                success=False,
+            )
             session.rollback()
             with session.begin():
                 # Logs whole exception
@@ -745,6 +756,15 @@ class OrchestratorService_Sql:
             container_execution.started_at = reloaded_launched_container.started_at
             container_execution.ended_at = reloaded_launched_container.ended_at
 
+            # Track container execution duration
+            if container_execution.started_at and container_execution.ended_at:
+                duration = container_execution.ended_at - container_execution.started_at
+                metrics.track_container_execution_duration(
+                    launcher_class_name=self._launcher.__class__.__name__,
+                    status="succeeded",
+                    duration_seconds=duration.total_seconds(),
+                )
+
             # Don't fail the execution if log upload fails.
             # Logs are important, but not so important that we should fail a successfully completed container execution.
             try:
@@ -798,6 +818,16 @@ class OrchestratorService_Sql:
             if missing_output_names:
                 # Marking the container execution as FAILED (even though the program itself has completed successfully)
                 container_execution.status = bts.ContainerExecutionStatus.FAILED
+                # Track container execution duration
+                if container_execution.started_at and container_execution.ended_at:
+                    duration = (
+                        container_execution.ended_at - container_execution.started_at
+                    )
+                    metrics.track_container_execution_duration(
+                        launcher_class_name=self._launcher.__class__.__name__,
+                        status="failed",
+                        duration_seconds=duration.total_seconds(),
+                    )
                 orchestration_error_message = f"Container execution is marked as FAILED due to missing outputs: {missing_output_names}."
                 _logger.error(orchestration_error_message)
                 _record_orchestration_error_message(
@@ -897,6 +927,16 @@ class OrchestratorService_Sql:
             container_execution.exit_code = reloaded_launched_container.exit_code
             container_execution.started_at = reloaded_launched_container.started_at
             container_execution.ended_at = reloaded_launched_container.ended_at
+
+            # Track container execution duration
+            if container_execution.started_at and container_execution.ended_at:
+                duration = container_execution.ended_at - container_execution.started_at
+                metrics.track_container_execution_duration(
+                    launcher_class_name=self._launcher.__class__.__name__,
+                    status="failed",
+                    duration_seconds=duration.total_seconds(),
+                )
+
             launcher_error = reloaded_launched_container.launcher_error_message
             if launcher_error:
                 orchestration_error_message = f"Launcher error: {launcher_error}"

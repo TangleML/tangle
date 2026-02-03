@@ -291,6 +291,94 @@ def track_cache_hit():
         cache_counter.add(1)
 
 
+# Container Performance Metrics
+_container_launches_counter = None
+_container_execution_duration_histogram = None
+
+
+def get_container_performance_metrics():
+    """Get or create container performance metrics."""
+    global _container_launches_counter, _container_execution_duration_histogram
+
+    meter = get_meter()
+    if meter is None:
+        return None, None
+
+    if _container_launches_counter is None:
+        _container_launches_counter = meter.create_counter(
+            name="container_launches_total",
+            description="Total number of container launches by launcher type and success",
+            unit="1",
+        )
+
+    if _container_execution_duration_histogram is None:
+        _container_execution_duration_histogram = meter.create_histogram(
+            name="container_execution_duration_seconds",
+            description="Duration of container executions in seconds",
+            unit="s",
+        )
+
+    return _container_launches_counter, _container_execution_duration_histogram
+
+
+def _get_launcher_type(launcher_class_name: str) -> str:
+    """Extract launcher type from launcher class name."""
+    class_name_lower = launcher_class_name.lower()
+    if "kubernetes" in class_name_lower or "gke" in class_name_lower:
+        return "kubernetes"
+    elif "docker" in class_name_lower:
+        return "docker"
+    elif "huggingface" in class_name_lower:
+        return "huggingface"
+    else:
+        return "unknown"
+
+
+def track_container_launch(launcher_class_name: str, success: bool):
+    """
+    Track container launch attempt.
+
+    Args:
+        launcher_class_name: Name of the launcher class used
+        success: Whether the launch was successful
+    """
+    counter, _ = get_container_performance_metrics()
+    if counter:
+        launcher_type = _get_launcher_type(launcher_class_name)
+        counter.add(
+            1,
+            {
+                "launcher_type": launcher_type,
+                "success": str(success).lower(),
+            },
+        )
+
+
+def track_container_execution_duration(
+    launcher_class_name: str,
+    status: str,
+    duration_seconds: float | None = None,
+):
+    """
+    Track container execution duration.
+
+    Args:
+        launcher_class_name: Name of the launcher class used
+        status: Final status (succeeded/failed)
+        duration_seconds: Duration from container start to end
+    """
+    _, histogram = get_container_performance_metrics()
+    if histogram and duration_seconds is not None:
+        launcher_type = _get_launcher_type(launcher_class_name)
+        histogram.record(
+            duration_seconds,
+            {
+                "launcher_type": launcher_type,
+                "status": status,
+            },
+        )
+
+
 class HTTPMetricsMiddleware(BaseHTTPMiddleware):
     """
     Middleware to track HTTP request metrics.
