@@ -77,3 +77,9 @@ def migrate_db(db_engine: sqlalchemy.Engine):
     for index in bts.ExecutionNode.__table__.indexes:
         if index.name == "ix_execution_node_container_execution_cache_key":
             index.create(db_engine, checkfirst=True)
+
+    # Migration for annotation filtering feature
+    for index in bts.PipelineRunAnnotation.__table__.indexes:
+        if index.name == bts.PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME:
+            index.create(db_engine, checkfirst=True)
+            break

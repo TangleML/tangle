@@ -2,7 +2,7 @@ import dataclasses
 import datetime
 import enum
 import typing
-from typing import Any
+from typing import Any, Final
 
 import sqlalchemy as sql
 from sqlalchemy import orm
@@ -64,7 +64,7 @@ id_column = orm.mapped_column(
 
 # # Needed to put a union type into DB
 # class SqlIOTypeStruct(_BaseModel):
-#     type: structures.TypeSpecType
+# type: structures.TypeSpecType
 # No. We'll represent TypeSpecType as name:str + properties:dict
 # Supported cases:
 # * type: "name"
@@ -466,6 +466,11 @@ class ContainerExecution(_TableBase):
     )
 
 
+PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME: Final[str] = (
+    "ix_pipeline_run_annotation_key_value"
+)
+
+
 class PipelineRunAnnotation(_TableBase):
     __tablename__ = "pipeline_run_annotation"
     pipeline_run_id: orm.Mapped[IdType] = orm.mapped_column(
@@ -476,3 +481,13 @@ class PipelineRunAnnotation(_TableBase):
     pipeline_run: orm.Mapped[PipelineRun] = orm.relationship(repr=False, init=False)
     key: orm.Mapped[str] = orm.mapped_column(default=None, primary_key=True)
     value: orm.Mapped[str | None] = orm.mapped_column(default=None)
+
+    __table_args__ = (
+        # Index for searching pipeline runs by annotation key/value
+        # Enables efficient queries like "find runs where key='environment' and value='production'"
+        sql.Index(
+            PIPELINE_RUN_ANNOTATION_KEY_VALUE_INDEX_NAME,
+            "key",
+            "value",
+        ),
+    )
