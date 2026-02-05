@@ -134,7 +134,7 @@ class PipelineRunsApiService_Sql:
                 f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be terminated by {terminated_by}"
             )
         _logger.info(
-            "{pipeline_run.id=} The pipeline run is being cancelled by {terminated_by}."
+            f"{pipeline_run.id=} The pipeline run is being cancelled by {terminated_by}."
         )
         # Marking the pipeline run for termination
         if pipeline_run.extra_data is None:
