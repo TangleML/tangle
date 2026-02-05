@@ -8,6 +8,11 @@ dependencies = [
     "cloud-pipelines>=0.23.2.4",
     "fastapi[standard]>=0.115.12",
     "kubernetes>=33.1.0",
+    "opentelemetry-api>=1.28.2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.39.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.1",
+    "opentelemetry-instrumentation-fastapi>=0.60b1",
+    "opentelemetry-sdk>=1.39.1",
     "requests<2.32.0",
     "sqlalchemy>=2.0.41",
 ]
