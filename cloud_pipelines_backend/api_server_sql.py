@@ -133,10 +133,14 @@ class PipelineRunsApiService_Sql:
             raise errors.PermissionError(
                 f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be terminated by {terminated_by}"
             )
+        _logger.info(
+            "{pipeline_run.id=} The pipeline run is being cancelled by {terminated_by}."
+        )
         # Marking the pipeline run for termination
         if pipeline_run.extra_data is None:
             pipeline_run.extra_data = {}
         pipeline_run.extra_data["desired_state"] = "TERMINATED"
+        pipeline_run.extra_data["terminated_by"] = terminated_by
 
         # Marking all running executions belonging to the run for termination
         running_execution_nodes = [
