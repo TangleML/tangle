@@ -108,6 +108,11 @@ class PipelineRunsApiService_Sql:
                 },
             )
             session.add(pipeline_run)
+            for key, value in (annotations or {}).items():
+                pipeline_run_annotation = bts.PipelineRunAnnotation(
+                    pipeline_run_id=key, key=key, value=value
+                )
+                session.add(pipeline_run_annotation)
             session.commit()
 
         session.refresh(pipeline_run)
