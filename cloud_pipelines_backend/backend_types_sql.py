@@ -406,6 +406,7 @@ EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY = (
 EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = (
     "orchestration_error_message"
 )
+EXECUTION_NODE_EXTRA_DATA_SECRET_REFERENCE_ARGUMENTS_KEY = "secret_reference_arguments"
 CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = (
     "orchestration_error_message"
 )
@@ -476,3 +477,13 @@ class PipelineRunAnnotation(_TableBase):
     pipeline_run: orm.Mapped[PipelineRun] = orm.relationship(repr=False, init=False)
     key: orm.Mapped[str] = orm.mapped_column(default=None, primary_key=True)
     value: orm.Mapped[str | None] = orm.mapped_column(default=None)
+
+
+class Secret(_TableBase):
+    __tablename__ = "secret"
+    user_id: orm.Mapped[str] = orm.mapped_column(primary_key=True, index=True)
+    secret_id: orm.Mapped[str] = orm.mapped_column(primary_key=True)
+    secret_value: orm.Mapped[str]
+    created_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
+    updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
+    extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)

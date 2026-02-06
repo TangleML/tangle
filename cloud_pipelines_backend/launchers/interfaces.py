@@ -36,6 +36,7 @@ class InputArgument:
     value: str | None = None
     uri: str | None = None
     staging_uri: str
+    is_secret: bool = False
 
 
 class ContainerTaskLauncher(typing.Generic[_TLaunchedContainer], abc.ABC):

@@ -317,7 +317,23 @@ class TaskOutputArgument(_BaseModel):  # Has additional constructor for convenie
     task_output: TaskOutputReference
 
 
-ArgumentType = Union[PrimitiveTypes, GraphInputArgument, TaskOutputArgument]
+@dataclasses.dataclass
+class SecretReference(_BaseModel):
+    """References a secret"""
+
+    id: str
+
+
+@dataclasses.dataclass
+class SecretArgument(_BaseModel):
+    """Argument that references a secret"""
+
+    secret: SecretReference
+
+
+ArgumentType = Union[
+    PrimitiveTypes, GraphInputArgument, TaskOutputArgument, SecretArgument
+]
 
 
 @dataclasses.dataclass
