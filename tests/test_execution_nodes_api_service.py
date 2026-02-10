@@ -68,6 +68,9 @@ class TestGetGraphExecutionState:
 
         assert isinstance(result, GetGraphExecutionStateResponse)
         assert result.child_execution_status_stats == {}
+        assert result.summary.total_nodes == 0
+        assert result.summary.ended_nodes == 0
+        assert result.summary.has_ended is False
 
     def test_children_with_no_status_are_excluded(self):
         """Children whose container_execution_status is None are not counted."""
@@ -87,6 +90,9 @@ class TestGetGraphExecutionState:
             result = self.service.get_graph_execution_state(session, parent.id)
 
         assert result.child_execution_status_stats == {}
+        assert result.summary.total_nodes == 0
+        assert result.summary.ended_nodes == 0
+        assert result.summary.has_ended is False
 
     def test_direct_container_children(self):
         """Children that are direct container nodes (no descendants via ancestor links)."""
@@ -117,6 +123,9 @@ class TestGetGraphExecutionState:
         assert stats[child1.id] == {"SUCCEEDED": 1}
         assert child2.id in stats
         assert stats[child2.id] == {"RUNNING": 1}
+        assert result.summary.total_nodes == 2
+        assert result.summary.ended_nodes == 1
+        assert result.summary.has_ended is False
 
     def test_three_level_mixed_stats(self):
         """3-level deep graph with direct tasks and nested sub-graphs.
@@ -301,6 +310,19 @@ class TestGetGraphExecutionState:
         # sub_graph_a_b is NOT a direct child of root, so it does not
         # appear as a key in the stats
         assert sub_graph_a_b.id not in stats
+
+        # -- Summary: total_nodes and ended_nodes --
+        # Direct children (Query 2): task_1(1), task_2(1), task_3(1) = 3 nodes
+        # Descendants of sub_graph_a (Query 1): 6 nodes
+        #   CANCELLED(1), SKIPPED(1), RUNNING(1), INVALID(1), SYSTEM_ERROR(1), SUCCEEDED(1)
+        # Total = 3 + 6 = 9
+        assert result.summary.total_nodes == 9
+        # Ended statuses: SUCCEEDED(task_1) + FAILED(task_2) = 2 from Query 2
+        #   + CANCELLED(1) + SKIPPED(1) + INVALID(1) + SYSTEM_ERROR(1) + SUCCEEDED(1) = 5 from Query 1
+        # QUEUED(task_3) and RUNNING(task_sg_a_3) are NOT ended
+        # Total ended = 2 + 5 = 7
+        assert result.summary.ended_nodes == 7
+        assert result.summary.has_ended is False
 
 
 if __name__ == "__main__":

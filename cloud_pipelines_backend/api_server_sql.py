@@ -522,10 +522,10 @@ class ArtifactNodeIdResponse:
     id: bts.IdType
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(kw_only=True)
 class GetGraphExecutionStateResponse:
     child_execution_status_stats: dict[bts.IdType, dict[str, int]]
-    pass
+    summary: ExecutionStatusSummary
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -692,14 +692,18 @@ class ExecutionNodesApiService_Sql:
         ) + tuple(child_container_execution_stat_rows)
         child_execution_status_stats: dict[bts.IdType, dict[str, int]] = {}
 
+        summary = ExecutionStatusSummary()
         for row in child_execution_stat_rows:
-            child_execution_id, status, count = row.tuple()
+            child_execution_id, status, count = row._tuple()
             status_stats = child_execution_status_stats.setdefault(
                 child_execution_id, {}
             )
             status_stats[status.value] = count
+            summary.count_node_status(status=status, count=count)
+
         return GetGraphExecutionStateResponse(
             child_execution_status_stats=child_execution_status_stats,
+            summary=summary,
         )
 
     def get_container_execution_state(
