@@ -1014,7 +1014,7 @@ class SecretsApiService:
         user_id: str,
         secret_name: str,
         secret_value: str,
-    ):
+    ) -> SecretInfoResponse:
         return self._set_secret_value(
             session=session,
             user_id=user_id,
@@ -1030,7 +1030,7 @@ class SecretsApiService:
         user_id: str,
         secret_name: str,
         secret_value: str,
-    ):
+    ) -> SecretInfoResponse:
         return self._set_secret_value(
             session=session,
             user_id=user_id,
@@ -1048,7 +1048,7 @@ class SecretsApiService:
         secret_value: str,
         raise_if_not_exists: bool = False,
         raise_if_exists: bool = False,
-    ):
+    ) -> SecretInfoResponse:
         current_time = _get_current_time()
         secret = session.get(bts.Secret, (user_id, secret_name))
         if secret:
@@ -1079,7 +1079,7 @@ class SecretsApiService:
         session: orm.Session,
         user_id: str,
         secret_name: str,
-    ):
+    ) -> None:
         secret = session.get(bts.Secret, (user_id, secret_name))
         if not secret:
             raise errors.ItemNotFoundError(
