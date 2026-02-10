@@ -1052,7 +1052,7 @@ class SecretsApiService:
         current_time = _get_current_time()
         secret = session.get(bts.Secret, (user_id, secret_id))
         if secret:
-            if not raise_if_exists:
+            if raise_if_exists:
                 raise errors.ItemAlreadyExistsError(
                     f"Secret with id '{secret_id}' already exists."
                 )
