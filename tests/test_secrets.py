@@ -16,7 +16,7 @@ def _initialize_db_and_get_session_factory() -> Callable[[], orm.Session]:
 
 def test_running_pipeline_with_secrets():
     user = "user1"
-    secret_id = "SECRET_1"
+    secret_name = "SECRET_1"
     secret_value = "SECRET_1_VALUE"
 
     secret_input_name = "secret_input"
@@ -83,7 +83,7 @@ def test_running_pipeline_with_secrets():
         secrets_service.create_secret(
             session=session_factory(),
             user_id=user,
-            secret_id=secret_id,
+            secret_name=secret_name,
             secret_value=secret_value,
         )
 
@@ -92,7 +92,7 @@ def test_running_pipeline_with_secrets():
             user_id=user,
         )
         assert list_secrets_response.secrets
-        assert list_secrets_response.secrets[0].secret_id == secret_id
+        assert list_secrets_response.secrets[0].secret_name == secret_name
 
         pipeline_runs_service.create(
             session=session_factory(),

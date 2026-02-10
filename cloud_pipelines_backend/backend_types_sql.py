@@ -482,7 +482,7 @@ class PipelineRunAnnotation(_TableBase):
 class Secret(_TableBase):
     __tablename__ = "secret"
     user_id: orm.Mapped[str] = orm.mapped_column(primary_key=True, index=True)
-    secret_id: orm.Mapped[str] = orm.mapped_column(primary_key=True)
+    secret_name: orm.Mapped[str] = orm.mapped_column(primary_key=True)
     secret_value: orm.Mapped[str]
     created_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
     updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)

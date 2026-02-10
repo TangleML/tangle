@@ -997,7 +997,7 @@ class ArtifactNodesApiService_Sql:
 # === Secrets Service
 @dataclasses.dataclass(kw_only=True)
 class SecretInfoResponse:
-    secret_id: str
+    secret_name: str
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -1012,13 +1012,13 @@ class SecretsApiService:
         *,
         session: orm.Session,
         user_id: str,
-        secret_id: str,
+        secret_name: str,
         secret_value: str,
     ):
         return self._set_secret_value(
             session=session,
             user_id=user_id,
-            secret_id=secret_id,
+            secret_name=secret_name,
             secret_value=secret_value,
             raise_if_exists=True,
         )
@@ -1028,13 +1028,13 @@ class SecretsApiService:
         *,
         session: orm.Session,
         user_id: str,
-        secret_id: str,
+        secret_name: str,
         secret_value: str,
     ):
         return self._set_secret_value(
             session=session,
             user_id=user_id,
-            secret_id=secret_id,
+            secret_name=secret_name,
             secret_value=secret_value,
             raise_if_not_exists=True,
         )
@@ -1044,28 +1044,28 @@ class SecretsApiService:
         *,
         session: orm.Session,
         user_id: str,
-        secret_id: str,
+        secret_name: str,
         secret_value: str,
         raise_if_not_exists: bool = False,
         raise_if_exists: bool = False,
     ):
         current_time = _get_current_time()
-        secret = session.get(bts.Secret, (user_id, secret_id))
+        secret = session.get(bts.Secret, (user_id, secret_name))
         if secret:
             if raise_if_exists:
                 raise errors.ItemAlreadyExistsError(
-                    f"Secret with id '{secret_id}' already exists."
+                    f"Secret with name '{secret_name}' already exists."
                 )
             secret.secret_value = secret_value
             secret.updated_at = current_time
         else:
             if raise_if_not_exists:
                 raise errors.ItemNotFoundError(
-                    f"Secret with id '{secret_id}' does not exist."
+                    f"Secret with name '{secret_name}' does not exist."
                 )
             secret = bts.Secret(
                 user_id=user_id,
-                secret_id=secret_id,
+                secret_name=secret_name,
                 secret_value=secret_value,
                 created_at=current_time,
                 updated_at=current_time,
@@ -1078,12 +1078,12 @@ class SecretsApiService:
         *,
         session: orm.Session,
         user_id: str,
-        secret_id: str,
+        secret_name: str,
     ):
-        secret = session.get(bts.Secret, (user_id, secret_id))
+        secret = session.get(bts.Secret, (user_id, secret_name))
         if not secret:
             raise errors.ItemNotFoundError(
-                f"Secret with id '{secret_id}' does not exist."
+                f"Secret with name '{secret_name}' does not exist."
             )
         session.delete(secret)
         session.commit()
@@ -1099,7 +1099,7 @@ class SecretsApiService:
         ).all()
         return ListSecretsResponse(
             secrets=[
-                SecretInfoResponse(secret_id=secret.secret_id) for secret in secrets
+                SecretInfoResponse(secret_name=secret.secret_name) for secret in secrets
             ]
         )
 

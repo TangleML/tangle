@@ -403,12 +403,12 @@ def _setup_routes_internal(
             inject_user_name(secrets_service.create_secret, parameter_name="user_id")
         )
     )
-    router.put("/api/secrets/{secret_id}", tags=["secrets"], **default_config)(
+    router.put("/api/secrets/{secret_name}", tags=["secrets"], **default_config)(
         inject_session_dependency(
             inject_user_name(secrets_service.update_secret, parameter_name="user_id")
         )
     )
-    router.delete("/api/secrets/{secret_id}", tags=["secrets"], **default_config)(
+    router.delete("/api/secrets/{secret_name}", tags=["secrets"], **default_config)(
         inject_session_dependency(
             inject_user_name(secrets_service.delete_secret, parameter_name="user_id")
         )
