@@ -26,6 +26,9 @@ _logger = logging.getLogger(__name__)
 
 _T = typing.TypeVar("_T")
 
+DYNAMIC_DATA_SECRET_KEY = "secret"
+DYNAMIC_DATA_SECRET_NAME_KEY = "name"
+
 
 class OrchestratorError(RuntimeError):
     pass
@@ -439,31 +442,36 @@ class OrchestratorService_Sql:
         # Handling secrets.
         # We read secrets from execution_node.extra_data rather than from task_spec.arguments,
         # because some secrets might have been passed from upstream graph inputs.
-        secret_reference_arguments = (execution.extra_data or {}).get(
-            bts.EXECUTION_NODE_EXTRA_DATA_SECRET_REFERENCE_ARGUMENTS_KEY, {}
-        )
+        dynamic_data_arguments: dict[str, dict[str, Any]] = (
+            execution.extra_data or {}
+        ).get(bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {})
         secret_hash = "<DUMMY_HASH_FOR_SECRET>"
-        for input_name, secret_reference_dict in secret_reference_arguments.items():
-            user_id = pipeline_run.created_by
-            secret_id = secret_reference_dict["id"]
-            secret = session.get(bts.Secret, (user_id, secret_id))
-            if not secret:
-                raise OrchestratorError(
-                    f"{execution.id=}: User error: Error resolving a secret argument for {input_name=}: User {user_id} does not have secret {secret_id}."
+        for input_name, dynamic_data_argument in dynamic_data_arguments.items():
+            if not isinstance(dynamic_data_argument, dict):
+                continue
+            dynamic_data_items = list(dynamic_data_argument.items())
+            dynamic_data_key, dynamic_data_parameters = dynamic_data_items[0]
+            if dynamic_data_key == DYNAMIC_DATA_SECRET_KEY:
+                secret_parameters = dynamic_data_parameters
+                user_id = pipeline_run.created_by
+                secret_name = secret_parameters[DYNAMIC_DATA_SECRET_NAME_KEY]
+                secret = session.get(bts.Secret, (user_id, secret_name))
+                if not secret:
+                    raise OrchestratorError(
+                        f"{execution.id=}: User error: Error resolving a secret argument for {input_name=}: User {user_id} does not have secret {secret_name}."
+                    )
+                secret_value = secret.secret_value
+                input_artifact_data[input_name] = bts.ArtifactData(
+                    total_size=len(secret_value.encode("utf-8")),
+                    is_dir=False,
+                    value=secret_value,
+                    uri=None,
+                    # This hash is not used, so we're using a dummy value here that makes it possible to identify the secret arguments in the following code.
+                    hash=secret_hash,
                 )
-            secret_value = secret.secret_value
-            input_artifact_data[input_name] = bts.ArtifactData(
-                total_size=len(secret_value.encode("utf-8")),
-                is_dir=False,
-                value=secret_value,
-                uri=None,
-                # This hash is not used, so we're using a dummy value here that makes it possible to identify the secret arguments in the following code.
-                hash=secret_hash,
-            )
         session.rollback()
 
         # Preparing the launcher input arguments
-
         input_arguments = {
             input_name: launcher_interfaces.InputArgument(
                 total_size=artifact_data.total_size,

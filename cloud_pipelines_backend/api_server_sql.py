@@ -1128,14 +1128,16 @@ class SecretsApiService:
 # No. Decided to first do topological sort and then 1-stage generation.
 
 
-_ArtifactNodeOrSecretType = typing.Union[bts.ArtifactNode, structures.SecretReference]
+_ArtifactNodeOrDynamicDataType = typing.Union[
+    bts.ArtifactNode, structures.DynamicDataArgument
+]
 
 
 def _recursively_create_all_executions_and_artifacts_root(
     session: orm.Session,
     root_task_spec: structures.TaskSpec,
 ) -> bts.ExecutionNode:
-    input_artifact_nodes: dict[str, _ArtifactNodeOrSecretType] = {}
+    input_artifact_nodes: dict[str, _ArtifactNodeOrDynamicDataType] = {}
 
     root_component_spec = root_task_spec.component_ref.spec
     if not root_component_spec:
@@ -1174,8 +1176,8 @@ def _recursively_create_all_executions_and_artifacts_root(
             # This constant artifact won't be added to the DB
             # TODO: Actually, they will be added...
             # We don't need to link this input artifact here. It will be handled downstream.
-        elif isinstance(input_argument, structures.SecretArgument):
-            input_artifact_nodes[input_name] = input_argument.secret
+        elif isinstance(input_argument, structures.DynamicDataArgument):
+            input_artifact_nodes[input_name] = input_argument
         else:
             raise ApiServiceError(
                 f"root task constant argument must be a string, but got {input_name}={input_argument}. {root_task_spec=}"
@@ -1193,7 +1195,7 @@ def _recursively_create_all_executions_and_artifacts_root(
 def _recursively_create_all_executions_and_artifacts(
     session: orm.Session,
     root_task_spec: structures.TaskSpec,
-    input_artifact_nodes: dict[str, _ArtifactNodeOrSecretType],
+    input_artifact_nodes: dict[str, _ArtifactNodeOrDynamicDataType],
     ancestors: list[bts.ExecutionNode],
 ) -> bts.ExecutionNode:
     root_component_spec = root_task_spec.component_ref.spec
@@ -1226,15 +1228,20 @@ def _recursively_create_all_executions_and_artifacts(
     input_artifact_nodes = dict(input_artifact_nodes)
     for input_spec in root_component_spec.inputs or []:
         input_artifact_node = input_artifact_nodes.get(input_spec.name)
-        if isinstance(input_artifact_node, structures.SecretReference):
+        if isinstance(input_artifact_node, structures.DynamicDataArgument):
             # We don't use these secret arguments, but adding them just in case.
             extra_data = root_execution_node.extra_data or {}
-            secret_reference_arguments = extra_data.setdefault(
-                bts.EXECUTION_NODE_EXTRA_DATA_SECRET_REFERENCE_ARGUMENTS_KEY, {}
+            dynamic_data_arguments = extra_data.setdefault(
+                bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {}
             )
-            secret_reference_arguments[input_spec.name] = (
-                input_artifact_node.to_json_dict()
-            )
+            dynamic_data_arguments[input_spec.name] = input_artifact_node.dynamic_data
+            if not (
+                isinstance(input_artifact_node.dynamic_data, str)
+                or len(input_artifact_node.dynamic_data) == 1
+            ):
+                raise ApiServiceError(
+                    f"Dynamic data argument must be a string or a dict with a single key set, but got {input_artifact_node.dynamic_data}"
+                )
             root_execution_node.extra_data = extra_data
             # Not adding any artifact link for secret inputs
             continue
@@ -1331,10 +1338,12 @@ def _recursively_create_all_executions_and_artifacts(
                 raise ApiServiceError(
                     f"child_task_spec.component_ref.spec is empty. {child_task_spec=}"
                 )
-            child_task_input_artifact_nodes: dict[str, _ArtifactNodeOrSecretType] = {}
+            child_task_input_artifact_nodes: dict[
+                str, _ArtifactNodeOrDynamicDataType
+            ] = {}
             for input_spec in child_component_spec.inputs or []:
                 input_argument = (child_task_spec.arguments or {}).get(input_spec.name)
-                input_artifact_node: _ArtifactNodeOrSecretType | None = None
+                input_artifact_node: _ArtifactNodeOrDynamicDataType | None = None
                 if input_argument is None and not input_spec.optional:
                     # Not failing on unconnected required input if there is a default value
                     if input_spec.default is None:
@@ -1374,9 +1383,9 @@ def _recursively_create_all_executions_and_artifacts(
                     #         artifact_type=input_spec.type,
                     #     )
                     # )
-                elif isinstance(input_argument, structures.SecretArgument):
-                    # We'll deal with secrets when launching the container.
-                    input_artifact_node = input_argument.secret
+                elif isinstance(input_argument, structures.DynamicDataArgument):
+                    # We'll deal with dynamic data (e.g. secrets) when launching the container.
+                    input_artifact_node = input_argument
                 else:
                     raise ApiServiceError(
                         f"Unexpected task argument: {input_spec.name}={input_argument}. {child_task_spec=}"

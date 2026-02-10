@@ -317,22 +317,25 @@ class TaskOutputArgument(_BaseModel):  # Has additional constructor for convenie
     task_output: TaskOutputReference
 
 
-@dataclasses.dataclass
-class SecretReference(_BaseModel):
-    """References a secret"""
-
-    id: str
+DynamicDataReference = str | dict[str, Any]
 
 
 @dataclasses.dataclass
-class SecretArgument(_BaseModel):
-    """Argument that references a secret"""
+class DynamicDataArgument(_BaseModel):
+    """Argument that references data that's dynamically produced by the execution system at runtime.
 
-    secret: SecretReference
+    Examples of dynamic data:
+    * Secret value
+    * Container execution ID
+    * Pipeline run ID
+    * Loop index/item
+    """
+
+    dynamic_data: DynamicDataReference
 
 
 ArgumentType = Union[
-    PrimitiveTypes, GraphInputArgument, TaskOutputArgument, SecretArgument
+    PrimitiveTypes, GraphInputArgument, TaskOutputArgument, DynamicDataArgument
 ]
 
 

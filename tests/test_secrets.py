@@ -33,10 +33,8 @@ def test_running_pipeline_with_secrets():
     task_spec1 = component_structures.TaskSpec(
         component_ref=component_structures.ComponentReference(spec=component_spec),
         arguments={
-            secret_input_name: component_structures.SecretArgument(
-                secret=component_structures.SecretReference(
-                    id=secret_id,
-                )
+            secret_input_name: component_structures.DynamicDataArgument(
+                dynamic_data={"secret": {"name": secret_name}}
             )
         },
     )
@@ -70,8 +68,8 @@ def test_running_pipeline_with_secrets():
         root_pipeline_task = component_structures.TaskSpec(
             component_ref=component_structures.ComponentReference(spec=pipeline_spec),
             arguments={
-                graph_input_name: component_structures.SecretArgument(
-                    secret=component_structures.SecretReference(id=secret_id)
+                graph_input_name: component_structures.DynamicDataArgument(
+                    dynamic_data={"secret": {"name": secret_name}}
                 )
             },
         )
