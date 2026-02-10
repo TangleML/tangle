@@ -998,6 +998,16 @@ class ArtifactNodesApiService_Sql:
 @dataclasses.dataclass(kw_only=True)
 class SecretInfoResponse:
     secret_name: str
+    created_at: datetime.datetime | None
+    updated_at: datetime.datetime | None
+
+    @classmethod
+    def from_db(cls, secret_row: bts.Secret) -> "SecretInfoResponse":
+        return SecretInfoResponse(
+            secret_name=secret_row.secret_name,
+            created_at=secret_row.created_at,
+            updated_at=secret_row.updated_at,
+        )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -1071,7 +1081,9 @@ class SecretsApiService:
                 updated_at=current_time,
             )
             session.add(secret)
+        response = SecretInfoResponse.from_db(secret)
         session.commit()
+        return response
 
     def delete_secret(
         self,
@@ -1098,9 +1110,7 @@ class SecretsApiService:
             sql.select(bts.Secret).where(bts.Secret.user_id == user_id)
         ).all()
         return ListSecretsResponse(
-            secrets=[
-                SecretInfoResponse(secret_name=secret.secret_name) for secret in secrets
-            ]
+            secrets=[SecretInfoResponse.from_db(secret) for secret in secrets]
         )
 
 
