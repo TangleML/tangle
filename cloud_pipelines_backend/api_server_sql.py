@@ -1025,6 +1025,9 @@ class SecretsApiService:
         secret_name: str,
         secret_value: str,
     ) -> SecretInfoResponse:
+        secret_name = secret_name.strip()
+        if not secret_name:
+            raise ApiServiceError(f"Secret name must not be empty.")
         return self._set_secret_value(
             session=session,
             user_id=user_id,
