@@ -998,6 +998,147 @@ class ArtifactNodesApiService_Sql:
         return GetArtifactSignedUrlResponse(signed_url=signed_url)
 
 
+# === Secrets Service
+@dataclasses.dataclass(kw_only=True)
+class SecretInfoResponse:
+    secret_name: str
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+    expires_at: datetime.datetime | None = None
+    description: str | None = None
+
+    @classmethod
+    def from_db(cls, secret_row: bts.Secret) -> "SecretInfoResponse":
+        return SecretInfoResponse(
+            secret_name=secret_row.secret_name,
+            created_at=secret_row.created_at,
+            updated_at=secret_row.updated_at,
+            expires_at=secret_row.expires_at,
+            description=secret_row.description,
+        )
+
+
+@dataclasses.dataclass(kw_only=True)
+class ListSecretsResponse:
+    secrets: list[SecretInfoResponse]
+
+
+class SecretsApiService:
+
+    def create_secret(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        secret_name: str,
+        secret_value: str,
+        description: str | None = None,
+        expires_at: datetime.datetime | None = None,
+    ) -> SecretInfoResponse:
+        secret_name = secret_name.strip()
+        if not secret_name:
+            raise ApiServiceError(f"Secret name must not be empty.")
+        return self._create_or_update_secret(
+            session=session,
+            user_id=user_id,
+            secret_name=secret_name,
+            secret_value=secret_value,
+            description=description,
+            expires_at=expires_at,
+            raise_if_exists=True,
+        )
+
+    def update_secret(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        secret_name: str,
+        secret_value: str,
+        description: str | None = None,
+        expires_at: datetime.datetime | None = None,
+    ) -> SecretInfoResponse:
+        return self._create_or_update_secret(
+            session=session,
+            user_id=user_id,
+            secret_name=secret_name,
+            secret_value=secret_value,
+            description=description,
+            expires_at=expires_at,
+            raise_if_not_exists=True,
+        )
+
+    def _create_or_update_secret(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        secret_name: str,
+        secret_value: str,
+        description: str | None = None,
+        expires_at: datetime.datetime | None = None,
+        raise_if_not_exists: bool = False,
+        raise_if_exists: bool = False,
+    ) -> SecretInfoResponse:
+        current_time = _get_current_time()
+        secret = session.get(bts.Secret, (user_id, secret_name))
+        if secret:
+            if raise_if_exists:
+                raise errors.ItemAlreadyExistsError(
+                    f"Secret with name '{secret_name}' already exists."
+                )
+            secret.secret_value = secret_value
+            secret.updated_at = current_time
+        else:
+            if raise_if_not_exists:
+                raise errors.ItemNotFoundError(
+                    f"Secret with name '{secret_name}' does not exist."
+                )
+            secret = bts.Secret(
+                user_id=user_id,
+                secret_name=secret_name,
+                secret_value=secret_value,
+                created_at=current_time,
+                updated_at=current_time,
+            )
+            session.add(secret)
+        if description:
+            secret.description = description
+        if expires_at:
+            secret.expires_at = expires_at
+        response = SecretInfoResponse.from_db(secret)
+        session.commit()
+        return response
+
+    def delete_secret(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        secret_name: str,
+    ) -> None:
+        secret = session.get(bts.Secret, (user_id, secret_name))
+        if not secret:
+            raise errors.ItemNotFoundError(
+                f"Secret with name '{secret_name}' does not exist."
+            )
+        session.delete(secret)
+        session.commit()
+
+    def list_secrets(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+    ) -> ListSecretsResponse:
+        secrets = session.scalars(
+            sql.select(bts.Secret).where(bts.Secret.user_id == user_id)
+        ).all()
+        return ListSecretsResponse(
+            secrets=[SecretInfoResponse.from_db(secret) for secret in secrets]
+        )
+
+
 # ============
 
 # Idea for how to add deep nested graph:
@@ -1009,11 +1150,16 @@ class ArtifactNodesApiService_Sql:
 # No. Decided to first do topological sort and then 1-stage generation.
 
 
+_ArtifactNodeOrDynamicDataType = typing.Union[
+    bts.ArtifactNode, structures.DynamicDataArgument
+]
+
+
 def _recursively_create_all_executions_and_artifacts_root(
     session: orm.Session,
     root_task_spec: structures.TaskSpec,
 ) -> bts.ExecutionNode:
-    input_artifact_nodes: dict[str, bts.ArtifactNode] = {}
+    input_artifact_nodes: dict[str, _ArtifactNodeOrDynamicDataType] = {}
 
     root_component_spec = root_task_spec.component_ref.spec
     if not root_component_spec:
@@ -1039,12 +1185,8 @@ def _recursively_create_all_executions_and_artifacts_root(
             raise ApiServiceError(
                 f"root task arguments can only be constants, but got {input_name}={input_argument}. {root_task_spec=}"
             )
-        elif not isinstance(input_argument, str):
-            raise ApiServiceError(
-                f"root task constant argument must be a string, but got {input_name}={input_argument}. {root_task_spec=}"
-            )
         # TODO: Support constant input artifacts (artifact IDs)
-        if input_argument is not None:
+        elif isinstance(input_argument, str):
             input_artifact_nodes[input_name] = (
                 # _construct_constant_artifact_node_and_add_to_session(
                 #     session=session, value=input_argument, artifact_type=input_spec.type
@@ -1056,6 +1198,12 @@ def _recursively_create_all_executions_and_artifacts_root(
             # This constant artifact won't be added to the DB
             # TODO: Actually, they will be added...
             # We don't need to link this input artifact here. It will be handled downstream.
+        elif isinstance(input_argument, structures.DynamicDataArgument):
+            input_artifact_nodes[input_name] = input_argument
+        else:
+            raise ApiServiceError(
+                f"root task constant argument must be a string, but got {input_name}={input_argument}. {root_task_spec=}"
+            )
 
     root_execution_node = _recursively_create_all_executions_and_artifacts(
         session=session,
@@ -1069,7 +1217,7 @@ def _recursively_create_all_executions_and_artifacts_root(
 def _recursively_create_all_executions_and_artifacts(
     session: orm.Session,
     root_task_spec: structures.TaskSpec,
-    input_artifact_nodes: dict[str, bts.ArtifactNode],
+    input_artifact_nodes: dict[str, _ArtifactNodeOrDynamicDataType],
     ancestors: list[bts.ExecutionNode],
 ) -> bts.ExecutionNode:
     root_component_spec = root_task_spec.component_ref.spec
@@ -1102,6 +1250,26 @@ def _recursively_create_all_executions_and_artifacts(
     input_artifact_nodes = dict(input_artifact_nodes)
     for input_spec in root_component_spec.inputs or []:
         input_artifact_node = input_artifact_nodes.get(input_spec.name)
+        if isinstance(input_artifact_node, structures.DynamicDataArgument):
+            if not (
+                isinstance(input_artifact_node.dynamic_data, str)
+                or (
+                    isinstance(input_artifact_node.dynamic_data, dict)
+                    and len(input_artifact_node.dynamic_data) == 1
+                )
+            ):
+                raise ApiServiceError(
+                    f"Dynamic data argument must be a string or a dict with a single key set, but got {input_artifact_node.dynamic_data}"
+                )
+            # Storing the dynamic data arguments for later use by the orchestrator.
+            extra_data = root_execution_node.extra_data or {}
+            extra_data.setdefault(
+                bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {}
+            )[input_spec.name] = input_artifact_node.dynamic_data
+
+            root_execution_node.extra_data = extra_data
+            # Not adding any artifact link for secret inputs
+            continue
         if input_artifact_node is None and not input_spec.optional:
             if input_spec.default:
                 input_artifact_node = (
@@ -1167,7 +1335,8 @@ def _recursively_create_all_executions_and_artifacts(
         root_execution_node.container_execution_status = (
             bts.ContainerExecutionStatus.QUEUED
             if all(
-                artifact_node.artifact_data
+                not isinstance(artifact_node, bts.ArtifactNode)
+                or artifact_node.artifact_data
                 for artifact_node in input_artifact_nodes.values()
             )
             else bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
@@ -1194,10 +1363,12 @@ def _recursively_create_all_executions_and_artifacts(
                 raise ApiServiceError(
                     f"child_task_spec.component_ref.spec is empty. {child_task_spec=}"
                 )
-            child_task_input_artifact_nodes: dict[str, bts.ArtifactNode] = {}
+            child_task_input_artifact_nodes: dict[
+                str, _ArtifactNodeOrDynamicDataType
+            ] = {}
             for input_spec in child_component_spec.inputs or []:
                 input_argument = (child_task_spec.arguments or {}).get(input_spec.name)
-                input_artifact_node: bts.ArtifactNode | None = None
+                input_artifact_node: _ArtifactNodeOrDynamicDataType | None = None
                 if input_argument is None and not input_spec.optional:
                     # Not failing on unconnected required input if there is a default value
                     if input_spec.default is None:
@@ -1237,6 +1408,9 @@ def _recursively_create_all_executions_and_artifacts(
                     #         artifact_type=input_spec.type,
                     #     )
                     # )
+                elif isinstance(input_argument, structures.DynamicDataArgument):
+                    # We'll deal with dynamic data (e.g. secrets) when launching the container.
+                    input_artifact_node = input_argument
                 else:
                     raise ApiServiceError(
                         f"Unexpected task argument: {input_spec.name}={input_argument}. {child_task_spec=}"

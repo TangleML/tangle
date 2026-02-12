@@ -116,6 +116,15 @@ def _setup_routes_internal(
             response.headers["x-tangle-request-id"] = request_id
         return response
 
+    @app.exception_handler(errors.ItemAlreadyExistsError)
+    def handle_item_already_exists_error(
+        request: fastapi.Request, exc: errors.ItemAlreadyExistsError
+    ):
+        return fastapi.responses.JSONResponse(
+            status_code=409,
+            content={"message": str(exc)},
+        )
+
     get_user_details_dependency = fastapi.Depends(user_details_getter)
 
     def get_user_name(
@@ -398,6 +407,42 @@ def _setup_routes_internal(
             id=user_details.name,
             permissions=permissions,
         )
+
+    ### Secrets routes
+    secrets_service = api_server_sql.SecretsApiService()
+
+    router.get("/api/secrets/", tags=["secrets"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(secrets_service.list_secrets, parameter_name="user_id")
+        )
+    )
+    router.post("/api/secrets/", tags=["secrets"], **default_config)(
+        add_parameter_annotation_metadata(
+            inject_session_dependency(
+                inject_user_name(
+                    secrets_service.create_secret, parameter_name="user_id"
+                )
+            ),
+            parameter_name="secret_value",
+            annotation_metadata=fastapi.Body(embed=True),
+        )
+    )
+    router.put("/api/secrets/{secret_name}", tags=["secrets"], **default_config)(
+        add_parameter_annotation_metadata(
+            inject_session_dependency(
+                inject_user_name(
+                    secrets_service.update_secret, parameter_name="user_id"
+                )
+            ),
+            parameter_name="secret_value",
+            annotation_metadata=fastapi.Body(embed=True),
+        )
+    )
+    router.delete("/api/secrets/{secret_name}", tags=["secrets"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(secrets_service.delete_secret, parameter_name="user_id")
+        )
+    )
 
     ### Component library routes
 
