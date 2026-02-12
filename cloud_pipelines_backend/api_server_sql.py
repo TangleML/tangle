@@ -1247,19 +1247,22 @@ def _recursively_create_all_executions_and_artifacts(
     for input_spec in root_component_spec.inputs or []:
         input_artifact_node = input_artifact_nodes.get(input_spec.name)
         if isinstance(input_artifact_node, structures.DynamicDataArgument):
-            # We don't use these secret arguments, but adding them just in case.
-            extra_data = root_execution_node.extra_data or {}
-            dynamic_data_arguments = extra_data.setdefault(
-                bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {}
-            )
-            dynamic_data_arguments[input_spec.name] = input_artifact_node.dynamic_data
             if not (
                 isinstance(input_artifact_node.dynamic_data, str)
-                or len(input_artifact_node.dynamic_data) == 1
+                or (
+                    isinstance(input_artifact_node.dynamic_data, dict)
+                    and len(input_artifact_node.dynamic_data) == 1
+                )
             ):
                 raise ApiServiceError(
                     f"Dynamic data argument must be a string or a dict with a single key set, but got {input_artifact_node.dynamic_data}"
                 )
+            # Storing the dynamic data arguments for later use by the orchestrator.
+            extra_data = root_execution_node.extra_data or {}
+            extra_data.setdefault(
+                bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {}
+            )[input_spec.name] = input_artifact_node.dynamic_data
+
             root_execution_node.extra_data = extra_data
             # Not adding any artifact link for secret inputs
             continue
