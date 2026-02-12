@@ -998,8 +998,8 @@ class ArtifactNodesApiService_Sql:
 @dataclasses.dataclass(kw_only=True)
 class SecretInfoResponse:
     secret_name: str
-    created_at: datetime.datetime | None
-    updated_at: datetime.datetime | None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
 
     @classmethod
     def from_db(cls, secret_row: bts.Secret) -> "SecretInfoResponse":

@@ -484,6 +484,6 @@ class Secret(_TableBase):
     user_id: orm.Mapped[str] = orm.mapped_column(primary_key=True, index=True)
     secret_name: orm.Mapped[str] = orm.mapped_column(primary_key=True)
     secret_value: orm.Mapped[str]
-    created_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
-    updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
+    created_at: orm.Mapped[datetime.datetime]
+    updated_at: orm.Mapped[datetime.datetime]
     extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
