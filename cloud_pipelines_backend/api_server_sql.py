@@ -1000,6 +1000,8 @@ class SecretInfoResponse:
     secret_name: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
+    expires_at: datetime.datetime | None = None
+    description: str | None = None
 
     @classmethod
     def from_db(cls, secret_row: bts.Secret) -> "SecretInfoResponse":
@@ -1007,6 +1009,8 @@ class SecretInfoResponse:
             secret_name=secret_row.secret_name,
             created_at=secret_row.created_at,
             updated_at=secret_row.updated_at,
+            expires_at=secret_row.expires_at,
+            description=secret_row.description,
         )
 
 
@@ -1024,15 +1028,19 @@ class SecretsApiService:
         user_id: str,
         secret_name: str,
         secret_value: str,
+        description: str | None = None,
+        expires_at: datetime.datetime | None = None,
     ) -> SecretInfoResponse:
         secret_name = secret_name.strip()
         if not secret_name:
             raise ApiServiceError(f"Secret name must not be empty.")
-        return self._set_secret_value(
+        return self._create_or_update_secret(
             session=session,
             user_id=user_id,
             secret_name=secret_name,
             secret_value=secret_value,
+            description=description,
+            expires_at=expires_at,
             raise_if_exists=True,
         )
 
@@ -1043,22 +1051,28 @@ class SecretsApiService:
         user_id: str,
         secret_name: str,
         secret_value: str,
+        description: str | None = None,
+        expires_at: datetime.datetime | None = None,
     ) -> SecretInfoResponse:
-        return self._set_secret_value(
+        return self._create_or_update_secret(
             session=session,
             user_id=user_id,
             secret_name=secret_name,
             secret_value=secret_value,
+            description=description,
+            expires_at=expires_at,
             raise_if_not_exists=True,
         )
 
-    def _set_secret_value(
+    def _create_or_update_secret(
         self,
         *,
         session: orm.Session,
         user_id: str,
         secret_name: str,
         secret_value: str,
+        description: str | None = None,
+        expires_at: datetime.datetime | None = None,
         raise_if_not_exists: bool = False,
         raise_if_exists: bool = False,
     ) -> SecretInfoResponse:
@@ -1084,6 +1098,10 @@ class SecretsApiService:
                 updated_at=current_time,
             )
             session.add(secret)
+        if description:
+            secret.description = description
+        if expires_at:
+            secret.expires_at = expires_at
         response = SecretInfoResponse.from_db(secret)
         session.commit()
         return response

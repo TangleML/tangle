@@ -486,4 +486,6 @@ class Secret(_TableBase):
     secret_value: orm.Mapped[str]
     created_at: orm.Mapped[datetime.datetime]
     updated_at: orm.Mapped[datetime.datetime]
+    expires_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
+    description: orm.Mapped[str | None] = orm.mapped_column(default=None)
     extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
