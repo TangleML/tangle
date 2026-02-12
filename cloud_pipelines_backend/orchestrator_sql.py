@@ -469,6 +469,7 @@ class OrchestratorService_Sql:
                     # This hash is not used, so we're using a dummy value here that makes it possible to identify the secret arguments in the following code.
                     hash=secret_hash,
                 )
+        # Starting new transaction
         session.rollback()
 
         # Preparing the launcher input arguments
