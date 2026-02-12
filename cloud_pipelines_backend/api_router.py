@@ -107,6 +107,15 @@ def _setup_routes_internal(
             content={"message": str(exc)},
         )
 
+    @app.exception_handler(errors.ItemAlreadyExistsError)
+    def handle_item_already_exists_error(
+        request: fastapi.Request, exc: errors.ItemAlreadyExistsError
+    ):
+        return fastapi.responses.JSONResponse(
+            status_code=409,
+            content={"message": str(exc)},
+        )
+
     get_user_details_dependency = fastapi.Depends(user_details_getter)
 
     def get_user_name(
