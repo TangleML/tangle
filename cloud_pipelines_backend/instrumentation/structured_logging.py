@@ -6,7 +6,7 @@ contextual_logging module to automatically include context metadata in log recor
 
 import logging
 
-from . import contextual_logging
+from cloud_pipelines_backend.instrumentation import contextual_logging
 
 
 class LoggingContextFilter(logging.Filter):
