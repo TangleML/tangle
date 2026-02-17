@@ -241,13 +241,10 @@ class PipelineRunsApiService_Sql:
                             pipeline_name = component_spec.name
                 response.pipeline_name = pipeline_name
             if include_execution_stats:
-                execution_status_stats = self._calculate_execution_status_stats(
-                    session=session, root_execution_id=pipeline_run.root_execution_id
+                response.execution_status_stats = self._get_execution_status_stats(
+                    session=session,
+                    root_execution_id=pipeline_run.root_execution_id,
                 )
-                response.execution_status_stats = {
-                    status.value: count
-                    for status, count in execution_status_stats.items()
-                }
             return response
 
         return ListPipelineJobsResponse(
@@ -257,6 +254,16 @@ class PipelineRunsApiService_Sql:
             ],
             next_page_token=next_page_token,
         )
+
+    def _get_execution_status_stats(
+        self,
+        session: orm.Session,
+        root_execution_id: bts.IdType,
+    ) -> dict[str, int]:
+        stats = self._calculate_execution_status_stats(
+            session=session, root_execution_id=root_execution_id
+        )
+        return {status.value: count for status, count in stats.items()}
 
     def _calculate_execution_status_stats(
         self, session: orm.Session, root_execution_id: bts.IdType
