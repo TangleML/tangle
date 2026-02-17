@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import orm
 
 from cloud_pipelines_backend import backend_types_sql as bts
@@ -6,6 +7,7 @@ from cloud_pipelines_backend.api_server_sql import (
     ExecutionStatusSummary,
     PipelineRunsApiService_Sql,
 )
+from cloud_pipelines_backend.errors import ItemNotFoundError
 
 
 def _initialize_db_and_get_session_factory():
@@ -158,6 +160,71 @@ class TestPipelineRunServiceList:
             assert stats["SUCCEEDED"] == 1
             assert stats["RUNNING"] == 1
             summary = run.execution_summary
+            assert summary is not None
+            assert summary.total_executions == 2
+            assert summary.ended_executions == 1
+            assert summary.has_ended is False
+
+
+class TestPipelineRunServiceGet:
+    def test_get_not_found(self):
+        session_factory = _initialize_db_and_get_session_factory()
+        service = PipelineRunsApiService_Sql()
+        with session_factory() as session:
+            with pytest.raises(ItemNotFoundError):
+                service.get(session=session, id="nonexistent-id")
+
+    def test_get_returns_pipeline_run(self):
+        session_factory = _initialize_db_and_get_session_factory()
+        service = PipelineRunsApiService_Sql()
+        with session_factory() as session:
+            root = _create_execution_node(session)
+            root_id = root.id
+            run = _create_pipeline_run(session, root, created_by="user1")
+            run_id = run.id
+            session.commit()
+
+        with session_factory() as session:
+            result = service.get(session=session, id=run_id)
+            assert result.id == run_id
+            assert result.root_execution_id == root_id
+            assert result.created_by == "user1"
+            assert result.execution_status_stats is None
+            assert result.execution_summary is None
+
+    def test_get_with_execution_stats(self):
+        session_factory = _initialize_db_and_get_session_factory()
+        service = PipelineRunsApiService_Sql()
+        with session_factory() as session:
+            root = _create_execution_node(session)
+            root_id = root.id
+            child1 = _create_execution_node(
+                session,
+                parent=root,
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+            )
+            child2 = _create_execution_node(
+                session,
+                parent=root,
+                status=bts.ContainerExecutionStatus.RUNNING,
+            )
+            _link_ancestor(session, child1, root)
+            _link_ancestor(session, child2, root)
+            run = _create_pipeline_run(session, root)
+            run_id = run.id
+            session.commit()
+
+        with session_factory() as session:
+            result = service.get(
+                session=session, id=run_id, include_execution_stats=True
+            )
+            assert result.id == run_id
+            assert result.root_execution_id == root_id
+            stats = result.execution_status_stats
+            assert stats is not None
+            assert stats["SUCCEEDED"] == 1
+            assert stats["RUNNING"] == 1
+            summary = result.execution_summary
             assert summary is not None
             assert summary.total_executions == 2
             assert summary.ended_executions == 1
