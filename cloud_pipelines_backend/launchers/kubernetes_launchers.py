@@ -172,7 +172,7 @@ class _KubernetesContainerLauncher(
                 " Please make sure that `kubectl cluster-info` executes without errors."
             ) from ex
 
-    def launch_container_task(
+    def _prepare_kubernetes_pod(
         self,
         *,
         component_spec: structures.ComponentSpec,
@@ -181,7 +181,7 @@ class _KubernetesContainerLauncher(
         output_uris: dict[str, str],
         log_uri: str,
         annotations: dict[str, Any] | None = None,
-    ) -> "LaunchedKubernetesContainer":
+    ) -> k8s_client_lib.V1Pod:
         if not isinstance(
             component_spec.implementation, structures.ContainerImplementation
         ):
@@ -353,6 +353,25 @@ class _KubernetesContainerLauncher(
                 annotations=self._pod_annotations,
             ),
             spec=pod_spec,
+        )
+        return pod
+
+    def launch_container_task(
+        self,
+        *,
+        component_spec: structures.ComponentSpec,
+        # Input arguments may be updated with new downloaded values and new URIs of uploaded values.
+        input_arguments: dict[str, interfaces.InputArgument],
+        output_uris: dict[str, str],
+        log_uri: str,
+        annotations: dict[str, Any] | None = None,
+    ) -> "LaunchedKubernetesContainer":
+        pod = self._prepare_kubernetes_pod(
+            component_spec=component_spec,
+            input_arguments=input_arguments,
+            output_uris=output_uris,
+            log_uri=log_uri,
+            annotations=annotations,
         )
 
         # Applying the pod post-processor
