@@ -32,6 +32,22 @@ from . import errors
 from .errors import ItemNotFoundError
 
 
+@dataclasses.dataclass(kw_only=True)
+class ExecutionStatusSummary:
+    total_executions: int = 0
+    ended_executions: int = 0
+    has_ended: bool = False
+
+    def count_execution_status(
+        self, *, status: bts.ContainerExecutionStatus, count: int
+    ) -> None:
+        self.total_executions += count
+        if status in bts.CONTAINER_STATUSES_ENDED:
+            self.ended_executions += count
+
+        self.has_ended = self.ended_executions == self.total_executions
+
+
 # ==== PipelineJobService
 @dataclasses.dataclass(kw_only=True)
 class PipelineRunResponse:
@@ -43,6 +59,7 @@ class PipelineRunResponse:
     created_at: datetime.datetime | None = None
     pipeline_name: str | None = None
     execution_status_stats: dict[str, int] | None = None
+    execution_summary: ExecutionStatusSummary | None = None
 
     @classmethod
     def from_db(cls, pipeline_run: bts.PipelineRun) -> "PipelineRunResponse":
@@ -241,10 +258,12 @@ class PipelineRunsApiService_Sql:
                             pipeline_name = component_spec.name
                 response.pipeline_name = pipeline_name
             if include_execution_stats:
-                response.execution_status_stats = self._get_execution_status_stats(
+                stats, summary = self._get_execution_stats_and_summary(
                     session=session,
                     root_execution_id=pipeline_run.root_execution_id,
                 )
+                response.execution_status_stats = stats
+                response.execution_summary = summary
             return response
 
         return ListPipelineJobsResponse(
@@ -255,15 +274,20 @@ class PipelineRunsApiService_Sql:
             next_page_token=next_page_token,
         )
 
-    def _get_execution_status_stats(
+    def _get_execution_stats_and_summary(
         self,
         session: orm.Session,
         root_execution_id: bts.IdType,
-    ) -> dict[str, int]:
+    ) -> tuple[dict[str, int], ExecutionStatusSummary]:
         stats = self._calculate_execution_status_stats(
             session=session, root_execution_id=root_execution_id
         )
-        return {status.value: count for status, count in stats.items()}
+        summary = ExecutionStatusSummary()
+        status_stats: dict[str, int] = {}
+        for status, count in stats.items():
+            summary.count_execution_status(status=status, count=count)
+            status_stats[status.value] = count
+        return status_stats, summary
 
     def _calculate_execution_status_stats(
         self, session: orm.Session, root_execution_id: bts.IdType
@@ -480,22 +504,6 @@ class GetExecutionInfoResponse:
 @dataclasses.dataclass
 class ArtifactNodeIdResponse:
     id: bts.IdType
-
-
-@dataclasses.dataclass(kw_only=True)
-class ExecutionStatusSummary:
-    total_executions: int = 0
-    ended_executions: int = 0
-    has_ended: bool = False
-
-    def count_execution_status(
-        self, *, status: bts.ContainerExecutionStatus, count: int
-    ) -> None:
-        self.total_executions += count
-        if status in bts.CONTAINER_STATUSES_ENDED:
-            self.ended_executions += count
-
-        self.has_ended = self.ended_executions == self.total_executions
 
 
 @dataclasses.dataclass

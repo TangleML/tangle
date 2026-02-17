@@ -151,8 +151,14 @@ class TestPipelineRunServiceList:
         with session_factory() as session:
             result = service.list(session=session, include_execution_stats=True)
             assert len(result.pipeline_runs) == 1
-            assert result.pipeline_runs[0].root_execution_id == root_id
-            stats = result.pipeline_runs[0].execution_status_stats
+            run = result.pipeline_runs[0]
+            assert run.root_execution_id == root_id
+            stats = run.execution_status_stats
             assert stats is not None
             assert stats["SUCCEEDED"] == 1
             assert stats["RUNNING"] == 1
+            summary = run.execution_summary
+            assert summary is not None
+            assert summary.total_executions == 2
+            assert summary.ended_executions == 1
+            assert summary.has_ended is False
