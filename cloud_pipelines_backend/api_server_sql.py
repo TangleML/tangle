@@ -130,11 +130,19 @@ class PipelineRunsApiService_Sql:
         session.refresh(pipeline_run)
         return PipelineRunResponse.from_db(pipeline_run)
 
-    def get(self, session: orm.Session, id: bts.IdType) -> PipelineRunResponse:
+    def get(
+        self,
+        session: orm.Session,
+        id: bts.IdType,
+        include_execution_stats: bool = False,
+    ) -> PipelineRunResponse:
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise ItemNotFoundError(f"Pipeline run {id} not found.")
-        return PipelineRunResponse.from_db(pipeline_run)
+        response = PipelineRunResponse.from_db(pipeline_run)
+        if include_execution_stats:
+            response = self._populate_execution_stats(session=session, response=response)
+        return response
 
     def terminate(
         self,
@@ -258,12 +266,7 @@ class PipelineRunsApiService_Sql:
                             pipeline_name = component_spec.name
                 response.pipeline_name = pipeline_name
             if include_execution_stats:
-                stats, summary = self._get_execution_stats_and_summary(
-                    session=session,
-                    root_execution_id=pipeline_run.root_execution_id,
-                )
-                response.execution_status_stats = stats
-                response.execution_summary = summary
+                response = self._populate_execution_stats(session=session, response=response)
             return response
 
         return ListPipelineJobsResponse(
@@ -273,6 +276,19 @@ class PipelineRunsApiService_Sql:
             ],
             next_page_token=next_page_token,
         )
+
+    def _populate_execution_stats(
+        self,
+        session: orm.Session,
+        response: PipelineRunResponse,
+    ) -> PipelineRunResponse:
+        stats, summary = self._get_execution_stats_and_summary(
+            session=session,
+            root_execution_id=response.root_execution_id,
+        )
+        response.execution_status_stats = stats
+        response.execution_summary = summary
+        return response
 
     def _get_execution_stats_and_summary(
         self,
