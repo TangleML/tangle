@@ -1,0 +1,44 @@
+# OpenTelemetry Collector config: receive OTLP, export traces to Jaeger and metrics for Prometheus scrape.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+
+exporters:
+  # Traces → Jaeger (OTLP gRPC)
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics → expose scrape endpoint for Prometheus
+  prometheus:
+    endpoint: "0.0.0.0:9464"
+    namespace: tangle
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "0.0.0.0"
+                port: 8888

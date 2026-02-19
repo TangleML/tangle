@@ -1,0 +1,54 @@
+# Observability stack for Tangle: OpenTelemetry Collector, Jaeger (traces), Prometheus (metrics).
+#
+# Run from this directory: docker compose up -d
+#
+# Point the Tangle API at the collector so traces/metrics are exported:
+#   TANGLE_OTEL_EXPORTER_ENDPOINT=http://localhost:4317
+#   TANGLE_OTEL_EXPORTER_PROTOCOL=grpc
+#
+# UIs:
+#   Jaeger:    http://localhost:16686
+#   Prometheus: http://localhost:9090
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: tangle-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "9464:9464"   # Prometheus scrape (metrics from OTLP)
+      - "8888:8888"   # Collector telemetry
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: tangle-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI (traces)
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: tangle-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+
+volumes:
+  prometheus_data: {}
