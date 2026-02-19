@@ -1,0 +1,20 @@
+# Prometheus config: scrape OpenTelemetry Collector metrics and self.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # OpenTelemetry Collector metrics (app metrics sent via OTLP are exposed here for scrape)
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:9464"]
+
+  # Collector's own telemetry
+  - job_name: otel-collector-telemetry
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  # Prometheus self
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
