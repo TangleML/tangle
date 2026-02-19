@@ -75,6 +75,27 @@ id_column = orm.mapped_column(
 # If needed they can be represented using `weirdType: ...`
 
 
+class UtcDateTime(sql.TypeDecorator):
+    """A DateTime type that ensures UTC timezone on read.
+
+    sql.DateTime(timezone=True) is not enough to solve the issue.
+    """
+
+    impl = sql.DateTime(timezone=True)
+    cache_ok = True
+
+    def process_result_value(
+        self, value: datetime.datetime | None, dialect: sql.Dialect
+    ) -> datetime.datetime | None:
+        if value is not None:
+            if value.tzinfo is None:
+                # Interpreting naive timestamp as UTC
+                return value.replace(tzinfo=datetime.timezone.utc)
+            # Converting timezone-aware timestamp to UTC
+            return value.astimezone(datetime.timezone.utc)
+        return value
+
+
 class _TableBase(orm.MappedAsDataclass, orm.DeclarativeBase, kw_only=True):
     # Not really needed due to kw_only=True
     _: dataclasses.KW_ONLY
@@ -97,6 +118,7 @@ class _TableBase(orm.MappedAsDataclass, orm.DeclarativeBase, kw_only=True):
         # SqlIOTypeStruct: sql.JSON,
         # PipelineSpec: sql.JSON,
         str: sql.String(255),
+        datetime.datetime: UtcDateTime,  # sql.DateTime(timezone=True) is not enough
     }
 
 
