@@ -150,6 +150,8 @@ class PipelineRun(_TableBase):
 
     extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
 
+    pipeline_name: orm.Mapped[str | None] = orm.mapped_column(default=None)
+
     __table_args__ = (
         sql.Index(
             "ix_pipeline_run_created_at_desc",
@@ -159,6 +161,10 @@ class PipelineRun(_TableBase):
             "ix_pipeline_run_created_by_created_at_desc",
             created_by,
             created_at.desc(),
+        ),
+        sql.Index(
+            "ix_pipeline_run_pipeline_name",
+            pipeline_name,
         ),
     )
 

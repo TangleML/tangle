@@ -106,6 +106,7 @@ class PipelineRunsApiService_Sql:
                 extra_data={
                     self.PIPELINE_NAME_EXTRA_DATA_KEY: pipeline_name,
                 },
+                pipeline_name=pipeline_name,
             )
             session.add(pipeline_run)
             session.commit()
@@ -171,30 +172,38 @@ class PipelineRunsApiService_Sql:
         current_user: str | None = None,
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
+        sort_field: str | None = None,
+        sort_direction: str | None = None,
     ) -> ListPipelineJobsResponse:
         page_token_dict = _decode_page_token(page_token)
         OFFSET_KEY = "offset"
+        FILTER_KEY = "filter"
+        SORT_FIELD_KEY = "sort_field"
+        SORT_DIRECTION_KEY = "sort_direction"
+
         offset = page_token_dict.get(OFFSET_KEY, 0)
         page_size = 10
 
-        FILTER_KEY = "filter"
+        # Restore filter/sort from page token for subsequent pages
         if page_token:
             filter = page_token_dict.get(FILTER_KEY, None)
-        where_clauses = []
+            sort_field = page_token_dict.get(SORT_FIELD_KEY, sort_field)
+            sort_direction = page_token_dict.get(SORT_DIRECTION_KEY, sort_direction)
+
+        where_clauses: list[sql.ColumnElement] = []
         parsed_filter = _parse_filter(filter) if filter else {}
-        for key, value in parsed_filter.items():
+
+        for key, values in parsed_filter.items():
+            value = values[0]
+
             if key == "_text":
                 raise NotImplementedError("Text search is not implemented yet.")
+
             elif key == "created_by":
                 if value == "me":
                     if current_user is None:
-                        # raise ApiServiceError(
-                        #     f"The `created_by:me` filter requires `current_user`."
-                        # )
                         current_user = ""
                     value = current_user
-                    # TODO: Maybe make this a bit more robust.
-                    # We need to change the filter since it goes into the next_page_token.
                     filter = filter.replace(
                         "created_by:me", f"created_by:{current_user}"
                     )
@@ -202,19 +211,105 @@ class PipelineRunsApiService_Sql:
                     where_clauses.append(bts.PipelineRun.created_by == value)
                 else:
                     where_clauses.append(bts.PipelineRun.created_by == None)
+
+            elif key == "pipeline_name":
+                where_clauses.append(
+                    sql.func.lower(bts.PipelineRun.pipeline_name).like(
+                        f"%{value.lower()}%"
+                    )
+                )
+
+            elif key == "status":
+                try:
+                    target_status = bts.ContainerExecutionStatus(value)
+                except ValueError:
+                    raise ApiServiceError(
+                        f"Invalid status filter value: {value!r}. "
+                        f"Valid values: {[s.value for s in bts.ContainerExecutionStatus]}"
+                    )
+                target_priority = _STATUS_PRIORITY[target_status]
+                priority_case = _build_status_priority_case()
+
+                # Subquery: compute the highest-priority (min priority number) status
+                # for each pipeline run from its descendant execution nodes.
+                status_subquery = (
+                    sql.select(
+                        bts.PipelineRun.id.label("run_id"),
+                        sql.func.min(priority_case).label("min_priority"),
+                    )
+                    .join(
+                        bts.ExecutionToAncestorExecutionLink,
+                        bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
+                        == bts.PipelineRun.root_execution_id,
+                    )
+                    .join(
+                        bts.ExecutionNode,
+                        bts.ExecutionNode.id
+                        == bts.ExecutionToAncestorExecutionLink.execution_id,
+                    )
+                    .where(bts.ExecutionNode.container_execution_status != None)
+                    .group_by(bts.PipelineRun.id)
+                    .subquery()
+                )
+
+                where_clauses.append(
+                    bts.PipelineRun.id.in_(
+                        sql.select(status_subquery.c.run_id).where(
+                            status_subquery.c.min_priority == target_priority
+                        )
+                    )
+                )
+
+            elif key == "created_after":
+                dt = datetime.datetime.fromisoformat(value)
+                where_clauses.append(bts.PipelineRun.created_at >= dt)
+
+            elif key == "created_before":
+                dt = datetime.datetime.fromisoformat(value)
+                where_clauses.append(bts.PipelineRun.created_at <= dt)
+
+            elif key == "annotation":
+                # Each annotation filter value is either "key" (key-only) or "key=value"
+                for ann_filter in values:
+                    ann_key, sep, ann_val = ann_filter.partition("=")
+                    ann_subquery_conditions = [
+                        bts.PipelineRunAnnotation.key == ann_key
+                    ]
+                    if sep:
+                        ann_subquery_conditions.append(
+                            bts.PipelineRunAnnotation.value == ann_val
+                        )
+                    where_clauses.append(
+                        bts.PipelineRun.id.in_(
+                            sql.select(
+                                bts.PipelineRunAnnotation.pipeline_run_id
+                            ).where(*ann_subquery_conditions)
+                        )
+                    )
+
             else:
-                raise NotImplementedError(f"Unsupported filter {filter}.")
+                raise NotImplementedError(f"Unsupported filter key: {key!r}.")
+
+        # Sorting
+        order_by_clause = self._build_order_by(sort_field, sort_direction)
+
         pipeline_runs = list(
             session.scalars(
                 sql.select(bts.PipelineRun)
                 .where(*where_clauses)
-                .order_by(bts.PipelineRun.created_at.desc())
+                .order_by(order_by_clause)
                 .offset(offset)
                 .limit(page_size)
             ).all()
         )
+
         next_page_offset = offset + page_size
-        next_page_token_dict = {OFFSET_KEY: next_page_offset, FILTER_KEY: filter}
+        next_page_token_dict = {
+            OFFSET_KEY: next_page_offset,
+            FILTER_KEY: filter,
+            SORT_FIELD_KEY: sort_field,
+            SORT_DIRECTION_KEY: sort_direction,
+        }
         next_page_token = _encode_page_token(next_page_token_dict)
         if len(pipeline_runs) < page_size:
             next_page_token = None
@@ -224,21 +319,22 @@ class PipelineRunsApiService_Sql:
         ) -> PipelineRunResponse:
             response = PipelineRunResponse.from_db(pipeline_run)
             if include_pipeline_names:
-                pipeline_name = None
-                extra_data = pipeline_run.extra_data or {}
-                if self.PIPELINE_NAME_EXTRA_DATA_KEY in extra_data:
-                    pipeline_name = extra_data[self.PIPELINE_NAME_EXTRA_DATA_KEY]
-                else:
-                    execution_node = session.get(
-                        bts.ExecutionNode, pipeline_run.root_execution_id
-                    )
-                    if execution_node:
-                        task_spec = structures.TaskSpec.from_json_dict(
-                            execution_node.task_spec
+                pipeline_name = pipeline_run.pipeline_name
+                if not pipeline_name:
+                    extra_data = pipeline_run.extra_data or {}
+                    if self.PIPELINE_NAME_EXTRA_DATA_KEY in extra_data:
+                        pipeline_name = extra_data[self.PIPELINE_NAME_EXTRA_DATA_KEY]
+                    else:
+                        execution_node = session.get(
+                            bts.ExecutionNode, pipeline_run.root_execution_id
                         )
-                        component_spec = task_spec.component_ref.spec
-                        if component_spec:
-                            pipeline_name = component_spec.name
+                        if execution_node:
+                            task_spec = structures.TaskSpec.from_json_dict(
+                                execution_node.task_spec
+                            )
+                            component_spec = task_spec.component_ref.spec
+                            if component_spec:
+                                pipeline_name = component_spec.name
                 response.pipeline_name = pipeline_name
             if include_execution_stats:
                 execution_status_stats = self._calculate_execution_status_stats(
@@ -257,6 +353,19 @@ class PipelineRunsApiService_Sql:
             ],
             next_page_token=next_page_token,
         )
+
+    @staticmethod
+    def _build_order_by(
+        sort_field: str | None, sort_direction: str | None
+    ) -> sql.UnaryExpression:
+        SORT_FIELDS = {
+            "created_at": bts.PipelineRun.created_at,
+            "pipeline_name": bts.PipelineRun.pipeline_name,
+        }
+        column = SORT_FIELDS.get(sort_field, bts.PipelineRun.created_at)
+        if sort_direction == "asc":
+            return column.asc()
+        return column.desc()
 
     def _calculate_execution_status_stats(
         self, session: orm.Session, root_execution_id: bts.IdType
@@ -359,18 +468,58 @@ def _encode_page_token(page_token_dict: dict[str, Any]) -> str:
     )
 
 
-def _parse_filter(filter: str) -> dict[str, str]:
-    # TODO: Improve
-    parts = filter.strip().split()
-    parsed_filter = {}
+def _parse_filter(filter: str) -> dict[str, list[str]]:
+    """Parse a filter string into a dict mapping keys to lists of values.
+
+    Supports both space and comma delimiters. Duplicate keys (e.g. multiple
+    annotation filters) are collected into a list.
+
+    Examples:
+        "created_by:matt status:FAILED" -> {"created_by": ["matt"], "status": ["FAILED"]}
+        "annotation:env=prod annotation:team" -> {"annotation": ["env=prod", "team"]}
+    """
+    parts = filter.strip().replace(",", " ").split()
+    parsed_filter: dict[str, list[str]] = {}
     for part in parts:
         key, sep, value = part.partition(":")
         if sep:
-            parsed_filter[key] = value
+            parsed_filter.setdefault(key, []).append(value)
         else:
-            parsed_filter.setdefault("_text", "")
-            parsed_filter["_text"] += part
+            parsed_filter.setdefault("_text", []).append(part)
     return parsed_filter
+
+
+# Priority order for deriving overall pipeline run status.
+# Lower number = higher priority (takes precedence).
+_STATUS_PRIORITY: dict[bts.ContainerExecutionStatus, int] = {
+    bts.ContainerExecutionStatus.SYSTEM_ERROR: 1,
+    bts.ContainerExecutionStatus.FAILED: 2,
+    bts.ContainerExecutionStatus.INVALID: 3,
+    bts.ContainerExecutionStatus.CANCELLING: 4,
+    bts.ContainerExecutionStatus.CANCELLED: 5,
+    bts.ContainerExecutionStatus.RUNNING: 6,
+    bts.ContainerExecutionStatus.PENDING: 7,
+    bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM: 8,
+    bts.ContainerExecutionStatus.QUEUED: 9,
+    bts.ContainerExecutionStatus.UNINITIALIZED: 10,
+    bts.ContainerExecutionStatus.SKIPPED: 11,
+    bts.ContainerExecutionStatus.SUCCEEDED: 12,
+}
+
+_PRIORITY_TO_STATUS: dict[int, bts.ContainerExecutionStatus] = {
+    v: k for k, v in _STATUS_PRIORITY.items()
+}
+
+
+def _build_status_priority_case() -> sql.Case:
+    """Build a SQL CASE expression mapping container_execution_status to priority int."""
+    return sql.case(
+        *[
+            (bts.ExecutionNode.container_execution_status == status, priority)
+            for status, priority in _STATUS_PRIORITY.items()
+        ],
+        else_=99,
+    )
 
 
 # ========== ExecutionNodeApiService_Sql

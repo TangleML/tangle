@@ -1,6 +1,11 @@
+import logging
+
 import sqlalchemy
+from sqlalchemy import orm
 
 from . import backend_types_sql as bts
+
+_logger = logging.getLogger(__name__)
 
 
 def create_db_engine_and_migrate_db(
@@ -77,3 +82,48 @@ def migrate_db(db_engine: sqlalchemy.Engine):
     for index in bts.ExecutionNode.__table__.indexes:
         if index.name == "ix_execution_node_container_execution_cache_key":
             index.create(db_engine, checkfirst=True)
+
+    _migrate_add_pipeline_name_column(db_engine)
+
+
+def _migrate_add_pipeline_name_column(db_engine: sqlalchemy.Engine):
+    """Add pipeline_name column to pipeline_run table and backfill from extra_data."""
+    inspector = sqlalchemy.inspect(db_engine)
+    columns = {c["name"] for c in inspector.get_columns("pipeline_run")}
+    if "pipeline_name" in columns:
+        return
+
+    _logger.info("Migrating: Adding pipeline_name column to pipeline_run table")
+    with db_engine.begin() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "ALTER TABLE pipeline_run ADD COLUMN pipeline_name VARCHAR(255)"
+            )
+        )
+
+    for index in bts.PipelineRun.__table__.indexes:
+        if index.name == "ix_pipeline_run_pipeline_name":
+            index.create(db_engine, checkfirst=True)
+
+    _logger.info("Migrating: Backfilling pipeline_name from extra_data")
+    Session = orm.sessionmaker(bind=db_engine)
+    batch_size = 1000
+    with Session() as session:
+        while True:
+            runs = session.scalars(
+                sqlalchemy.select(bts.PipelineRun)
+                .where(
+                    bts.PipelineRun.pipeline_name == None,
+                    bts.PipelineRun.extra_data != None,
+                )
+                .limit(batch_size)
+            ).all()
+            if not runs:
+                break
+            for run in runs:
+                if run.extra_data and "pipeline_name" in run.extra_data:
+                    run.pipeline_name = run.extra_data["pipeline_name"]
+            session.commit()
+            if len(runs) < batch_size:
+                break
+    _logger.info("Migrating: pipeline_name backfill complete")
