@@ -34,33 +34,31 @@ def _create_unmanaged_tables(db_engine: sqlalchemy.Engine) -> None:
 def run_migrations(db_engine: sqlalchemy.Engine) -> None:
     """Run all pending Alembic migrations against the given engine."""
     from alembic.config import Config
-    from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
 
     alembic_cfg = Config(_ALEMBIC_INI_PATH)
     script = ScriptDirectory.from_config(alembic_cfg)
+    head_rev = script.get_current_head()
 
     _logger.info("Running database migrations")
-    with db_engine.connect() as connection:
-        migration_context = MigrationContext.configure(
-            connection,
-            opts={"target_metadata": None, "render_as_batch": True},
-        )
-        current_rev = migration_context.get_current_revision()
-        head_rev = script.get_current_head()
 
-        if current_rev == head_rev:
-            _logger.info("Database already at head revision")
+    with db_engine.connect() as conn:
+        has_table = conn.dialect.has_table(conn, "alembic_version")
+        if has_table:
+            result = conn.execute(sqlalchemy.text("SELECT version_num FROM alembic_version"))
+            current_rev = result.scalar()
         else:
-            _logger.info(
-                f"Migrating from {current_rev} to {head_rev}"
-            )
+            current_rev = None
 
-            from alembic import command
+    if current_rev == head_rev:
+        _logger.info("Database already at head revision")
+        return
 
-            alembic_cfg.attributes["connection"] = connection
-            command.upgrade(alembic_cfg, "head")
+    _logger.info(f"Migrating from {current_rev} to {head_rev}")
+    from alembic import command
 
+    alembic_cfg.attributes["connection"] = db_engine
+    command.upgrade(alembic_cfg, "head")
     _logger.info("Database migrations complete")
 
 
@@ -80,7 +78,9 @@ def create_db_engine(
 
     if database_uri.startswith("sqlite://"):
         # https://fastapi.tiangolo.com/tutorial/sql-databases/#create-an-engine
-        create_engine_kwargs.setdefault("connect_args", {})["check_same_thread"] = False
+        connect_args = create_engine_kwargs.setdefault("connect_args", {})
+        connect_args["check_same_thread"] = False
+        connect_args.setdefault("timeout", 10)
 
     if create_engine_kwargs.get("poolclass") != sqlalchemy.pool.StaticPool:
         # Preventing the "MySQL server has gone away" error:
@@ -95,4 +95,10 @@ def create_db_engine(
         url=database_uri,
         **create_engine_kwargs,
     )
+
+    if database_uri.startswith("sqlite:///"):
+        with db_engine.connect() as conn:
+            conn.execute(sqlalchemy.text("PRAGMA journal_mode=WAL"))
+            conn.commit()
+
     return db_engine
