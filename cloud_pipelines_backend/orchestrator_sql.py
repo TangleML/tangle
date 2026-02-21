@@ -21,6 +21,7 @@ from . import component_structures as structures
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import contextual_logging
+from .status_utils import update_pipeline_run_status
 
 _logger = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ class OrchestratorService_Sql:
                     record_system_error_exception(
                         execution=queued_execution, exception=ex
                     )
+                    update_pipeline_run_status(session, queued_execution.id)
                     session.commit()
                 finally:
                     duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
@@ -175,7 +177,6 @@ class OrchestratorService_Sql:
                     # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
                     session.commit()
 
-                    # Mark our ExecutionNode as SYSTEM_ERROR
                     execution_nodes = running_container_execution.execution_nodes
                     for execution_node in execution_nodes:
                         execution_node.container_execution_status = (
@@ -184,14 +185,14 @@ class OrchestratorService_Sql:
                         record_system_error_exception(
                             execution=execution_node, exception=ex
                         )
-                    # Doing an intermediate commit here because it's most important to mark the problematic node as SYSTEM_ERROR.
                     session.commit()
 
-                    # Skip downstream executions
                     for execution_node in execution_nodes:
                         _mark_all_downstream_executions_as_skipped(
                             session=session, execution=execution_node
                         )
+                    if execution_nodes:
+                        update_pipeline_run_status(session, execution_nodes[0].id)
                     session.commit()
                 finally:
                     duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
@@ -241,6 +242,7 @@ class OrchestratorService_Sql:
             execution.container_execution_status = (
                 bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
             )
+            update_pipeline_run_status(session, execution.id)
             session.commit()
             return
 
@@ -366,6 +368,7 @@ class OrchestratorService_Sql:
                         downstream_execution.container_execution_status = (
                             bts.ContainerExecutionStatus.QUEUED
                         )
+            update_pipeline_run_status(session, execution.id)
             session.commit()
             return
 
@@ -406,6 +409,7 @@ class OrchestratorService_Sql:
             _mark_all_downstream_executions_as_skipped(
                 session=session, execution=execution
             )
+            update_pipeline_run_status(session, execution.id)
             session.commit()
             return
 
@@ -558,7 +562,6 @@ class OrchestratorService_Sql:
         except Exception as ex:
             session.rollback()
             with session.begin():
-                # Logs whole exception
                 _logger.exception(f"Error launching container for {execution.id=}")
                 execution.container_execution_status = (
                     bts.ContainerExecutionStatus.SYSTEM_ERROR
@@ -567,6 +570,7 @@ class OrchestratorService_Sql:
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution
                 )
+                update_pipeline_run_status(session, execution.id)
             return
 
         current_time = _get_current_time()
@@ -606,7 +610,7 @@ class OrchestratorService_Sql:
             execution.container_execution = container_execution
             execution.container_execution_cache_key = cache_key
             execution.container_execution_status = container_execution.status
-            # TODO: Maybe add artifact value and URI to input ArtifactData.
+            update_pipeline_run_status(session, execution.id)
 
     def internal_process_one_running_execution(
         self, session: orm.Session, container_execution: bts.ContainerExecution
@@ -666,7 +670,6 @@ class OrchestratorService_Sql:
                 container_execution.status = bts.ContainerExecutionStatus.CANCELLED
                 terminated = True
 
-            # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
             for execution_node in votes_to_terminate:
                 _logger.info(
                     f"Cancelling execution {execution_node.id} and skipping all downstream executions."
@@ -677,6 +680,8 @@ class OrchestratorService_Sql:
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
                 )
+            if votes_to_terminate:
+                update_pipeline_run_status(session, votes_to_terminate[0].id)
             session.commit()
             if terminated:
                 return
@@ -888,6 +893,8 @@ class OrchestratorService_Sql:
             raise OrchestratorError(
                 f"Unexpected running container status: {new_status=}, {launched_container=}"
             )
+        if execution_nodes:
+            update_pipeline_run_status(session, execution_nodes[0].id)
         session.commit()
 
 

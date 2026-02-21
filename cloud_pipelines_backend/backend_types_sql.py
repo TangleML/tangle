@@ -137,8 +137,10 @@ class PipelineRun(_TableBase):
     )
     root_execution: orm.Mapped["ExecutionNode"] = orm.relationship(repr=False)
     annotations: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
-    # status: "PipelineJobStatus"
-    # root_execution_summary: "ExecutionSummary"
+    status: orm.Mapped[ContainerExecutionStatus | None] = orm.mapped_column(
+        default=None, index=True
+    )
+    has_ended: orm.Mapped[bool] = orm.mapped_column(default=False)
     created_by: orm.Mapped[str | None] = orm.mapped_column(default=None)
     created_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
     updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
@@ -165,6 +167,11 @@ class PipelineRun(_TableBase):
         sql.Index(
             "ix_pipeline_run_pipeline_name",
             pipeline_name,
+        ),
+        sql.Index(
+            "ix_pipeline_run_status_created_at_desc",
+            status,
+            created_at.desc(),
         ),
     )
 
