@@ -180,6 +180,11 @@ class _KubernetesContainerLauncher(
         output_uris: dict[str, str],
         log_uri: str,
         annotations: dict[str, Any] | None = None,
+        pod_namespace: str | None = None,
+        pod_name_prefix: str | None = None,
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        pod_service_account: str | None = None,
     ) -> k8s_client_lib.V1Pod:
         if not isinstance(
             component_spec.implementation, structures.ContainerImplementation
@@ -340,16 +345,17 @@ class _KubernetesContainerLauncher(
             ],
             volumes=list(volume_map.values()),
             restart_policy="Never",
-            service_account_name=self._service_account_name,
+            service_account_name=pod_service_account,
         )
 
         pod = k8s_client_lib.V1Pod(
             api_version="v1",
             kind="Pod",
             metadata=k8s_client_lib.V1ObjectMeta(
-                generate_name=self._pod_name_prefix,
-                labels=self._pod_labels,
-                annotations=self._pod_annotations,
+                generate_name=pod_name_prefix,
+                namespace=pod_namespace,
+                labels=pod_labels,
+                annotations=pod_annotations,
             ),
             spec=pod_spec,
         )
@@ -371,6 +377,11 @@ class _KubernetesContainerLauncher(
             output_uris=output_uris,
             log_uri=log_uri,
             annotations=annotations,
+            pod_name_prefix=self._pod_name_prefix,
+            pod_namespace=self._namespace,
+            pod_labels=self._pod_labels,
+            pod_annotations=self._pod_annotations,
+            pod_service_account=self._service_account_name,
         )
 
         # Applying the pod post-processor
