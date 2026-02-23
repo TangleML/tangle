@@ -17,7 +17,6 @@ from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_provider_interfaces,
 )
 from cloud_pipelines.orchestration.storage_providers import local_storage
-from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
 from .. import component_structures as structures
 from . import container_component_utils
 from . import interfaces
@@ -547,6 +546,9 @@ class GoogleKubernetesEngineLauncher(_KubernetesContainerLauncher):
         if pod_postprocessor:
             pod_postprocessors.append(pod_postprocessor)
         final_pod_postporocessor = _create_pod_postprocessor_stack(pod_postprocessors)
+
+        from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
+
         super().__init__(
             namespace=namespace,
             service_account_name=service_account_name,
