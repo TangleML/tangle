@@ -1,6 +1,8 @@
 import dataclasses
 import datetime
 import enum
+import os
+import time
 import typing
 from typing import Any
 
@@ -48,9 +50,6 @@ def generate_unique_id() -> str:
 
     The ID is 6 bytes of millisecond-precision time plus 4 random bytes.
     """
-    import os
-    import time
-
     random_bytes = os.urandom(4)
     nanoseconds = time.time_ns()
     milliseconds = nanoseconds // 1_000_000

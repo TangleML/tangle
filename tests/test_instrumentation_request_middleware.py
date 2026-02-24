@@ -1,5 +1,7 @@
 """Tests for the request_middleware module in instrumentation."""
 
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from starlette.requests import Request
@@ -253,8 +255,6 @@ class TestRequestContextMiddlewareIntegration:
 
     def test_middleware_enables_request_id_in_logs(self):
         """Test that middleware enables request_id to be used in logging."""
-        import logging
-
         app = Starlette()
         app.add_middleware(RequestContextMiddleware)
 

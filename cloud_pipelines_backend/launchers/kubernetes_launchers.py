@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import pprint
 import typing
 from typing import Any, Optional
 
@@ -832,8 +833,6 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             yield str(line) + "\n"
 
     def __str__(self) -> str:
-        import pprint
-
         return pprint.pformat(self.to_dict())
 
     def terminate(self):
@@ -1333,8 +1332,6 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             yield str(line) + "\n"
 
     def __str__(self) -> str:
-        import pprint
-
         return pprint.pformat(self.to_dict())
 
     def terminate(self):
