@@ -364,6 +364,23 @@ class TestPipelineRunServiceCreate:
         result = _create_run(session_factory, service, root_task=_make_task_spec())
         assert result.created_by is None
 
+    def test_create_writes_created_by_annotation(self, session_factory, service):
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="alice@example.com",
+        )
+        with session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations[filter_query_sql.SystemKey.CREATED_BY] == "alice@example.com"
+
+    def test_create_without_created_by_no_annotation(self, session_factory, service):
+        run = _create_run(session_factory, service, root_task=_make_task_spec())
+        with session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert filter_query_sql.SystemKey.CREATED_BY not in annotations
+
 
 class TestPipelineRunAnnotationCrud:
     def test_set_annotation(self, session_factory, service):
@@ -383,7 +400,7 @@ class TestPipelineRunAnnotationCrud:
             )
         with session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations == {"team": "ml-ops"}
+        assert annotations["team"] == "ml-ops"
 
     def test_set_annotation_overwrites(self, session_factory, service):
         run = _create_run(
@@ -410,7 +427,7 @@ class TestPipelineRunAnnotationCrud:
             )
         with session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations == {"team": "new-value"}
+        assert annotations["team"] == "new-value"
 
     def test_delete_annotation(self, session_factory, service):
         run = _create_run(
@@ -436,13 +453,50 @@ class TestPipelineRunAnnotationCrud:
             )
         with session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations == {}
+        assert "team" not in annotations
 
     def test_list_annotations_empty(self, session_factory, service):
         run = _create_run(session_factory, service, root_task=_make_task_spec())
         with session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
         assert annotations == {}
+
+    def test_set_annotation_rejects_system_key(self, session_factory, service):
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user1",
+        )
+        with session_factory() as session:
+            with pytest.raises(
+                errors.InvalidAnnotationKeyError, match="reserved for system use"
+            ):
+                service.set_annotation(
+                    session=session,
+                    id=run.id,
+                    key="system/pipeline_run.created_by",
+                    value="hacker",
+                    user_name="user1",
+                )
+
+    def test_delete_annotation_rejects_system_key(self, session_factory, service):
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user1",
+        )
+        with session_factory() as session:
+            with pytest.raises(
+                errors.InvalidAnnotationKeyError, match="reserved for system use"
+            ):
+                service.delete_annotation(
+                    session=session,
+                    id=run.id,
+                    key="system/pipeline_run.created_by",
+                    user_name="user1",
+                )
 
 
 class TestFilterQueryApiWiring:
@@ -839,3 +893,94 @@ class TestFilterQueryIntegration:
             )
         assert len(page2.pipeline_runs) == 2
         assert page2.next_page_token is None
+
+    def test_filter_query_created_by(self, session_factory, service):
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="alice",
+        )
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="bob",
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "value_equals": {
+                            "key": filter_query_sql.SystemKey.CREATED_BY,
+                            "value": "alice",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].created_by == "alice"
+
+    def test_filter_query_created_by_me(self, session_factory, service):
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="alice",
+        )
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="bob",
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "value_equals": {
+                            "key": filter_query_sql.SystemKey.CREATED_BY,
+                            "value": "me",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+                current_user="alice",
+            )
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].created_by == "alice"
+
+    def test_filter_query_created_by_unsupported_predicate(
+        self, session_factory, service
+    ):
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "value_contains": {
+                            "key": filter_query_sql.SystemKey.CREATED_BY,
+                            "value_substring": "al",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            with pytest.raises(errors.InvalidAnnotationKeyError, match="not supported"):
+                service.list(
+                    session=session,
+                    filter_query=fq,
+                )

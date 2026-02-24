@@ -322,3 +322,96 @@ class TestBuildListFilters:
         )
         assert len(clauses) == 1
         assert next_token.filter == "created_by:bob@example.com"
+
+
+class TestSystemKeyValidation:
+    def test_get_predicate_key_value_equals(self):
+        pred = filter_query_models.ValueEqualsPredicate(
+            value_equals=filter_query_models.ValueEquals(key="team", value="ml")
+        )
+        assert filter_query_sql._get_predicate_key(predicate=pred) == "team"
+
+    def test_get_predicate_key_logical_operator(self):
+        pred = filter_query_models.AndPredicate(
+            **{
+                "and": [
+                    filter_query_models.KeyExistsPredicate(
+                        key_exists=filter_query_models.KeyExists(key="x")
+                    )
+                ]
+            }
+        )
+        assert filter_query_sql._get_predicate_key(predicate=pred) is None
+
+    def test_check_predicate_allowed_supported(self):
+        pred = filter_query_models.ValueEqualsPredicate(
+            value_equals=filter_query_models.ValueEquals(
+                key=filter_query_sql.SystemKey.CREATED_BY, value="alice"
+            )
+        )
+        filter_query_sql._check_predicate_allowed(predicate=pred)
+
+    def test_check_predicate_allowed_unsupported(self):
+        pred = filter_query_models.ValueContainsPredicate(
+            value_contains=filter_query_models.ValueContains(
+                key=filter_query_sql.SystemKey.CREATED_BY, value_substring="al"
+            )
+        )
+        with pytest.raises(errors.InvalidAnnotationKeyError, match="not supported"):
+            filter_query_sql._check_predicate_allowed(predicate=pred)
+
+    def test_check_predicate_allowed_non_system_key(self):
+        pred = filter_query_models.ValueContainsPredicate(
+            value_contains=filter_query_models.ValueContains(
+                key="team", value_substring="ml"
+            )
+        )
+        filter_query_sql._check_predicate_allowed(predicate=pred)
+
+    def test_resolve_system_key_value_me(self):
+        result = filter_query_sql._resolve_system_key_value(
+            key=filter_query_sql.SystemKey.CREATED_BY,
+            value="me",
+            current_user="alice@example.com",
+        )
+        assert result == "alice@example.com"
+
+    def test_resolve_system_key_value_me_no_user(self):
+        result = filter_query_sql._resolve_system_key_value(
+            key=filter_query_sql.SystemKey.CREATED_BY,
+            value="me",
+            current_user=None,
+        )
+        assert result == ""
+
+    def test_resolve_system_key_value_passthrough(self):
+        result = filter_query_sql._resolve_system_key_value(
+            key="team",
+            value="me",
+            current_user="alice",
+        )
+        assert result == "me"
+
+    def test_maybe_resolve_system_values(self):
+        pred = filter_query_models.ValueEqualsPredicate(
+            value_equals=filter_query_models.ValueEquals(
+                key=filter_query_sql.SystemKey.CREATED_BY, value="me"
+            )
+        )
+        resolved = filter_query_sql._maybe_resolve_system_values(
+            predicate=pred,
+            current_user="bob@example.com",
+        )
+        assert resolved.value_equals.value == "bob@example.com"
+
+    def test_validate_and_resolve_predicate(self):
+        pred = filter_query_models.ValueEqualsPredicate(
+            value_equals=filter_query_models.ValueEquals(
+                key=filter_query_sql.SystemKey.CREATED_BY, value="me"
+            )
+        )
+        resolved = filter_query_sql._validate_and_resolve_predicate(
+            predicate=pred,
+            current_user="charlie@example.com",
+        )
+        assert resolved.value_equals.value == "charlie@example.com"
