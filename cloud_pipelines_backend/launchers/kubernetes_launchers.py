@@ -125,10 +125,8 @@ class PodPostProcessor(typing.Protocol):
     ) -> k8s_client_lib.V1Pod: ...
 
 
-class _KubernetesContainerLauncher(
-    interfaces.ContainerTaskLauncher["LaunchedKubernetesContainer"]
-):
-    """Launcher that uses single-node Kubernetes (uses hostPath for data passing)"""
+class _KubernetesContainerLauncherBase:
+    """Launcher that launches container using Kubernetes"""
 
     def __init__(
         self,
@@ -373,6 +371,43 @@ class _KubernetesContainerLauncher(
         del annotations
         return self._namespace
 
+
+class _KubernetesPodLauncher(
+    _KubernetesContainerLauncherBase,
+    interfaces.ContainerTaskLauncher["LaunchedKubernetesContainer"],
+):
+    """Launcher that launches a container via a Kubernetes Pod."""
+
+    def __init__(
+        self,
+        *,
+        api_client: k8s_client_lib.ApiClient,
+        namespace: str = "default",
+        service_account_name: str | None = None,
+        request_timeout: int | tuple[int, int] = 10,
+        pod_name_prefix: str = "task-pod-",
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        pod_postprocessor: PodPostProcessor | None = None,
+        _storage_provider: storage_provider_interfaces.StorageProvider,
+        _create_volume_and_volume_mount: typing.Callable[
+            [str, str, str, bool],
+            tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
+        ],
+    ):
+        super().__init__(
+            api_client=api_client,
+            namespace=namespace,
+            service_account_name=service_account_name,
+            request_timeout=request_timeout,
+            pod_name_prefix=pod_name_prefix,
+            pod_labels=pod_labels,
+            pod_annotations=pod_annotations,
+            pod_postprocessor=pod_postprocessor,
+            _storage_provider=_storage_provider,
+            _create_volume_and_volume_mount=_create_volume_and_volume_mount,
+        )
+
     def launch_container_task(
         self,
         *,
@@ -522,7 +557,7 @@ def _create_pod_postprocessor_stack(
     return _post_processor
 
 
-class KubernetesWithHostPathContainerLauncher(_KubernetesContainerLauncher):
+class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
     """Launcher that uses single-node Kubernetes (uses hostPath for data passing)"""
 
     def __init__(
@@ -551,7 +586,7 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesContainerLauncher):
         )
 
 
-class GoogleKubernetesEngineLauncher(_KubernetesContainerLauncher):
+class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
     """Launcher that uses GKE Kubernetes (uses GKE-gcsfuse driver for data passing)"""
 
     def __init__(
@@ -605,7 +640,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         log_uri: str,
         debug_pod: k8s_client_lib.V1Pod,
         cluster_server: str | None = None,
-        launcher: _KubernetesContainerLauncher | None = None,
+        launcher: _KubernetesPodLauncher | None = None,
     ):
         self._pod_name = pod_name
         self._namespace = namespace
@@ -752,7 +787,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
 
     @classmethod
     def from_dict(
-        cls, d: dict[str, Any], launcher: _KubernetesContainerLauncher | None = None
+        cls, d: dict[str, Any], launcher: _KubernetesPodLauncher | None = None
     ) -> LaunchedKubernetesContainer:
         # Backwards compatibility for old container execution records.
         d = d.get("kubernetes", d)
