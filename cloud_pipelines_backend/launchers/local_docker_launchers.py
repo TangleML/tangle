@@ -42,9 +42,6 @@ def _construct_docker_volume_mount(
         raise ValueError(
             f"When creating a mount, container path must be absolute, but got {container_path}."
         )
-    # Maybe it's OK to allow relative paths. (To enable portable self-contained local DB+data directory.)
-    # if not host_path_obj.is_absolute():
-    #     raise ValueError(f"When creating a mount, host path must be absolute, but got {host_path_obj}.")
     host_path_obj = host_path_obj.resolve()
     if container_path_obj.name != host_path_obj.name:
         raise interfaces.LauncherError(
@@ -87,8 +84,6 @@ class DockerContainerLauncher(
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedDockerContainer":
         container_spec = component_spec.implementation.container
-        input_names = list(input_arguments.keys())
-        output_names = list(output_uris.keys())
 
         # TODO: Validate the output URIs. Don't forget about (`C:\*` and `C:/*` paths)
 

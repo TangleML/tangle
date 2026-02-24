@@ -674,10 +674,6 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             return None
         return state.terminated
 
-    # @property
-    # def id(self) -> str:
-    #     return self.pod_name
-
     @property
     def status(self) -> interfaces.ContainerStatus:
         phase_str = self._debug_pod.status.phase
@@ -1419,8 +1415,6 @@ def _update_dict_recursively(d1: dict, d2: dict):
             if isinstance(v1, dict) and isinstance(v2, dict):
                 _update_dict_recursively(v1, v2)
                 continue
-            # elif isinstance(v1, list) and isinstance(v2, list):
-            # # Merging lists is not supported yet
         d1[k] = v2
 
 

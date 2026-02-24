@@ -196,8 +196,6 @@ def _setup_routes_internal(
         ensure_user_can_write_dependency,
     ]
 
-    # === API ===
-
     router = fastapi.APIRouter(
         lifespan=lifespan,
     )
@@ -533,29 +531,7 @@ def _setup_routes_internal(
     ) -> str:
         return session.get_bind().pool.status()
 
-    # # Needs to be called after all routes have been added to the router
-    # app.include_router(router)
-
     app.include_router(router=router)
-
-
-# def partial_wraps(func, **kwargs):
-#     import inspect
-#
-#     # return functools.wraps(func)(functools.partial(func, *args, **kwargs))
-#     partial_func = functools.partial(func, **kwargs)
-#     param_names = set(kwargs)
-#     signature = inspect.signature(func)
-#     partial_signature = signature.replace(
-#         parameters=[
-#             parameter
-#             for parameter_name, parameter in signature.parameters.items()
-#             if parameter_name not in param_names
-#         ]
-#     )
-#     print(f"{partial_signature=}")
-#     partial_func.__signature__ = partial_signature
-#     return partial_func
 
 
 # Super hack to avoid duplicating functions in Fast API

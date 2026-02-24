@@ -88,18 +88,6 @@ class ListComponentsResponse:
 
 # This service probably should not be exposed directly to the API
 class ComponentService:
-    def _list(
-        self, *, session: orm.Session, name_substring: str | None = None
-    ) -> ListComponentsResponse:
-        query = sql.select(ComponentRow)
-        component_rows = session.scalars(query).all()
-        return ListComponentsResponse(
-            components=[
-                ComponentResponse.from_db(component_row)
-                for component_row in component_rows
-            ]
-        )
-
     def get(self, *, session: orm.Session, digest: str) -> ComponentResponse:
         component_row = session.get(ComponentRow, digest)
         if not component_row:

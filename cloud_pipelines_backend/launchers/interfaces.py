@@ -73,14 +73,6 @@ class ContainerStatus(str, enum.Enum):
 
 class LaunchedContainer(abc.ABC):
 
-    # @classmethod
-    # def get(cls: typing.Type[_TLaunchedContainer]) -> _TLaunchedContainer:
-    #     raise NotImplementedError()
-
-    # @property
-    # def id(self) -> str:
-    #     raise NotImplementedError()
-
     @property
     def status(self) -> ContainerStatus:
         raise NotImplementedError()
@@ -136,12 +128,3 @@ class LaunchedContainer(abc.ABC):
 
     def terminate(self) -> None:
         raise NotImplementedError()
-
-
-# @dataclasses.dataclass
-# class ContainerExecutionResult:
-#     start_time: datetime.datetime
-#     end_time: datetime.datetime
-#     exit_code: int
-#     # TODO: Replace with logs_artifact
-#     ### log: "ProcessLog"

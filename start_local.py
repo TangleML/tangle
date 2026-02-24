@@ -162,19 +162,6 @@ def run_orchestrator(
     logs_root_uri: str,
     sleep_seconds_between_queue_sweeps: float = 1.0,
 ):
-    # logger = logging.getLogger(__name__)
-    # orchestrator_logger = logging.getLogger("cloud_pipelines_backend.orchestrator_sql")
-
-    # orchestrator_logger.setLevel(logging.DEBUG)
-    # formatter = logging.Formatter("%(asctime)s\t%(name)s\t%(levelname)s\t%(message)s")
-
-    # stderr_handler = logging.StreamHandler()
-    # stderr_handler.setLevel(logging.INFO)
-    # stderr_handler.setFormatter(formatter)
-
-    # # TODO: Disable the default logger instead of not adding a new one
-    # # orchestrator_logger.addHandler(stderr_handler)
-    # logger.addHandler(stderr_handler)
 
     logger.info("Starting the orchestrator")
 

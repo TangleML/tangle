@@ -15,9 +15,6 @@ if typing.TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-T = typing.TypeVar("T")
-
-
 class ApiServiceError(RuntimeError):
     pass
 
@@ -32,13 +29,11 @@ from . import errors
 from .errors import ItemNotFoundError
 
 
-# ==== PipelineJobService
 @dataclasses.dataclass(kw_only=True)
 class PipelineRunResponse:
     id: bts.IdType
     root_execution_id: bts.IdType
     annotations: dict[str, Any] | None = None
-    # status: "PipelineJobStatus"
     created_by: str | None = None
     created_at: datetime.datetime | None = None
     pipeline_name: str | None = None
@@ -53,10 +48,6 @@ class PipelineRunResponse:
             created_by=pipeline_run.created_by,
             created_at=pipeline_run.created_at,
         )
-
-
-class GetPipelineRunResponse(PipelineRunResponse):
-    pass
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -188,9 +179,6 @@ class PipelineRunsApiService_Sql:
             elif key == "created_by":
                 if value == "me":
                     if current_user is None:
-                        # raise ApiServiceError(
-                        #     f"The `created_by:me` filter requires `current_user`."
-                        # )
                         current_user = ""
                     value = current_user
                     # TODO: Maybe make this a bit more robust.
@@ -291,9 +279,6 @@ class PipelineRunsApiService_Sql:
         session: orm.Session,
         id: bts.IdType,
     ) -> dict[str, str | None]:
-        # pipeline_run = session.get(bts.PipelineRun, id)
-        # if not pipeline_run:
-        #     raise ItemNotFoundError(f"Pipeline run {id} not found.")
         annotations = {
             ann.key: ann.value
             for ann in session.scalars(
@@ -373,9 +358,6 @@ def _parse_filter(filter: str) -> dict[str, str]:
     return parsed_filter
 
 
-# ========== ExecutionNodeApiService_Sql
-
-
 # TODO: Use _storage_provider.calculate_hash(path)
 # Hashing of constant arguments should the use same algorithm as caching of the output artifacts.
 def _calculate_hash(s: str) -> str:
@@ -402,17 +384,7 @@ def _split_type_spec(
     raise TypeError(f"Unsupported kind of type spec: {type_spec}")
 
 
-# def _construct_constant_data_info(value: str) -> DataInfo:
-#     return DataInfo(
-#         total_size=len(value),
-#         is_dir=False,
-#         hash=_calculate_hash(value),
-#     )
-
-
 def _construct_constant_artifact_data(value: str) -> bts.ArtifactData:
-    # FIX: !!!
-    # raise NotImplementedError("MUST insert into session. Need to de-duplicate")
     artifact_data = bts.ArtifactData(
         total_size=len(value),
         is_dir=False,
@@ -450,12 +422,6 @@ def _construct_constant_artifact_node_and_add_to_session(
     session.add(artifact_node.artifact_data)
     session.add(artifact_node)
     return artifact_node
-
-
-# ? Do we need an association table between PipelineJob and ExecutionNode
-
-
-# ============
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -585,35 +551,6 @@ class ExecutionNodesApiService_Sql:
         ExecutionNode_Descendant = orm.aliased(
             bts.ExecutionNode, name="descendant_execution_node"
         )
-        # # We cannot use this query since ContainerExecution do not exist
-        # # for not yet started container execution nodes.
-        # query = (
-        #     sql.select(
-        #         ExecutionNode_Child.id.label("child_execution_id"),
-        #         bts.ContainerExecution.status,
-        #         sql.func.count().label("count"),
-        #     )
-        #     .where(ExecutionNode_Child.parent_execution_id == id)
-        #     .join(
-        #         bts.ExecutionToAncestorExecutionLink,
-        #         bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-        #         == ExecutionNode_Child.id,
-        #     )
-        #     .join(
-        #         ExecutionNode_Descendant,
-        #         ExecutionNode_Descendant.id
-        #         == bts.ExecutionToAncestorExecutionLink.execution_id,
-        #     )
-        #     .join(
-        #         bts.ContainerExecution,
-        #         bts.ContainerExecution.id
-        #         == ExecutionNode_Descendant.container_execution_id,
-        #     )
-        #     .group_by(
-        #         ExecutionNode_Child.id,
-        #         bts.ContainerExecution.status,
-        #     )
-        # )
         child_descendants_query = (
             sql.select(
                 ExecutionNode_Child.id.label("child_execution_id"),
@@ -908,13 +845,10 @@ def _read_container_execution_log_from_uri(
 @dataclasses.dataclass(kw_only=True)
 class ArtifactNodeResponse:
     id: bts.IdType
-    # had_data_in_past: bool = False
-    # may_have_data_in_future: bool = True
     type_name: str | None = None
     type_properties: dict[str, Any] | None = None
     producer_execution_id: bts.IdType | None = None
     producer_output_name: str | None = None
-    # artifact_data_id: bts.IdType | None = None
     artifact_data: "ArtifactDataResponse | None" = None
 
     @classmethod
@@ -936,13 +870,8 @@ class ArtifactNodeResponse:
 class ArtifactDataResponse:
     total_size: int
     is_dir: bool
-    # hash: str
-    # At least one of `uri` or `value` must be set
     uri: str | None = None
-    # Small constant value
     value: str | None = None
-    # created_at: datetime.datetime | None = None
-    # deleted_at: datetime.datetime | None = None
 
     @classmethod
     def from_db(cls, artifact_data: bts.ArtifactData) -> "ArtifactDataResponse":
@@ -1014,7 +943,6 @@ class ArtifactNodesApiService_Sql:
         return GetArtifactSignedUrlResponse(signed_url=signed_url)
 
 
-# === Secrets Service
 @dataclasses.dataclass(kw_only=True)
 class SecretInfoResponse:
     secret_name: str
@@ -1155,17 +1083,6 @@ class SecretsApiService:
         )
 
 
-# ============
-
-# Idea for how to add deep nested graph:
-# First: Recursively create all task execution nodes and create their output artifacts
-# Then: For each execution node starting from root:
-#       Set/create input argument artifacts
-#       If the node is a graph, process the node's children
-# ---
-# No. Decided to first do topological sort and then 1-stage generation.
-
-
 _ArtifactNodeOrDynamicDataType = typing.Union[
     bts.ArtifactNode, structures.DynamicDataArgument
 ]
@@ -1250,7 +1167,6 @@ def _recursively_create_all_executions_and_artifacts(
 
     root_execution_node = bts.ExecutionNode(
         task_spec=root_task_spec.to_json_dict(),
-        # child_task_id_to_execution_node=None,
     )
     session.add(root_execution_node)
     for ancestor in ancestors:
@@ -1260,9 +1176,6 @@ def _recursively_create_all_executions_and_artifacts(
         )
         session.add(ancestor_link)
 
-    # FIX: Handle ExecutionNode.constant_arguments
-    # We do not touch root_task_spec.arguments. We use graph_input_artifact_nodes instead
-    constant_input_artifacts: dict[str, bts.ArtifactData] = {}
     input_artifact_nodes = dict(input_artifact_nodes)
     for input_spec in root_component_spec.inputs or []:
         input_artifact_node = input_artifact_nodes.get(input_spec.name)
@@ -1295,25 +1208,12 @@ def _recursively_create_all_executions_and_artifacts(
                         artifact_type=input_spec.type,
                     )
                 )
-                # # Not adding constant inputs to the DB. We'll add them to `ExecutionNode.constant_arguments`
-                # input_artifact_node = (
-                #     _construct_constant_artifact_node(
-                #         value=input_spec.default,
-                #         artifact_type=input_spec.type,
-                #     )
-                # )
-                # This constant artifact won't be added to the DB
-                # result_artifact_nodes.append(artifact_node)
                 input_artifact_nodes[input_spec.name] = input_artifact_node
             else:
                 raise ApiServiceError(
                     f"Task has a required input {input_spec.name}, but no upstream artifact and no default value. {root_task_spec=}"
                 )
         if input_artifact_node:
-            # if input_artifact_node.artifact_data:
-            #     # Not adding constant inputs to the DB. We'll add them to `ExecutionNode.constant_arguments`
-            #     constant_input_artifacts[input_spec.name] = input_artifact_node.artifact_data
-            # else:
             input_artifact_link = bts.InputArtifactLink(
                 execution=root_execution_node,
                 input_name=input_spec.name,
@@ -1340,14 +1240,6 @@ def _recursively_create_all_executions_and_artifacts(
             )
             session.add(output_artifact_link)
 
-        # FIX!: Create ContainerExecution here. (Beware of caching.)
-        # # container_spec = implementation.container
-        # container_execution_node = ContainerExecutionNode(
-        #     id=...,
-        #     status=ContainerExecutionStatus.WaitingForUpstream
-        # )
-        # root_execution_node.container_execution_id = container_execution_node.id
-        # Done: Maybe set WAITING_FOR_UPSTREAM ourselves.
         root_execution_node.container_execution_status = (
             bts.ContainerExecutionStatus.QUEUED
             if all(
@@ -1532,34 +1424,3 @@ def _toposort_tasks(
         )
 
     return sorted_tasks
-
-
-def _sqlalchemy_object_to_dict(obj) -> dict:
-    d = dict(obj.__dict__)
-    d.pop("_sa_instance_state", None)
-    return d
-
-
-# ================
-# 2025-02-15
-
-# Idea: There are high-level abstract execution nodes. Some of them link to ContainerExecution (or possibly multiple of them is thee are retries.)
-# There are edges in the DB. Different kinds of edges: Artifact passing edges, execution-to-parent-execution edges etc.
-# Idea: When [container?] execution finishes, the system processes/activates/notifies the edges. For example, sets downstream execution's input artifacts.
-# We could have a dedicated queue for edges (the upstream only "activates" the edges for processing), but we can start with the execution completion actively processing everything synchronously.
-# There is a risk of race condition. To somewhat mitigate this risk, the code that wants to check the state and add the edge should add the edge first, then try to process it.
-
-
-# class ArtifactPromiseEnum(enum.Enum):
-#     NOT_CREATED_YET = 1
-#     CREATED = 2
-#     WILL_NEVER_BE_CREATED = 3  # = Upstream failed/skipped/cancelled
-#     UPSTREAM_NOT_CONNECTED = 4
-#     # Flags: have_existed, may_exist_in_future
-
-
-# # There need to be special artifact: UnconnectedArtifactWithDefaultValue
-# # If input is optional, it's treated as unconnected.
-# # If input is required, it's treated as the default value.
-# class UnconnectedArtifactWithDefaultValue:
-#     default_value: str

@@ -737,32 +737,6 @@ class OrchestratorService_Sql:
                     f"! Error during `LaunchedContainer.upload_log` call: {ex}."
                 )
 
-            _MAX_PRELOAD_VALUE_SIZE = 255
-
-            def _maybe_preload_value(
-                uri_reader: storage_provider_interfaces.UriReader,
-                data_info: storage_provider_interfaces.DataInfo,
-            ) -> str | None:
-                """Preloads artifact value is it's small enough (e.g. <=255 bytes)"""
-                if (
-                    not data_info.is_dir
-                    and data_info.total_size < _MAX_PRELOAD_VALUE_SIZE
-                ):
-                    # Don't fail the execution if small value preloading fails.
-                    # Those values may be useful for preservation, but not so important that we should fail a successfully completed container execution.
-                    try:
-                        data = uri_reader.download_as_bytes()
-                    except Exception as ex:
-                        _logger.exception(
-                            f"Error during preloading small artifact values."
-                        )
-                        return None
-                    try:
-                        text = data.decode("utf-8")
-                        return text
-                    except:
-                        pass
-
             output_artifact_uris: dict[str, str] = {
                 output_name: output_artifact_info_dict["uri"]
                 for output_name, output_artifact_info_dict in container_execution.output_artifact_data_map.items()
@@ -922,20 +896,12 @@ def _mark_all_downstream_executions_as_skipped(
     }:
         execution.container_execution_status = bts.ContainerExecutionStatus.SKIPPED
 
-    # for artifact_node in execution.output_artifact_nodes:
-    #     for downstream_execution in artifact_node.downstream_executions:
     for downstream_execution in _get_direct_downstream_executions(session, execution):
         _mark_all_downstream_executions_as_skipped(
             session=session,
             execution=downstream_execution,
             seen_execution_ids=seen_execution_ids,
         )
-
-
-def _assert_type(value: typing.Any, typ: typing.Type[_T]) -> _T:
-    if not isinstance(value, typ):
-        raise TypeError(f"Expected type {typ}, but got {type(value)}: {value}")
-    return value
 
 
 def _assert_not_none(value: _T | None) -> _T:
@@ -992,8 +958,6 @@ def _update_dict_recursive(d1: dict, d2: dict):
             if isinstance(v1, dict) and isinstance(v2, dict):
                 _update_dict_recursive(v1, v2)
                 continue
-            # elif isinstance(v1, list) and isinstance(v2, list):
-            # # Merging lists is not supported yet
         d1[k] = v2
 
 
