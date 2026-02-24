@@ -361,6 +361,18 @@ class _KubernetesContainerLauncher(
         )
         return pod
 
+    def _choose_namespace(
+        self,
+        *,
+        annotations: dict[str, Any] | None = None,
+    ) -> str:
+        """Chooses the namespace for the pod.
+
+        Override this method to choose namespace dynamically.
+        """
+        del annotations
+        return self._namespace
+
     def launch_container_task(
         self,
         *,
@@ -371,6 +383,8 @@ class _KubernetesContainerLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesContainer":
+        namespace = self._choose_namespace(annotations=annotations)
+
         pod = self._prepare_kubernetes_pod(
             component_spec=component_spec,
             input_arguments=input_arguments,
@@ -378,7 +392,7 @@ class _KubernetesContainerLauncher(
             log_uri=log_uri,
             annotations=annotations,
             pod_name_prefix=self._pod_name_prefix,
-            pod_namespace=self._namespace,
+            pod_namespace=namespace,
             pod_labels=self._pod_labels,
             pod_annotations=self._pod_annotations,
             pod_service_account=self._service_account_name,
@@ -391,7 +405,7 @@ class _KubernetesContainerLauncher(
         core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
         try:
             created_pod: k8s_client_lib.V1Pod = core_api_client.create_namespaced_pod(
-                namespace=pod.metadata.namespace or self._namespace,
+                namespace=pod.metadata.namespace or namespace,
                 body=pod,
                 _request_timeout=self._request_timeout,
             )
