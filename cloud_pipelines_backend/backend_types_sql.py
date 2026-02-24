@@ -513,6 +513,14 @@ class PipelineRunAnnotation(_TableBase):
     key: orm.Mapped[str] = orm.mapped_column(default=None, primary_key=True)
     value: orm.Mapped[str | None] = orm.mapped_column(default=None)
 
+    __table_args__ = (
+        sql.Index(
+            "ix_pipeline_run_annotation_key_value",
+            key,
+            value,
+        ),
+    )
+
 
 class Secret(_TableBase):
     __tablename__ = "secret"
