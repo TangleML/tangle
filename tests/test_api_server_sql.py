@@ -2,9 +2,10 @@ import pytest
 import sqlalchemy
 from sqlalchemy import orm
 
+from cloud_pipelines_backend import api_server_sql
 from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
-from cloud_pipelines_backend import api_server_sql
+from cloud_pipelines_backend import errors
 
 
 class TestExecutionStatusSummary:
@@ -541,3 +542,36 @@ class TestBuildFilterWhereClauses:
                 filter_value="some_text_without_colon",
                 current_user=None,
             )
+
+
+class TestFilterQueryApiWiring:
+    def test_filter_query_returns_not_implemented(self, session_factory, service):
+        valid_json = '{"and": [{"key_exists": {"key": "team"}}]}'
+        with session_factory() as session:
+            with pytest.raises(NotImplementedError, match="not yet implemented"):
+                service.list(
+                    session=session,
+                    filter_query=valid_json,
+                )
+
+    def test_filter_query_validates_before_501(self, session_factory, service):
+        from pydantic import ValidationError
+
+        invalid_json = '{"bad_key": "not_valid"}'
+        with session_factory() as session:
+            with pytest.raises(ValidationError):
+                service.list(
+                    session=session,
+                    filter_query=invalid_json,
+                )
+
+    def test_mutual_exclusivity_rejected(self, session_factory, service):
+        with session_factory() as session:
+            with pytest.raises(
+                errors.MutuallyExclusiveFilterError, match="Cannot use both"
+            ):
+                service.list(
+                    session=session,
+                    filter="created_by:alice",
+                    filter_query='{"and": [{"key_exists": {"key": "team"}}]}',
+                )
