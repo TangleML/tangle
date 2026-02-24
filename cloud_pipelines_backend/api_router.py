@@ -13,7 +13,6 @@ import starlette.types
 from . import api_server_sql
 from . import backend_types_sql
 from . import component_library_api_server as components_api
-from . import database_ops
 from . import errors
 from .instrumentation import contextual_logging
 
@@ -45,10 +44,6 @@ def setup_routes(
             yield session
 
     def create_db_and_tables():
-        database_ops.initialize_and_migrate_db(db_engine=db_engine)
-
-        # The default library must be initialized here, not when adding the Component Library routes.
-        # Otherwise the tables won't yet exist when initialization is performed.
         component_library_service = components_api.ComponentLibraryService()
         with orm.Session(bind=db_engine) as session:
             component_library_service._initialize_empty_default_library_if_missing(

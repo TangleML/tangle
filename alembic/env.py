@@ -80,13 +80,7 @@ def run_migrations_online() -> None:
         with context.begin_transaction():
             context.run_migrations()
 
-    try:
-        connectable.connect
-        is_engine = hasattr(connectable, "pool")
-    except AttributeError:
-        is_engine = False
-
-    if is_engine:
+    if isinstance(connectable, sa.engine.Engine):
         with connectable.connect() as connection:
             _run_with_connection(connection)
     else:

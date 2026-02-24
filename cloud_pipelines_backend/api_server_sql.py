@@ -4,7 +4,7 @@ import datetime
 import json
 import logging
 import typing
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -290,6 +290,13 @@ class PipelineRunsApiService_Sql:
         if len(pipeline_runs) < page_size:
             next_page_token = None
 
+        stats_by_root: dict[bts.IdType, dict[str, int]] = {}
+        if include_execution_stats and pipeline_runs:
+            stats_by_root = self._calculate_execution_status_stats_batch(
+                session=session,
+                root_execution_ids=[pr.root_execution_id for pr in pipeline_runs],
+            )
+
         def create_pipeline_run_response(
             pipeline_run: bts.PipelineRun,
         ) -> PipelineRunResponse:
@@ -313,13 +320,9 @@ class PipelineRunsApiService_Sql:
                                 pipeline_name = component_spec.name
                 response.pipeline_name = pipeline_name
             if include_execution_stats:
-                execution_status_stats = self._calculate_execution_status_stats(
-                    session=session, root_execution_id=pipeline_run.root_execution_id
+                response.execution_status_stats = stats_by_root.get(
+                    pipeline_run.root_execution_id, {}
                 )
-                response.execution_status_stats = {
-                    status.value: count
-                    for status, count in execution_status_stats.items()
-                }
             return response
 
         return ListPipelineJobsResponse(
@@ -346,29 +349,54 @@ class PipelineRunsApiService_Sql:
     def _calculate_execution_status_stats(
         self, session: orm.Session, root_execution_id: bts.IdType
     ) -> dict[bts.ContainerExecutionStatus, int]:
-        query = (
-            sql.select(
-                bts.ExecutionNode.container_execution_status,
-                sql.func.count().label("count"),
-            )
-            .join(
-                bts.ExecutionToAncestorExecutionLink,
-                bts.ExecutionToAncestorExecutionLink.execution_id
-                == bts.ExecutionNode.id,
-            )
-            .where(
-                bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-                == root_execution_id
-            )
-            .where(bts.ExecutionNode.container_execution_status != None)
-            .group_by(
-                bts.ExecutionNode.container_execution_status,
-            )
+        result = self._calculate_execution_status_stats_batch(
+            session=session, root_execution_ids=[root_execution_id]
         )
-        execution_status_stat_rows = session.execute(query).tuples().all()
-        execution_status_stats = dict(execution_status_stat_rows)
+        stats = result.get(root_execution_id, {})
+        return {
+            bts.ContainerExecutionStatus(k): v for k, v in stats.items()
+        }
 
-        return execution_status_stats
+    @staticmethod
+    def _calculate_execution_status_stats_batch(
+        session: orm.Session,
+        root_execution_ids: Sequence[bts.IdType],
+    ) -> dict[bts.IdType, dict[str, int]]:
+        """Fetch execution status stats for multiple pipeline runs in one query."""
+        if not root_execution_ids:
+            return {}
+
+        rows = (
+            session.execute(
+                sql.select(
+                    bts.ExecutionToAncestorExecutionLink.ancestor_execution_id,
+                    bts.ExecutionNode.container_execution_status,
+                    sql.func.count().label("count"),
+                )
+                .join(
+                    bts.ExecutionToAncestorExecutionLink,
+                    bts.ExecutionToAncestorExecutionLink.execution_id
+                    == bts.ExecutionNode.id,
+                )
+                .where(
+                    bts.ExecutionToAncestorExecutionLink.ancestor_execution_id.in_(
+                        root_execution_ids
+                    )
+                )
+                .where(bts.ExecutionNode.container_execution_status != None)
+                .group_by(
+                    bts.ExecutionToAncestorExecutionLink.ancestor_execution_id,
+                    bts.ExecutionNode.container_execution_status,
+                )
+            )
+            .tuples()
+            .all()
+        )
+
+        result: dict[bts.IdType, dict[str, int]] = {}
+        for root_id, status, count in rows:
+            result.setdefault(root_id, {})[status.value] = count
+        return result
 
     def list_annotations(
         self,
