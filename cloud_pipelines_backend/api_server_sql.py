@@ -68,6 +68,14 @@ class ListPipelineJobsResponse:
 class PipelineRunsApiService_Sql:
     _PIPELINE_NAME_EXTRA_DATA_KEY = "pipeline_name"
     _DEFAULT_PAGE_SIZE: Final[int] = 10
+    _SYSTEM_KEY_RESERVED_MSG = (
+        "Annotation keys starting with "
+        f"{filter_query_sql.SYSTEM_KEY_PREFIX!r} are reserved for system use."
+    )
+
+    def _fail_if_changing_system_annotation(self, *, key: str) -> None:
+        if key.startswith(filter_query_sql.SYSTEM_KEY_PREFIX):
+            raise errors.ApiValidationError(self._SYSTEM_KEY_RESERVED_MSG)
 
     def create(
         self,
@@ -105,6 +113,19 @@ class PipelineRunsApiService_Sql:
                 },
             )
             session.add(pipeline_run)
+            # Mirror created_by into the annotations table so it's searchable
+            # via filter_query like any other annotation.
+            if created_by is not None:
+                # Flush to populate pipeline_run.id (server-generated) before inserting the annotation FK.
+                # TODO: Use ORM relationship instead of explicit flush + manual FK assignment.
+                session.flush()
+                session.add(
+                    bts.PipelineRunAnnotation(
+                        pipeline_run_id=pipeline_run.id,
+                        key=filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY,
+                        value=created_by,
+                    )
+                )
             session.commit()
 
         session.refresh(pipeline_run)
@@ -295,6 +316,7 @@ class PipelineRunsApiService_Sql:
         user_name: str | None = None,
         skip_user_check: bool = False,
     ):
+        self._fail_if_changing_system_annotation(key=key)
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
@@ -317,6 +339,7 @@ class PipelineRunsApiService_Sql:
         user_name: str | None = None,
         skip_user_check: bool = False,
     ):
+        self._fail_if_changing_system_annotation(key=key)
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
