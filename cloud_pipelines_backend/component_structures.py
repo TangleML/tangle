@@ -54,7 +54,6 @@ import pydantic
 import pydantic.alias_generators
 from pydantic.dataclasses import dataclass as pydantic_dataclasses
 
-
 # PrimitiveTypes = Union[str, int, float, bool]
 PrimitiveTypes = str
 
