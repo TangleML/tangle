@@ -297,6 +297,24 @@ class PipelineRunsApiService_Sql:
                 root_execution_ids=[pr.root_execution_id for pr in pipeline_runs],
             )
 
+        execution_nodes_by_id: dict[bts.IdType, bts.ExecutionNode] = {}
+        if include_pipeline_names and pipeline_runs:
+            needs_lookup = [
+                pr.root_execution_id
+                for pr in pipeline_runs
+                if not pr.pipeline_name
+                and not (pr.extra_data or {}).get(self.PIPELINE_NAME_EXTRA_DATA_KEY)
+            ]
+            if needs_lookup:
+                execution_nodes_by_id = {
+                    en.id: en
+                    for en in session.scalars(
+                        sql.select(bts.ExecutionNode).where(
+                            bts.ExecutionNode.id.in_(needs_lookup)
+                        )
+                    )
+                }
+
         def create_pipeline_run_response(
             pipeline_run: bts.PipelineRun,
         ) -> PipelineRunResponse:
@@ -308,8 +326,8 @@ class PipelineRunsApiService_Sql:
                     if self.PIPELINE_NAME_EXTRA_DATA_KEY in extra_data:
                         pipeline_name = extra_data[self.PIPELINE_NAME_EXTRA_DATA_KEY]
                     else:
-                        execution_node = session.get(
-                            bts.ExecutionNode, pipeline_run.root_execution_id
+                        execution_node = execution_nodes_by_id.get(
+                            pipeline_run.root_execution_id
                         )
                         if execution_node:
                             task_spec = structures.TaskSpec.from_json_dict(

@@ -28,6 +28,9 @@ huggingface = [
     "huggingface-hub[oauth]>=0.35.3",
 ]
 
+[project.scripts]
+n1-check = "n1_check.__main__:main"
+
 [tool.setuptools.packages.find]
-include = ["cloud_pipelines_backend*"]
+include = ["cloud_pipelines_backend*", "n1_check*"]
 namespaces = true
