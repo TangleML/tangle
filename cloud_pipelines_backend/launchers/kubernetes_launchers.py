@@ -847,6 +847,492 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         _logger.info(f"Terminated pod {self._pod_name} in namespace {self._namespace}")
 
 
+class _KubernetesJobLauncher(
+    _KubernetesContainerLauncherBase,
+    interfaces.ContainerTaskLauncher["LaunchedKubernetesJob"],
+):
+    """Launcher that launches Kubernetes Jobs on a single-node Kubernetes (uses hostPath for data passing)"""
+
+    def __init__(
+        self,
+        *,
+        api_client: k8s_client_lib.ApiClient,
+        namespace: str = "default",
+        service_account_name: str | None = None,
+        request_timeout: int | tuple[int, int] = 10,
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        pod_postprocessor: PodPostProcessor | None = None,
+        _storage_provider: storage_provider_interfaces.StorageProvider,
+        _create_volume_and_volume_mount: typing.Callable[
+            [str, str, str, bool],
+            tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
+        ],
+    ):
+        super().__init__(
+            namespace=namespace,
+            service_account_name=service_account_name,
+            api_client=api_client,
+            request_timeout=request_timeout,
+            pod_name_prefix="task-",
+            _storage_provider=_storage_provider,
+            pod_labels=pod_labels,
+            pod_annotations=pod_annotations,
+            pod_postprocessor=pod_postprocessor,
+            _create_volume_and_volume_mount=_create_volume_and_volume_mount,
+        )
+
+    def launch_container_task(
+        self,
+        *,
+        component_spec: structures.ComponentSpec,
+        # Input arguments may be updated with new downloaded values and new URIs of uploaded values.
+        input_arguments: dict[str, interfaces.InputArgument],
+        output_uris: dict[str, str],
+        log_uri: str,
+        annotations: dict[str, Any] | None = None,
+    ) -> "LaunchedKubernetesJob":
+        namespace = self._choose_namespace(annotations=annotations)
+
+        pod = self._prepare_kubernetes_pod(
+            component_spec=component_spec,
+            input_arguments=input_arguments,
+            output_uris=output_uris,
+            log_uri=log_uri,
+            annotations=annotations,
+            pod_name_prefix=self._pod_name_prefix,
+            pod_namespace=namespace,
+            pod_labels=self._pod_labels,
+            pod_annotations=self._pod_annotations,
+            pod_service_account=self._service_account_name,
+        )
+
+        # Applying the pod post-processor
+        if self._pod_postprocessor:
+            pod = self._pod_postprocessor(pod=pod, annotations=annotations)
+
+        num_nodes = 1
+
+        job_name_prefix = "job-" + pod.metadata.generate_name
+
+        job = k8s_client_lib.V1Job(
+            metadata=k8s_client_lib.V1ObjectMeta(
+                generate_name=job_name_prefix,
+                # TODO: In the future (once consumers have migrated to _choose_namespace)
+                # we should prohibit/ignore changing pod namespace in the pod post-processor.
+                namespace=pod.metadata.namespace,
+                # annotations=self._pod_annotations,
+                # labels=self._pod_labels,
+            ),
+            spec=k8s_client_lib.V1JobSpec(
+                template=k8s_client_lib.V1PodTemplateSpec(
+                    metadata=pod.metadata,
+                    spec=pod.spec,
+                ),
+                # Let's always use Indexed Jobs. There are no downsides.
+                completion_mode="Indexed",
+                # backoff_limit=0,
+                backoff_limit_per_index=0,
+                completions=num_nodes,
+                parallelism=num_nodes,
+            ),
+        )
+
+        job = self._transform_job_before_launching(job=job, annotations=annotations)
+
+        batch_api_client = k8s_client_lib.BatchV1Api(api_client=self._api_client)
+        try:
+            created_job: k8s_client_lib.V1Job = batch_api_client.create_namespaced_job(
+                namespace=job.metadata.namespace or namespace,
+                body=job,
+                _request_timeout=self._request_timeout,
+            )
+        except Exception as ex:
+            raise interfaces.LauncherError(
+                f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}"
+            ) from ex
+
+        job_name: str = created_job.metadata.name
+        job_namespace: str = created_job.metadata.namespace
+        _logger.info(f"Created Kubernetes Job {job_name} in namespace {job_namespace}")
+
+        launched_container = LaunchedKubernetesJob(
+            job_name=job_name,
+            namespace=job_namespace,
+            output_uris=output_uris,
+            log_uri=log_uri,
+            debug_job=created_job,
+            debug_pods={},
+            cluster_server=self._api_client.configuration.host,
+            launcher=self,
+        )
+
+        return launched_container
+
+    def _transform_job_before_launching(
+        self, *, job: k8s_client_lib.V1Job, annotations: dict[str, str] | None = None
+    ) -> k8s_client_lib.V1Job:
+        del annotations
+        return job
+
+    def get_refreshed_launched_container_from_dict(
+        self, launched_container_dict: dict
+    ) -> "LaunchedKubernetesJob":
+        launched_container = LaunchedKubernetesJob.from_dict(
+            launched_container_dict, launcher=self
+        )
+        return launched_container.get_refreshed()
+
+    def deserialize_launched_container_from_dict(
+        self, launched_container_dict: dict
+    ) -> "LaunchedKubernetesJob":
+        launched_container = LaunchedKubernetesJob.from_dict(
+            launched_container_dict, launcher=self
+        )
+        return launched_container
+
+
+class LaunchedKubernetesJob(interfaces.LaunchedContainer):
+
+    def __init__(
+        self,
+        job_name: str,
+        namespace: str,
+        output_uris: dict[str, str],
+        log_uri: str,
+        debug_job: k8s_client_lib.V1Job,
+        debug_pods: dict[str, k8s_client_lib.V1Pod] | None = None,
+        cluster_server: str | None = None,
+        launcher: _KubernetesJobLauncher | None = None,
+    ):
+        self._job_name = job_name
+        self._namespace = namespace
+        self._output_uris = output_uris
+        self._log_uri = log_uri
+        self._debug_job = debug_job
+        self._debug_pods: dict[str, k8s_client_lib.V1Pod] = debug_pods or {}
+        self._cluster_server = cluster_server
+        self._launcher = launcher
+
+    def _get_launcher(self):
+        if not self._launcher:
+            raise interfaces.LauncherError(
+                "This action requires a launcher, but LaunchedKubernetesJob was constructed without one."
+            )
+        return self._launcher
+
+    @property
+    def status(self) -> interfaces.ContainerStatus:
+        job = self._debug_job
+        job_status = self._debug_job.status
+        if not job_status:
+            return interfaces.ContainerStatus.PENDING
+        has_succeeded_condition = any(
+            condition.type == "Complete" and condition.status == "True"
+            for condition in job_status.conditions or []
+        )
+        has_failed_condition = any(
+            condition.type == "Failed" and condition.status == "True"
+            for condition in job_status.conditions or []
+        )
+        if has_failed_condition:
+            return interfaces.ContainerStatus.FAILED
+        if has_succeeded_condition:
+            return interfaces.ContainerStatus.SUCCEEDED
+        num_required_completions = job.spec.completions or 1
+        num_ended = (job_status.succeeded or 0) + (job_status.failed or 0)
+        num_active_or_ended = num_ended + (job_status.active or 0)
+        if num_active_or_ended < num_required_completions:
+            return interfaces.ContainerStatus.PENDING
+        # TODO: ! Discern pods in Pending and Running states
+        return interfaces.ContainerStatus.RUNNING
+
+    @property
+    def exit_code(self) -> Optional[int]:
+        if not self.has_ended:
+            return None
+        # Shortcut for succeeded jobs
+        if not self.has_succeeded:
+            return 0
+        main_container_states = [
+            # TODO: Properly select the main container
+            pod.status.container_statuses[0].state
+            for pod in self._debug_pods.values()
+            if pod.status and pod.status.container_statuses
+        ]
+        terminated_container_states = [
+            state.terminated
+            for state in main_container_states
+            if state and state.terminated
+        ]
+        non_zero_exit_codes = [
+            state.exit_code for state in terminated_container_states if state.exit_code
+        ]
+        if len(non_zero_exit_codes) != 1:
+            _logger.warning(
+                f"LaunchedKubernetesJob.exit_code: Expected exactly 1 non-zero exit code for failed job, but got {non_zero_exit_codes}."
+            )
+        if non_zero_exit_codes:
+            # Returning 1st non-zero exit code.
+            # There should only be one.
+            return non_zero_exit_codes[0]
+        # We should not reach here. Failed jobs should have at least one non-zero exit code.
+        # But just in case, we return None instead of 0 to indicate that exit code is unknown.
+        return None
+
+    @property
+    def has_ended(self) -> bool:
+        return self.has_succeeded or self.has_failed
+
+    @property
+    def has_succeeded(self) -> bool:
+        return self.status == interfaces.ContainerStatus.SUCCEEDED
+
+    @property
+    def has_failed(self) -> bool:
+        return self.status == interfaces.ContainerStatus.FAILED
+
+    @property
+    def started_at(self) -> datetime.datetime | None:
+        job_status = self._debug_job.status
+        if not job_status:
+            return None
+        return job_status.start_time
+
+    @property
+    def ended_at(self) -> datetime.datetime | None:
+        job = self._debug_job
+        job_status = self._debug_job.status
+        if not job_status:
+            return None
+        ended_condition_times = [
+            condition.last_transition_time
+            for condition in job_status.conditions or []
+            if condition.type in ("Succeeded", "Failed") and condition.status == "True"
+        ]
+        if not ended_condition_times:
+            return None
+        return ended_condition_times[0]
+
+    @property
+    def launcher_error_message(self) -> str | None:
+        # TODO: Implement: Collect termination messages from pods
+        return None
+
+    SERIALIZATION_ROOT_KEY = "kubernetes_job"
+
+    def to_dict(self) -> dict[str, Any]:
+        job_dict = _serialize_kubernetes_object_to_compact_dict(self._debug_job)
+        pod_dicts = None
+        if self._debug_pods is not None:
+            pod_dicts = [
+                _serialize_kubernetes_object_to_compact_dict(pod) if pod else None
+                for pod in self._debug_pods.values()
+            ]
+        result = {
+            self.SERIALIZATION_ROOT_KEY: dict(
+                launched_container_class_name=self.__class__.__name__,
+                job_name=self._job_name,
+                namespace=self._namespace,
+                cluster_server=self._cluster_server,
+                output_uris=self._output_uris,
+                log_uri=self._log_uri,
+                debug_job=job_dict,
+                debug_pod=pod_dicts,
+            ),
+        }
+        return result
+
+    @classmethod
+    def from_dict(
+        cls, d: dict[str, Any], launcher: _KubernetesJobLauncher | None = None
+    ) -> LaunchedKubernetesJob:
+        d = d[cls.SERIALIZATION_ROOT_KEY]
+        debug_job = _kubernetes_deserialize(d["debug_job"], cls=k8s_client_lib.V1Job)
+        debug_pod_dicts = d.get("debug_pods")
+        debug_pods = None
+        if debug_pod_dicts is not None:
+            debug_pods = {
+                pod_key: _kubernetes_deserialize(pod_dict, cls=k8s_client_lib.V1Pod)
+                for pod_key, pod_dict in debug_pod_dicts.items()
+            }
+        return LaunchedKubernetesJob(
+            job_name=d["job_name"],
+            namespace=d["namespace"],
+            cluster_server=d.get("cluster_server"),
+            output_uris=d["output_uris"],
+            log_uri=d["log_uri"],
+            debug_job=debug_job,
+            debug_pods=debug_pods,
+            launcher=launcher,
+        )
+
+    def get_refreshed(self) -> "LaunchedKubernetesJob":
+        launcher = self._get_launcher()
+        batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
+        job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
+            name=self._job_name,
+            namespace=self._namespace,
+            _request_timeout=launcher._request_timeout,
+        )
+        # Refreshing the job pods. We do not strictly need them.
+        # But this information is useful for debugging and it will also allow slightly better status reporting.
+        core_api_client = k8s_client_lib.CoreV1Api(launcher._api_client)
+        pod_list_response: k8s_client_lib.V1PodList = (
+            core_api_client.list_namespaced_pod(
+                namespace=self._namespace,
+                label_selector=f"job-name={self._job_name}",
+                watch=False,
+                _request_timeout=launcher._request_timeout,
+            )
+        )
+        pod_map: dict[str, k8s_client_lib.V1Pod] = {}
+        if job.spec.completion_mode == "Indexed":
+            for pod in pod_list_response.items:
+                index_str = (
+                    pod.metadata.annotations.get(
+                        "batch.kubernetes.io/job-completion-index"
+                    )
+                    if pod.metadata and pod.metadata.annotations
+                    else None
+                )
+                if index_str is None:
+                    raise ValueError(
+                        f"Pod {pod.metadata.name if pod.metadata else None} of job {self._job_name} does not have completion index annotation."
+                    )
+                pod_map[index_str] = pod
+        else:
+            for pod in pod_list_response.items:
+                index_str: str = pod.metadata.name
+                pod_map[index_str] = pod
+        new_launched_container = copy.copy(self)
+        new_launched_container._debug_job = job
+        new_launched_container._debug_pods = pod_map
+        return new_launched_container
+
+    def _get_log_by_pod_key(self, pod_name: str) -> str:
+        launcher = self._get_launcher()
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
+        log = core_api_client.read_namespaced_pod_log(
+            name=pod_name,
+            namespace=self._namespace,
+            container=_MAIN_CONTAINER_NAME,
+            timestamps=True,
+            _request_timeout=launcher._request_timeout,
+        )
+        return log
+
+    def _get_all_logs(self) -> dict[str, str]:
+        logs = {
+            pod_key: self._get_log_by_pod_key(pod.metadata.name)
+            for pod_key, pod in self._debug_pods.items()
+        }
+        return logs
+
+    def _merge_logs(self, logs: dict[str, str]) -> str:
+        if not logs:
+            return ""
+        # If there is only one log, return it as is.
+        if len(logs) == 1:
+            return list(logs.values())[0]
+        all_log_lines: list[str] = []
+        for pod_key, log in logs.items():
+            for line in log.splitlines():
+                timestamp, _, line = line.partition(" ")
+                all_log_lines.append(f"{timestamp} {pod_key} {line}")
+        all_log_lines.sort(
+            key=lambda line: line.partition(" ")[0]
+        )  # Sorting by timestamp
+        return "\n".join(all_log_lines) + "\n"
+
+    def get_log(self) -> str:
+        all_logs = self._get_all_logs()
+        merged_log = self._merge_logs(all_logs)
+        return merged_log
+
+    def upload_log(self):
+        all_logs = self._get_all_logs()
+        merged_log = self._merge_logs(all_logs)
+
+        # Uploading the merged log
+        launcher = self._get_launcher()
+        uri_writer = launcher._storage_provider.make_uri(self._log_uri).get_writer()
+        uri_writer.upload_from_text(merged_log)
+
+        # Uploading per-pod logs.
+        # It's not ideal to construct new URIs ourselves. But Orchestrator only supports single log per container execution.
+        for pod_key, log in all_logs.items():
+            uri_writer = launcher._storage_provider.make_uri(
+                self._log_uri + f".{pod_key}"
+            ).get_writer()
+            uri_writer.upload_from_text(log)
+
+    def stream_log_lines(self) -> typing.Iterator[str]:
+        # TODO: Implement proper streaming of multiple pods logs with merging lines by timestamp (which might require threading).
+        # For now, we just stream logs of 1st pod.
+
+        if not self._debug_pods:
+            return
+        first_pod = self._debug_pods.get("0") or next(iter(self._debug_pods.values()))
+        chosen_pod_name: str = first_pod.metadata.name
+
+        launcher = self._get_launcher()
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
+        stream = k8s_watch_lib.Watch().stream(
+            core_api_client.read_namespaced_pod_log,
+            name=chosen_pod_name,
+            namespace=self._namespace,
+            container=_MAIN_CONTAINER_NAME,
+            timestamps=True,
+            _request_timeout=launcher._request_timeout,
+        )
+        for line in stream:
+            yield str(line) + "\n"
+
+    def __str__(self) -> str:
+        import pprint
+
+        return pprint.pformat(self.to_dict())
+
+    def terminate(self):
+        launcher = self._get_launcher()
+        batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
+        batch_api_client.delete_namespaced_job(
+            name=self._job_name,
+            namespace=self._namespace,
+            grace_period_seconds=10,
+        )
+        _logger.info(f"Terminated job {self._job_name} in namespace {self._namespace}")
+
+
+class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
+    _KubernetesJobLauncher
+):
+    def __init__(
+        self,
+        *,
+        api_client: k8s_client_lib.ApiClient,
+        namespace: str = "default",
+        service_account_name: str | None = None,
+        request_timeout: int | tuple[int, int] = 10,
+        # job_name_prefix: str = "task-",
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        pod_postprocessor: PodPostProcessor | None = None,
+    ):
+        super().__init__(
+            namespace=namespace,
+            service_account_name=service_account_name,
+            api_client=api_client,
+            request_timeout=request_timeout,
+            pod_labels=pod_labels,
+            pod_annotations=pod_annotations,
+            pod_postprocessor=pod_postprocessor,
+            _storage_provider=local_storage.LocalStorageProvider(),
+            _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
+        )
+
+
 def _serialize_kubernetes_object_to_compact_dict(obj) -> dict[str, Any]:
     obj_dict = _kubernetes_serialize(obj)
     # Removing trash
