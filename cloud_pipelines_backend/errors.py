@@ -8,3 +8,9 @@ class ItemAlreadyExistsError(Exception):
 
 class PermissionError(Exception):
     pass
+
+
+class ApiValidationError(Exception):
+    """Base for all filter/annotation validation errors -> 422."""
+
+    pass

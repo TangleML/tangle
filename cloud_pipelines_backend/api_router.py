@@ -125,6 +125,24 @@ def _setup_routes_internal(
             content={"message": str(exc)},
         )
 
+    @app.exception_handler(errors.ApiValidationError)
+    def handle_api_validation_error(
+        request: fastapi.Request, exc: errors.ApiValidationError
+    ):
+        return fastapi.responses.JSONResponse(
+            status_code=422,
+            content={"detail": str(exc)},
+        )
+
+    @app.exception_handler(NotImplementedError)
+    def handle_not_implemented_error(
+        request: fastapi.Request, exc: NotImplementedError
+    ):
+        return fastapi.responses.JSONResponse(
+            status_code=501,
+            content={"detail": str(exc)},
+        )
+
     get_user_details_dependency = fastapi.Depends(user_details_getter)
 
     def get_user_name(
