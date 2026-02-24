@@ -910,8 +910,20 @@ class _KubernetesJobLauncher(
         # Applying the pod post-processor
         if self._pod_postprocessor:
             pod = self._pod_postprocessor(pod=pod, annotations=annotations)
+        assert pod.spec
+        assert pod.spec.containers
 
-        num_nodes = 1
+        MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
+            "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
+        )
+        num_nodes_annotation_str = (annotations or {}).get(
+            MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, 1
+        )
+        num_nodes = int(num_nodes_annotation_str) if num_nodes_annotation_str else 1
+        if not (0 < num_nodes <= 16):
+            raise interfaces.LauncherError(
+                f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and 16, but got {num_nodes}."
+            )
 
         job_name_prefix = "job-" + pod.metadata.generate_name
 
