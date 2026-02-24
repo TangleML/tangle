@@ -2,13 +2,20 @@ import dataclasses
 import datetime
 import enum
 import typing
-from typing import Any
+from typing import Any, Final
 
 import sqlalchemy as sql
 from sqlalchemy import orm
 from sqlalchemy.ext import mutable
 
 IdType: typing.TypeAlias = str
+
+IX_EXECUTION_NODE_CACHE_KEY: Final[str] = (
+    "ix_execution_node_container_execution_cache_key"
+)
+IX_ANNOTATION_RUN_ID_KEY_VALUE: Final[str] = (
+    "ix_pipeline_run_annotation_run_id_key_value"
+)
 
 
 class ContainerExecutionStatus(str, enum.Enum):
@@ -64,7 +71,7 @@ id_column = orm.mapped_column(
 
 # # Needed to put a union type into DB
 # class SqlIOTypeStruct(_BaseModel):
-#     type: structures.TypeSpecType
+# type: structures.TypeSpecType
 # No. We'll represent TypeSpecType as name:str + properties:dict
 # Supported cases:
 # * type: "name"
@@ -499,6 +506,15 @@ class PipelineRunAnnotation(_TableBase):
     pipeline_run: orm.Mapped[PipelineRun] = orm.relationship(repr=False, init=False)
     key: orm.Mapped[str] = orm.mapped_column(default=None, primary_key=True)
     value: orm.Mapped[str | None] = orm.mapped_column(default=None)
+
+    __table_args__ = (
+        sql.Index(
+            IX_ANNOTATION_RUN_ID_KEY_VALUE,
+            "pipeline_run_id",
+            "key",
+            "value",
+        ),
+    )
 
 
 class Secret(_TableBase):

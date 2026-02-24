@@ -1,7 +1,5 @@
-import base64
 import dataclasses
 import datetime
-import json
 import logging
 import typing
 from typing import Any, Final, Optional
@@ -12,7 +10,7 @@ from sqlalchemy import orm
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import errors
-from . import filter_query_models
+from . import filter_query_sql
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -34,8 +32,6 @@ def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
 
 
-_PAGE_TOKEN_OFFSET_KEY: Final[str] = "offset"
-_PAGE_TOKEN_FILTER_KEY: Final[str] = "filter"
 _DEFAULT_PAGE_SIZE: Final[int] = 10
 
 
@@ -175,22 +171,12 @@ class PipelineRunsApiService_Sql:
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
     ) -> ListPipelineJobsResponse:
-        if filter and filter_query:
-            raise errors.MutuallyExclusiveFilterError(
-                "Cannot use both 'filter' and 'filter_query'. Use one or the other."
-            )
-
-        if filter_query:
-            filter_query_models.FilterQuery.model_validate_json(filter_query)
-            raise NotImplementedError("filter_query is not yet implemented.")
-
-        filter_value, offset = _resolve_filter_value(
-            filter=filter,
-            page_token=page_token,
-        )
-        where_clauses, next_page_filter_value = _build_filter_where_clauses(
-            filter_value=filter_value,
+        where_clauses, offset, next_token = filter_query_sql.build_list_filters(
+            filter_value=filter,
+            filter_query_value=filter_query,
+            page_token_value=page_token,
             current_user=current_user,
+            page_size=_DEFAULT_PAGE_SIZE,
         )
 
         pipeline_runs = list(
@@ -202,14 +188,10 @@ class PipelineRunsApiService_Sql:
                 .limit(_DEFAULT_PAGE_SIZE)
             ).all()
         )
-        next_page_offset = offset + _DEFAULT_PAGE_SIZE
-        next_page_token_dict = {
-            _PAGE_TOKEN_OFFSET_KEY: next_page_offset,
-            _PAGE_TOKEN_FILTER_KEY: next_page_filter_value,
-        }
-        next_page_token = _encode_page_token(next_page_token_dict)
-        if len(pipeline_runs) < _DEFAULT_PAGE_SIZE:
-            next_page_token = None
+
+        next_page_token = (
+            next_token.encode() if len(pipeline_runs) >= _DEFAULT_PAGE_SIZE else None
+        )
 
         return ListPipelineJobsResponse(
             pipeline_runs=[
@@ -348,82 +330,6 @@ class PipelineRunsApiService_Sql:
         existing_annotation = session.get(bts.PipelineRunAnnotation, (id, key))
         session.delete(existing_annotation)
         session.commit()
-
-
-def _resolve_filter_value(
-    *,
-    filter: str | None,
-    page_token: str | None,
-) -> tuple[str | None, int]:
-    """Decode page_token and return the effective (filter_value, offset).
-
-    If a page_token is present, its stored filter takes precedence over the
-    raw filter parameter (the token carries the resolved filter forward across pages).
-    """
-    page_token_dict = _decode_page_token(page_token)
-    offset = page_token_dict.get(_PAGE_TOKEN_OFFSET_KEY, 0)
-    if page_token:
-        filter = page_token_dict.get(_PAGE_TOKEN_FILTER_KEY, None)
-    return filter, offset
-
-
-def _build_filter_where_clauses(
-    *,
-    filter_value: str | None,
-    current_user: str | None,
-) -> tuple[list[sql.ColumnElement], str | None]:
-    """Parse a filter string into SQLAlchemy WHERE clauses.
-
-    Returns (where_clauses, next_page_filter_value). The second value is the
-    filter string with shorthand values resolved (e.g. "created_by:me" becomes
-    "created_by:alice@example.com") so it can be embedded in the next page token.
-    """
-    where_clauses: list[sql.ColumnElement] = []
-    parsed_filter = _parse_filter(filter_value) if filter_value else {}
-    for key, value in parsed_filter.items():
-        if key == "_text":
-            raise NotImplementedError("Text search is not implemented yet.")
-        elif key == "created_by":
-            if value == "me":
-                if current_user is None:
-                    current_user = ""
-                value = current_user
-                # TODO: Maybe make this a bit more robust.
-                # We need to change the filter since it goes into the next_page_token.
-                filter_value = filter_value.replace(
-                    "created_by:me", f"created_by:{current_user}"
-                )
-            if value:
-                where_clauses.append(bts.PipelineRun.created_by == value)
-            else:
-                where_clauses.append(bts.PipelineRun.created_by == None)
-        else:
-            raise NotImplementedError(f"Unsupported filter {filter_value}.")
-    return where_clauses, filter_value
-
-
-def _decode_page_token(page_token: str) -> dict[str, Any]:
-    return json.loads(base64.b64decode(page_token)) if page_token else {}
-
-
-def _encode_page_token(page_token_dict: dict[str, Any]) -> str:
-    return (base64.b64encode(json.dumps(page_token_dict).encode("utf8"))).decode(
-        "utf-8"
-    )
-
-
-def _parse_filter(filter: str) -> dict[str, str]:
-    # TODO: Improve
-    parts = filter.strip().split()
-    parsed_filter = {}
-    for part in parts:
-        key, sep, value = part.partition(":")
-        if sep:
-            parsed_filter[key] = value
-        else:
-            parsed_filter.setdefault("_text", "")
-            parsed_filter["_text"] += part
-    return parsed_filter
 
 
 # ========== ExecutionNodeApiService_Sql
