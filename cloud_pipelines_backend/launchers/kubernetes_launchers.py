@@ -766,12 +766,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         return launcher_error_message
 
     def to_dict(self) -> dict[str, Any]:
-        pod_dict = _kubernetes_serialize(self._debug_pod)
-        # Removing trash
-        _remove_keys_with_none_values(pod_dict)
-        pod_metadata = pod_dict.get("metadata")
-        if pod_metadata:
-            pod_metadata.pop("managedFields", None)
+        pod_dict = _serialize_kubernetes_object_to_compact_dict(self._debug_pod)
         result = dict(
             kubernetes=dict(
                 # launched_container_class_name=self.__class__.__name__,
@@ -865,6 +860,16 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             grace_period_seconds=10,
         )
         _logger.info(f"Terminated pod {self._pod_name} in namespace {self._namespace}")
+
+
+def _serialize_kubernetes_object_to_compact_dict(obj) -> dict[str, Any]:
+    obj_dict = _kubernetes_serialize(obj)
+    # Removing trash
+    _remove_keys_with_none_values(obj_dict)
+    obj_metadata: dict | None = obj_dict.get("metadata")
+    if obj_metadata:
+        obj_metadata.pop("managedFields", None)
+    return obj_dict
 
 
 def windows_path_to_docker_path(path: str) -> str:
