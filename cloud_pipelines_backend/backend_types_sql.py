@@ -58,9 +58,8 @@ def generate_unique_id() -> str:
     return ("%012x" % milliseconds) + random_bytes.hex()
 
 
-id_column = orm.mapped_column(
-    sql.String(20), primary_key=True, init=False, insert_default=generate_unique_id
-)
+id_column = orm.mapped_column(sql.String(20), primary_key=True, init=False, insert_default=generate_unique_id)
+
 
 # # Needed to put a union type into DB
 # class SqlIOTypeStruct(_BaseModel):
@@ -84,9 +83,7 @@ class UtcDateTime(sql.TypeDecorator):
     impl = sql.DateTime(timezone=True)
     cache_ok = True
 
-    def process_result_value(
-        self, value: datetime.datetime | None, dialect: sql.Dialect
-    ) -> datetime.datetime | None:
+    def process_result_value(self, value: datetime.datetime | None, dialect: sql.Dialect) -> datetime.datetime | None:
         if value is not None:
             if value.tzinfo is None:
                 # Interpreting naive timestamp as UTC
@@ -128,13 +125,8 @@ class _TableBase(orm.MappedAsDataclass, orm.DeclarativeBase, kw_only=True):
 
 class PipelineRun(_TableBase):
     __tablename__ = "pipeline_run"
-    id: orm.Mapped[IdType] = orm.mapped_column(
-        primary_key=True, init=False, insert_default=generate_unique_id
-    )
-    # pipeline_spec: orm.Mapped[dict[str, Any]]
-    root_execution_id: orm.Mapped[IdType] = orm.mapped_column(
-        sql.ForeignKey("execution_node.id"), init=False
-    )
+    id: orm.Mapped[IdType] = orm.mapped_column(primary_key=True, init=False, insert_default=generate_unique_id)
+    root_execution_id: orm.Mapped[IdType] = orm.mapped_column(sql.ForeignKey("execution_node.id"), init=False)
     root_execution: orm.Mapped["ExecutionNode"] = orm.relationship(repr=False)
     annotations: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
     # status: "PipelineJobStatus"
@@ -165,9 +157,7 @@ class PipelineRun(_TableBase):
 
 class ArtifactData(_TableBase):
     __tablename__ = "artifact_data"
-    id: orm.Mapped[IdType] = orm.mapped_column(
-        primary_key=True, init=False, insert_default=generate_unique_id
-    )
+    id: orm.Mapped[IdType] = orm.mapped_column(primary_key=True, init=False, insert_default=generate_unique_id)
     # Default SQL integer type is only 32 bit. So it cannot record size of more than 2GB.
     total_size: orm.Mapped[int] = orm.mapped_column(sql.BigInteger())
     is_dir: orm.Mapped[bool]
@@ -191,9 +181,7 @@ class ArtifactData(_TableBase):
 
 class ArtifactNode(_TableBase):
     __tablename__ = "artifact_node"
-    id: orm.Mapped[IdType] = orm.mapped_column(
-        primary_key=True, init=False, insert_default=generate_unique_id
-    )
+    id: orm.Mapped[IdType] = orm.mapped_column(primary_key=True, init=False, insert_default=generate_unique_id)
     had_data_in_past: orm.Mapped[bool] = orm.mapped_column(default=False)
     may_have_data_in_future: orm.Mapped[bool] = orm.mapped_column(default=True)
     # artifact_type: orm.Mapped[structures.TypeSpecType | None]
@@ -209,19 +197,14 @@ class ArtifactNode(_TableBase):
         repr=False,
     )
     producer_output_name: orm.Mapped[str | None] = orm.mapped_column(default=None)
-    # artifact_data: ArtifactData | None = None
-    artifact_data_id: orm.Mapped[IdType | None] = orm.mapped_column(
-        sql.ForeignKey("artifact_data.id"), init=False
-    )
-    artifact_data: orm.Mapped[ArtifactData | None] = orm.relationship(
-        default=None, repr=False
-    )
+    artifact_data_id: orm.Mapped[IdType | None] = orm.mapped_column(sql.ForeignKey("artifact_data.id"), init=False)
+    artifact_data: orm.Mapped[ArtifactData | None] = orm.relationship(default=None, repr=False)
 
     upstream_execution_links: orm.Mapped[list["OutputArtifactLink"]] = orm.relationship(
         back_populates="artifact", default_factory=list, repr=False
     )
-    downstream_execution_links: orm.Mapped[list["InputArtifactLink"]] = (
-        orm.relationship(back_populates="artifact", default_factory=list, repr=False)
+    downstream_execution_links: orm.Mapped[list["InputArtifactLink"]] = orm.relationship(
+        back_populates="artifact", default_factory=list, repr=False
     )
     downstream_executions: orm.Mapped[list["ExecutionNode"]] = orm.relationship(
         secondary="input_artifact_link", viewonly=True, default_factory=list, repr=False
@@ -240,17 +223,10 @@ class InputArtifactLink(_TableBase):
         sql.ForeignKey("execution_node.id"), primary_key=True, init=False
     )
     input_name: orm.Mapped[str] = orm.mapped_column(primary_key=True)
-    artifact_id: orm.Mapped[IdType] = orm.mapped_column(
-        sql.ForeignKey("artifact_node.id"), init=False
-    )
+    artifact_id: orm.Mapped[IdType] = orm.mapped_column(sql.ForeignKey("artifact_node.id"), init=False)
 
-    execution: orm.Mapped["ExecutionNode"] = orm.relationship(
-        back_populates="input_artifact_links"
-    )
-    artifact: orm.Mapped[ArtifactNode] = orm.relationship(
-        back_populates="downstream_execution_links"
-    )
-    # Should we include artifact node status here?
+    execution: orm.Mapped["ExecutionNode"] = orm.relationship(back_populates="input_artifact_links")
+    artifact: orm.Mapped[ArtifactNode] = orm.relationship(back_populates="downstream_execution_links")
 
 
 class OutputArtifactLink(_TableBase):
@@ -259,17 +235,10 @@ class OutputArtifactLink(_TableBase):
         sql.ForeignKey("execution_node.id"), primary_key=True, init=False
     )
     output_name: orm.Mapped[str] = orm.mapped_column(primary_key=True)
-    artifact_id: orm.Mapped[IdType] = orm.mapped_column(
-        sql.ForeignKey("artifact_node.id"), init=False
-    )
+    artifact_id: orm.Mapped[IdType] = orm.mapped_column(sql.ForeignKey("artifact_node.id"), init=False)
 
-    execution: orm.Mapped["ExecutionNode"] = orm.relationship(
-        back_populates="output_artifact_links"
-    )
-    artifact: orm.Mapped[ArtifactNode] = orm.relationship(
-        back_populates="upstream_execution_links"
-    )
-    # Should we include artifact node status here?
+    execution: orm.Mapped["ExecutionNode"] = orm.relationship(back_populates="output_artifact_links")
+    artifact: orm.Mapped[ArtifactNode] = orm.relationship(back_populates="upstream_execution_links")
 
 
 class ExecutionToAncestorExecutionLink(_TableBase):
@@ -280,12 +249,8 @@ class ExecutionToAncestorExecutionLink(_TableBase):
     execution_id: orm.Mapped[IdType] = orm.mapped_column(
         sql.ForeignKey("execution_node.id"), primary_key=True, init=False
     )
-    ancestor_execution: orm.Mapped["ExecutionNode"] = orm.relationship(
-        foreign_keys=[ancestor_execution_id]
-    )
-    execution: orm.Mapped["ExecutionNode"] = orm.relationship(
-        foreign_keys=[execution_id]
-    )
+    ancestor_execution: orm.Mapped["ExecutionNode"] = orm.relationship(foreign_keys=[ancestor_execution_id])
+    execution: orm.Mapped["ExecutionNode"] = orm.relationship(foreign_keys=[execution_id])
 
 
 # ! Problem: With MongoDB, multiple executions can have same output artifact
@@ -294,13 +259,7 @@ class ExecutionToAncestorExecutionLink(_TableBase):
 # So we need to jump through extra hoops to make the relationship many-to-many again.
 class ExecutionNode(_TableBase):
     __tablename__ = "execution_node"
-    id: orm.Mapped[IdType] = orm.mapped_column(
-        primary_key=True, init=False, insert_default=generate_unique_id
-    )
-    # input_artifacts
-    # task_id: str | None = None
-    # task_spec: structures.TaskSpec
-    # task_spec: orm.Mapped[structures.TaskSpec]
+    id: orm.Mapped[IdType] = orm.mapped_column(primary_key=True, init=False, insert_default=generate_unique_id)
     task_spec: orm.Mapped[dict[str, Any]]
     # input_arguments: dict[str, ArtifactNode]
 
@@ -333,9 +292,7 @@ class ExecutionNode(_TableBase):
     parent_execution_id: orm.Mapped[IdType | None] = orm.mapped_column(
         sql.ForeignKey("execution_node.id"), default=None, init=False
     )
-    task_id_in_parent_execution: orm.Mapped[str | None] = orm.mapped_column(
-        default=None
-    )
+    task_id_in_parent_execution: orm.Mapped[str | None] = orm.mapped_column(default=None)
     # !!! remote_side=[id] is important. Without it, the relationship somehow works the opposite way.
     parent_execution: orm.Mapped["ExecutionNode"] = orm.relationship(
         remote_side=[id],
@@ -379,12 +336,10 @@ class ExecutionNode(_TableBase):
         default=None, repr=False, back_populates="execution_nodes"
     )
     # TODO: Do we need this? It's denormalized.
-    container_execution_status: orm.Mapped[ContainerExecutionStatus | None] = (
-        orm.mapped_column(default=None, index=True)
+    container_execution_status: orm.Mapped[ContainerExecutionStatus | None] = orm.mapped_column(
+        default=None, index=True
     )
-    container_execution_cache_key: orm.Mapped[str | None] = orm.mapped_column(
-        index=True, default=None
-    )
+    container_execution_cache_key: orm.Mapped[str | None] = orm.mapped_column(index=True, default=None)
 
     # ? UX-only de-normalized
     # For breadcrumbs navigation
@@ -419,19 +374,11 @@ class ExecutionNode(_TableBase):
     )
 
 
-EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY = (
-    "system_error_exception_message"
-)
-EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY = (
-    "system_error_exception_full"
-)
-EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = (
-    "orchestration_error_message"
-)
+EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY = "system_error_exception_message"
+EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY = "system_error_exception_full"
+EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = "orchestration_error_message"
 EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY = "dynamic_data_arguments"
-CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = (
-    "orchestration_error_message"
-)
+CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = "orchestration_error_message"
 
 
 # Not needed. We can use the ExecutionToAncestorExecutionLink.ancestor_execution_id == PipelineRun.root_execution_id
@@ -449,14 +396,9 @@ CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = (
 
 class ContainerExecution(_TableBase):
     __tablename__ = "container_execution"
-    id: orm.Mapped[IdType] = orm.mapped_column(
-        primary_key=True, init=False, insert_default=generate_unique_id
-    )
-    # task_spec: orm.Mapped[dict[str, Any]]
+    id: orm.Mapped[IdType] = orm.mapped_column(primary_key=True, init=False, insert_default=generate_unique_id)
     status: orm.Mapped[ContainerExecutionStatus] = orm.mapped_column(index=True)
-    last_processed_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
-        default=None
-    )
+    last_processed_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
     created_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
     updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
     started_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
@@ -466,12 +408,8 @@ class ContainerExecution(_TableBase):
     launcher_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
 
     # Do we need these?
-    input_artifact_data_map: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
-        default=None
-    )
-    output_artifact_data_map: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
-        default=None
-    )
+    input_artifact_data_map: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
+    output_artifact_data_map: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
     log_uri: orm.Mapped[str | None] = orm.mapped_column(default=None)
 
     extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)

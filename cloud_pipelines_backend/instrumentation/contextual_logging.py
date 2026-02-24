@@ -23,12 +23,21 @@ Usage:
 
 import contextvars
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 
 # Single context variable to store all metadata as a dictionary
 _context_metadata: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
-    "context_metadata", default={}
+    "context_metadata",
 )
+
+
+def _get_metadata() -> dict[str, Any]:
+    try:
+        return _context_metadata.get()
+    except LookupError:
+        metadata: dict[str, Any] = {}
+        _context_metadata.set(metadata)
+        return metadata
 
 
 def set_context_metadata(key: str, value: Any) -> None:
@@ -38,7 +47,7 @@ def set_context_metadata(key: str, value: Any) -> None:
         key: The metadata key (e.g., 'execution_id', 'request_id', 'user_id')
         value: The value to set
     """
-    metadata = _context_metadata.get().copy()
+    metadata = _get_metadata().copy()
     metadata[key] = value
     _context_metadata.set(metadata)
 
@@ -52,12 +61,12 @@ def delete_context_metadata(key: str) -> None:
     Args:
         key: The metadata key to delete (e.g., 'execution_id', 'request_id')
     """
-    metadata = _context_metadata.get().copy()
-    metadata.pop(key, None)  # Use None as default to avoid KeyError
+    metadata = _get_metadata().copy()
+    metadata.pop(key, None)
     _context_metadata.set(metadata)
 
 
-def get_context_metadata(key: str) -> Optional[Any]:
+def get_context_metadata(key: str) -> Any | None:
     """Get a metadata value from the current context.
 
     Args:
@@ -66,7 +75,7 @@ def get_context_metadata(key: str) -> Optional[Any]:
     Returns:
         The metadata value or None if not set
     """
-    return _context_metadata.get().get(key)
+    return _get_metadata().get(key)
 
 
 def get_all_context_metadata() -> dict[str, Any]:
@@ -75,7 +84,7 @@ def get_all_context_metadata() -> dict[str, Any]:
     Returns:
         Dictionary of all context metadata
     """
-    return _context_metadata.get().copy()
+    return _get_metadata().copy()
 
 
 def clear_context_metadata() -> None:
@@ -101,11 +110,7 @@ def logging_context(**metadata: Any):
         ...     logger.info("Processing execution")  # Will include both IDs
 
     Example with custom metadata:
-        >>> with logging_context(
-        ...     execution_id="exec456",
-        ...     user_id="user@example.com",
-        ...     operation="reprocessing"
-        ... ):
+        >>> with logging_context(execution_id="exec456", user_id="user@example.com", operation="reprocessing"):
         ...     logger.info("Custom operation")  # All metadata in logs
 
     Example for API requests:

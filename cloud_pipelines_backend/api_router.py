@@ -1,20 +1,16 @@
-from collections import abc
 import contextlib
 import dataclasses
 import typing
-import typing_extensions
+from collections import abc
 
 import fastapi
 import sqlalchemy
-from sqlalchemy import orm
 import starlette.types
+import typing_extensions
+from sqlalchemy import orm
 
-
-from . import api_server_sql
-from . import backend_types_sql
+from . import api_server_sql, backend_types_sql, database_ops, errors
 from . import component_library_api_server as components_api
-from . import database_ops
-from . import errors
 from .instrumentation import contextual_logging
 
 if typing.TYPE_CHECKING:
@@ -61,11 +57,7 @@ def setup_routes(
         create_db_and_tables()
         yield
 
-    get_launcher = (
-        (lambda: container_launcher_for_log_streaming)
-        if container_launcher_for_log_streaming
-        else None
-    )
+    get_launcher = (lambda: container_launcher_for_log_streaming) if container_launcher_for_log_streaming else None
 
     _setup_routes_internal(
         app=app,
@@ -78,17 +70,12 @@ def setup_routes(
 
 def _setup_routes_internal(
     app: fastapi.FastAPI,
-    get_session: (
-        typing.Callable[..., orm.Session]
-        | typing.Callable[..., abc.Iterator[orm.Session]]
-    ),
+    get_session: (typing.Callable[..., orm.Session] | typing.Callable[..., abc.Iterator[orm.Session]]),
     user_details_getter: typing.Callable[..., UserDetails],
     get_launcher: "typing.Callable[..., launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer]] | None" = None,
     lifespan: starlette.types.Lifespan[typing.Any] | None = None,
     pipeline_run_creation_hook: (
-        typing.Callable[..., typing.Any]
-        | typing.Callable[..., abc.Iterator[typing.Any]]
-        | None
+        typing.Callable[..., typing.Any] | typing.Callable[..., abc.Iterator[typing.Any]] | None
     ) = None,
 ):
     # We request `app: fastapi.FastAPI` instead of just returning the router
@@ -117,9 +104,7 @@ def _setup_routes_internal(
         return response
 
     @app.exception_handler(errors.ItemAlreadyExistsError)
-    def handle_item_already_exists_error(
-        request: fastapi.Request, exc: errors.ItemAlreadyExistsError
-    ):
+    def handle_item_already_exists_error(request: fastapi.Request, exc: errors.ItemAlreadyExistsError):
         return fastapi.responses.JSONResponse(
             status_code=409,
             content={"message": str(exc)},
@@ -174,9 +159,7 @@ def _setup_routes_internal(
     SessionDep = typing.Annotated[orm.Session, fastapi.Depends(get_session)]
 
     def inject_session_dependency(func: typing.Callable) -> typing.Callable:
-        return replace_annotations(
-            func, original_annotation=orm.Session, new_annotation=SessionDep
-        )
+        return replace_annotations(func, original_annotation=orm.Session, new_annotation=SessionDep)
 
     artifact_service = api_server_sql.ArtifactNodesApiService_Sql()
     execution_service = api_server_sql.ExecutionNodesApiService_Sql()
@@ -187,9 +170,7 @@ def _setup_routes_internal(
 
     def check_not_readonly():
         if is_read_only:
-            raise fastapi.HTTPException(
-                status_code=503, detail="The server is in read-only mode."
-            )
+            raise fastapi.HTTPException(status_code=503, detail="The server is in read-only mode.")
 
     ensure_user_can_write_dependencies = [
         fastapi.Depends(check_not_readonly),
@@ -214,21 +195,17 @@ def _setup_routes_internal(
     router.get("/api/executions/{id}/details", tags=["executions"], **default_config)(
         inject_session_dependency(execution_service.get)
     )
-    get_graph_execution_state = inject_session_dependency(
-        execution_service.get_graph_execution_state
-    )
+    get_graph_execution_state = inject_session_dependency(execution_service.get_graph_execution_state)
     # Deprecated
-    router.get("/api/executions/{id}/state", tags=["executions"], **default_config)(
-        get_graph_execution_state
-    )
+    router.get("/api/executions/{id}/state", tags=["executions"], **default_config)(get_graph_execution_state)
     router.get(
         "/api/executions/{id}/graph_execution_state",
         tags=["executions"],
         **default_config,
     )(get_graph_execution_state)
-    router.get(
-        "/api/executions/{id}/container_state", tags=["executions"], **default_config
-    )(inject_session_dependency(execution_service.get_container_execution_state))
+    router.get("/api/executions/{id}/container_state", tags=["executions"], **default_config)(
+        inject_session_dependency(execution_service.get_container_execution_state)
+    )
     router.get("/api/executions/{id}/artifacts", tags=["executions"], **default_config)(
         inject_session_dependency(execution_service.get_artifacts)
     )
@@ -238,9 +215,7 @@ def _setup_routes_internal(
         fastapi.Depends(get_launcher),
     ]
 
-    @router.get(
-        "/api/executions/{id}/container_log", tags=["executions"], **default_config
-    )
+    @router.get("/api/executions/{id}/container_log", tags=["executions"], **default_config)
     def get_container_log(
         id: backend_types_sql.IdType,
         session: SessionDep,
@@ -303,9 +278,7 @@ def _setup_routes_internal(
 
     pipeline_run_creation_dependencies = ensure_user_can_write_dependencies
     if pipeline_run_creation_hook:
-        pipeline_run_creation_dependencies += [
-            fastapi.Depends(pipeline_run_creation_hook)
-        ]
+        pipeline_run_creation_dependencies += [fastapi.Depends(pipeline_run_creation_hook)]
     router.post(
         "/api/pipeline_runs/",
         tags=["pipelineRuns"],
@@ -313,9 +286,9 @@ def _setup_routes_internal(
         **default_config,
     )(create_run_func)
 
-    router.get(
-        "/api/artifacts/{id}/signed_artifact_url", tags=["artifacts"], **default_config
-    )(inject_session_dependency(artifact_service.get_signed_artifact_url))
+    router.get("/api/artifacts/{id}/signed_artifact_url", tags=["artifacts"], **default_config)(
+        inject_session_dependency(artifact_service.get_signed_artifact_url)
+    )
 
     # The `terminated_by` parameter value now comes from a Dependency (instead of request)
     # We also allow admin users to cancel any run
@@ -345,16 +318,12 @@ def _setup_routes_internal(
 
     ### Pipeline run annotations routes
 
-    router.get(
-        "/api/pipeline_runs/{id}/annotations/", tags=["pipelineRuns"], **default_config
-    )(inject_session_dependency(pipeline_run_service.list_annotations))
+    router.get("/api/pipeline_runs/{id}/annotations/", tags=["pipelineRuns"], **default_config)(
+        inject_session_dependency(pipeline_run_service.list_annotations)
+    )
 
-    pipeline_run_set_annotation_func = inject_session_dependency(
-        pipeline_run_service.set_annotation
-    )
-    pipeline_run_set_annotation_func = inject_user_name(
-        func=pipeline_run_set_annotation_func
-    )
+    pipeline_run_set_annotation_func = inject_session_dependency(pipeline_run_service.set_annotation)
+    pipeline_run_set_annotation_func = inject_user_name(func=pipeline_run_set_annotation_func)
     pipeline_run_set_annotation_func = add_parameter_annotation_metadata(
         pipeline_run_set_annotation_func,
         parameter_name="skip_user_check",
@@ -367,12 +336,8 @@ def _setup_routes_internal(
         **default_config,
     )(pipeline_run_set_annotation_func)
 
-    pipeline_run_delete_annotation_func = inject_session_dependency(
-        pipeline_run_service.delete_annotation
-    )
-    pipeline_run_delete_annotation_func = inject_user_name(
-        func=pipeline_run_delete_annotation_func
-    )
+    pipeline_run_delete_annotation_func = inject_session_dependency(pipeline_run_service.delete_annotation)
+    pipeline_run_delete_annotation_func = inject_user_name(func=pipeline_run_delete_annotation_func)
     pipeline_run_delete_annotation_func = add_parameter_annotation_metadata(
         pipeline_run_delete_annotation_func,
         parameter_name="skip_user_check",
@@ -399,9 +364,7 @@ def _setup_routes_internal(
         if not user_details:
             return None
         permissions = list(
-            permission
-            for permission, is_granted in (user_details.permissions or {}).items()
-            if is_granted == True
+            permission for permission, is_granted in (user_details.permissions or {}).items() if is_granted == True
         )
         return GetUserResponse(
             id=user_details.name,
@@ -412,36 +375,24 @@ def _setup_routes_internal(
     secrets_service = api_server_sql.SecretsApiService()
 
     router.get("/api/secrets/", tags=["secrets"], **default_config)(
-        inject_session_dependency(
-            inject_user_name(secrets_service.list_secrets, parameter_name="user_id")
-        )
+        inject_session_dependency(inject_user_name(secrets_service.list_secrets, parameter_name="user_id"))
     )
     router.post("/api/secrets/", tags=["secrets"], **default_config)(
         add_parameter_annotation_metadata(
-            inject_session_dependency(
-                inject_user_name(
-                    secrets_service.create_secret, parameter_name="user_id"
-                )
-            ),
+            inject_session_dependency(inject_user_name(secrets_service.create_secret, parameter_name="user_id")),
             parameter_name="secret_value",
             annotation_metadata=fastapi.Body(embed=True),
         )
     )
     router.put("/api/secrets/{secret_name}", tags=["secrets"], **default_config)(
         add_parameter_annotation_metadata(
-            inject_session_dependency(
-                inject_user_name(
-                    secrets_service.update_secret, parameter_name="user_id"
-                )
-            ),
+            inject_session_dependency(inject_user_name(secrets_service.update_secret, parameter_name="user_id")),
             parameter_name="secret_value",
             annotation_metadata=fastapi.Body(embed=True),
         )
     )
     router.delete("/api/secrets/{secret_name}", tags=["secrets"], **default_config)(
-        inject_session_dependency(
-            inject_user_name(secrets_service.delete_secret, parameter_name="user_id")
-        )
+        inject_session_dependency(inject_user_name(secrets_service.delete_secret, parameter_name="user_id"))
     )
 
     ### Component library routes
@@ -464,9 +415,9 @@ def _setup_routes_internal(
     router.post("/api/published_components/", tags=["components"], **default_config)(
         inject_user_name(inject_session_dependency(published_component_service.publish))
     )
-    router.put(
-        "/api/published_components/{digest}", tags=["components"], **default_config
-    )(inject_user_name(inject_session_dependency(published_component_service.update)))
+    router.put("/api/published_components/{digest}", tags=["components"], **default_config)(
+        inject_user_name(inject_session_dependency(published_component_service.update))
+    )
 
     router.get("/api/component_libraries/", tags=["components"], **default_config)(
         inject_session_dependency(component_library_service.list)
@@ -481,19 +432,11 @@ def _setup_routes_internal(
         inject_user_name(inject_session_dependency(component_library_service.replace))
     )
 
-    router.get(
-        "/api/component_library_pins/me/", tags=["components"], **default_config
-    )(
-        inject_user_name(
-            inject_session_dependency(user_service.get_component_library_pins)
-        )
+    router.get("/api/component_library_pins/me/", tags=["components"], **default_config)(
+        inject_user_name(inject_session_dependency(user_service.get_component_library_pins))
     )
-    router.put(
-        "/api/component_library_pins/me/", tags=["components"], **default_config
-    )(
-        inject_user_name(
-            inject_session_dependency(user_service.set_component_library_pins)
-        )
+    router.put("/api/component_library_pins/me/", tags=["components"], **default_config)(
+        inject_user_name(inject_session_dependency(user_service.set_component_library_pins))
     )
 
     ### Admin routes
@@ -525,13 +468,13 @@ def _setup_routes_internal(
     ):
         with session.begin():
             execution_node = session.get(backend_types_sql.ExecutionNode, id)
-            execution_node.container_execution_status = status
+            execution_node.container_execution_status = status  # type: ignore[union-attr]
 
     @router.get("/api/admin/sql_engine_connection_pool_status")
     async def get_sql_engine_connection_pool_status(
         session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
     ) -> str:
-        return session.get_bind().pool.status()
+        return session.get_bind().pool.status()  # type: ignore[union-attr]
 
     # # Needs to be called after all routes have been added to the router
     # app.include_router(router)
@@ -576,7 +519,5 @@ def replace_annotations(func, original_annotation, new_annotation):
 
 
 def add_parameter_annotation_metadata(func, parameter_name: str, annotation_metadata):
-    func.__annotations__[parameter_name] = typing.Annotated[
-        func.__annotations__[parameter_name], annotation_metadata
-    ]
+    func.__annotations__[parameter_name] = typing.Annotated[func.__annotations__[parameter_name], annotation_metadata]
     return func

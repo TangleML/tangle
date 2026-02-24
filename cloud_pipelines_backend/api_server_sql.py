@@ -4,18 +4,24 @@ import datetime
 import json
 import logging
 import typing
-from typing import Any, Optional
+from typing import Any
+
+import sqlalchemy as sql
+from sqlalchemy import orm
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
         interfaces as storage_provider_interfaces,
     )
+
     from .launchers import interfaces as launcher_interfaces
 
+from . import backend_types_sql as bts
+from . import component_structures as structures
+from . import errors
+from .errors import ItemNotFoundError
 
 _logger = logging.getLogger(__name__)
-
-T = typing.TypeVar("T")
 
 
 class ApiServiceError(RuntimeError):
@@ -26,13 +32,6 @@ def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
 
 
-from . import component_structures as structures
-from . import backend_types_sql as bts
-from . import errors
-from .errors import ItemNotFoundError
-
-
-# ==== PipelineJobService
 @dataclasses.dataclass(kw_only=True)
 class PipelineRunResponse:
     id: bts.IdType
@@ -65,10 +64,6 @@ class ListPipelineJobsResponse:
     next_page_token: str | None = None
 
 
-import sqlalchemy as sql
-from sqlalchemy import orm
-
-
 class PipelineRunsApiService_Sql:
     PIPELINE_NAME_EXTRA_DATA_KEY = "pipeline_name"
 
@@ -77,19 +72,18 @@ class PipelineRunsApiService_Sql:
         session: orm.Session,
         root_task: structures.TaskSpec,
         # Component library to avoid repeating component specs inside task specs
-        components: Optional[list[structures.ComponentReference]] = None,
+        components: list[structures.ComponentReference] | None = None,
         # Arbitrary metadata. Can be used to specify user.
-        annotations: Optional[dict[str, Any]] = None,
+        annotations: dict[str, Any] | None = None,
         created_by: str | None = None,
     ) -> PipelineRunResponse:
         # TODO: Validate the pipeline spec
         # TODO: Load and validate all components
         # TODO: Fetch missing components and populate component specs
 
-        pipeline_name = root_task.component_ref.spec.name
+        pipeline_name = root_task.component_ref.spec.name  # type: ignore[union-attr]
 
         with session.begin():
-
             root_execution_node = _recursively_create_all_executions_and_artifacts_root(
                 session=session,
                 root_task_spec=root_task,
@@ -133,9 +127,7 @@ class PipelineRunsApiService_Sql:
             raise errors.PermissionError(
                 f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be terminated by {terminated_by}"
             )
-        _logger.info(
-            f"{pipeline_run.id=} The pipeline run is being cancelled by {terminated_by}."
-        )
+        _logger.info(f"{pipeline_run.id=} The pipeline run is being cancelled by {terminated_by}.")
         # Marking the pipeline run for termination
         if pipeline_run.extra_data is None:
             pipeline_run.extra_data = {}
@@ -172,7 +164,7 @@ class PipelineRunsApiService_Sql:
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
     ) -> ListPipelineJobsResponse:
-        page_token_dict = _decode_page_token(page_token)
+        page_token_dict = _decode_page_token(page_token)  # type: ignore[arg-type]
         OFFSET_KEY = "offset"
         offset = page_token_dict.get(OFFSET_KEY, 0)
         page_size = 10
@@ -195,9 +187,7 @@ class PipelineRunsApiService_Sql:
                     value = current_user
                     # TODO: Maybe make this a bit more robust.
                     # We need to change the filter since it goes into the next_page_token.
-                    filter = filter.replace(
-                        "created_by:me", f"created_by:{current_user}"
-                    )
+                    filter = filter.replace("created_by:me", f"created_by:{current_user}")  # type: ignore[union-attr]
                 if value:
                     where_clauses.append(bts.PipelineRun.created_by == value)
                 else:
@@ -215,7 +205,7 @@ class PipelineRunsApiService_Sql:
         )
         next_page_offset = offset + page_size
         next_page_token_dict = {OFFSET_KEY: next_page_offset, FILTER_KEY: filter}
-        next_page_token = _encode_page_token(next_page_token_dict)
+        next_page_token: str | None = _encode_page_token(next_page_token_dict)
         if len(pipeline_runs) < page_size:
             next_page_token = None
 
@@ -229,13 +219,9 @@ class PipelineRunsApiService_Sql:
                 if self.PIPELINE_NAME_EXTRA_DATA_KEY in extra_data:
                     pipeline_name = extra_data[self.PIPELINE_NAME_EXTRA_DATA_KEY]
                 else:
-                    execution_node = session.get(
-                        bts.ExecutionNode, pipeline_run.root_execution_id
-                    )
+                    execution_node = session.get(bts.ExecutionNode, pipeline_run.root_execution_id)
                     if execution_node:
-                        task_spec = structures.TaskSpec.from_json_dict(
-                            execution_node.task_spec
-                        )
+                        task_spec = structures.TaskSpec.from_json_dict(execution_node.task_spec)
                         component_spec = task_spec.component_ref.spec
                         if component_spec:
                             pipeline_name = component_spec.name
@@ -246,15 +232,12 @@ class PipelineRunsApiService_Sql:
                 )
                 response.execution_status_stats = {
                     status.value: count
-                    for status, count in execution_status_stats.items()
+                    for status, count in execution_status_stats.items()  # type: ignore[union-attr]
                 }
             return response
 
         return ListPipelineJobsResponse(
-            pipeline_runs=[
-                create_pipeline_run_response(pipeline_run)
-                for pipeline_run in pipeline_runs
-            ],
+            pipeline_runs=[create_pipeline_run_response(pipeline_run) for pipeline_run in pipeline_runs],
             next_page_token=next_page_token,
         )
 
@@ -268,13 +251,9 @@ class PipelineRunsApiService_Sql:
             )
             .join(
                 bts.ExecutionToAncestorExecutionLink,
-                bts.ExecutionToAncestorExecutionLink.execution_id
-                == bts.ExecutionNode.id,
+                bts.ExecutionToAncestorExecutionLink.execution_id == bts.ExecutionNode.id,
             )
-            .where(
-                bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-                == root_execution_id
-            )
+            .where(bts.ExecutionToAncestorExecutionLink.ancestor_execution_id == root_execution_id)
             .where(bts.ExecutionNode.container_execution_status != None)
             .group_by(
                 bts.ExecutionNode.container_execution_status,
@@ -283,7 +262,7 @@ class PipelineRunsApiService_Sql:
         execution_status_stat_rows = session.execute(query).tuples().all()
         execution_status_stats = dict(execution_status_stat_rows)
 
-        return execution_status_stats
+        return execution_status_stats  # type: ignore[return-value]
 
     def list_annotations(
         self,
@@ -297,9 +276,7 @@ class PipelineRunsApiService_Sql:
         annotations = {
             ann.key: ann.value
             for ann in session.scalars(
-                sql.select(bts.PipelineRunAnnotation).where(
-                    bts.PipelineRunAnnotation.pipeline_run_id == id
-                )
+                sql.select(bts.PipelineRunAnnotation).where(bts.PipelineRunAnnotation.pipeline_run_id == id)
             )
         }
         return annotations
@@ -321,9 +298,7 @@ class PipelineRunsApiService_Sql:
             raise errors.PermissionError(
                 f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be changed by {user_name}"
             )
-        pipeline_run_annotation = bts.PipelineRunAnnotation(
-            pipeline_run_id=id, key=key, value=value
-        )
+        pipeline_run_annotation = bts.PipelineRunAnnotation(pipeline_run_id=id, key=key, value=value)
         session.merge(pipeline_run_annotation)
         session.commit()
 
@@ -354,9 +329,7 @@ def _decode_page_token(page_token: str) -> dict[str, Any]:
 
 
 def _encode_page_token(page_token_dict: dict[str, Any]) -> str:
-    return (base64.b64encode(json.dumps(page_token_dict).encode("utf8"))).decode(
-        "utf-8"
-    )
+    return (base64.b64encode(json.dumps(page_token_dict).encode("utf8"))).decode("utf-8")
 
 
 def _parse_filter(filter: str) -> dict[str, str]:
@@ -386,7 +359,7 @@ def _calculate_hash(s: str) -> str:
 
 def _split_type_spec(
     type_spec: structures.TypeSpecType | None,
-) -> typing.Tuple[str | None, dict[str, Any] | None]:
+) -> tuple[str | None, dict[str, Any] | None]:
     if type_spec is None:
         return None, None
     if isinstance(type_spec, str):
@@ -395,9 +368,7 @@ def _split_type_spec(
         kv_pairs = list(type_spec.items())
         if len(kv_pairs) == 1:
             type_name, type_properties = kv_pairs[1]
-            if isinstance(type_name, str) and isinstance(
-                type_properties, typing.Mapping
-            ):
+            if isinstance(type_name, str) and isinstance(type_properties, typing.Mapping):
                 return type_name, dict(type_properties)
     raise TypeError(f"Unsupported kind of type spec: {type_spec}")
 
@@ -444,9 +415,7 @@ def _construct_constant_artifact_node_and_add_to_session(
 ):
     # FIX: !!!
     # raise NotImplementedError("MUST insert into session. Need to de-duplicate")
-    artifact_node = _construct_constant_artifact_node(
-        value=value, artifact_type=artifact_type
-    )
+    artifact_node = _construct_constant_artifact_node(value=value, artifact_type=artifact_type)
     session.add(artifact_node.artifact_data)
     session.add(artifact_node)
     return artifact_node
@@ -481,9 +450,7 @@ class ExecutionStatusSummary:
     ended_executions: int = 0
     has_ended: bool = False
 
-    def count_execution_status(
-        self, *, status: bts.ContainerExecutionStatus, count: int
-    ) -> None:
+    def count_execution_status(self, *, status: bts.ContainerExecutionStatus, count: int) -> None:
         self.total_executions += count
         if status in bts.CONTAINER_STATUSES_ENDED:
             self.ended_executions += count
@@ -520,24 +487,20 @@ class GetContainerExecutionLogResponse:
 
 
 class ExecutionNodesApiService_Sql:
-
     def get(self, session: orm.Session, id: bts.IdType) -> GetExecutionInfoResponse:
         execution_node = session.get(bts.ExecutionNode, id)
         if execution_node is None:
             raise ItemNotFoundError(f"Execution with {id=} does not exist.")
 
         parent_pipeline_run_id = session.scalar(
-            sql.select(bts.PipelineRun.id).where(
-                bts.PipelineRun.root_execution_id == id
-            )
+            sql.select(bts.PipelineRun.id).where(bts.PipelineRun.root_execution_id == id)
         )
 
         ancestor_pipeline_run_id = session.scalar(
             sql.select(bts.PipelineRun.id)
             .join(
                 bts.ExecutionToAncestorExecutionLink,
-                bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-                == bts.PipelineRun.root_execution_id,
+                bts.ExecutionToAncestorExecutionLink.ancestor_execution_id == bts.PipelineRun.root_execution_id,
             )
             .where(bts.ExecutionToAncestorExecutionLink.execution_id == id)
         )
@@ -545,16 +508,15 @@ class ExecutionNodesApiService_Sql:
 
         child_executions = execution_node.child_executions
         child_task_execution_ids = {
-            child_execution.task_id_in_parent_execution
-            or "<missing>": child_execution.id
+            child_execution.task_id_in_parent_execution or "<missing>": child_execution.id
             for child_execution in child_executions
         }
         input_artifacts = {
             input_name: ArtifactNodeIdResponse(id=artifact_id)
             for input_name, artifact_id in session.execute(
-                sql.select(
-                    bts.InputArtifactLink.input_name, bts.InputArtifactLink.artifact_id
-                ).where(bts.InputArtifactLink.execution_id == id)
+                sql.select(bts.InputArtifactLink.input_name, bts.InputArtifactLink.artifact_id).where(
+                    bts.InputArtifactLink.execution_id == id
+                )
             ).tuples()
         }
         output_artifacts = {
@@ -576,44 +538,9 @@ class ExecutionNodesApiService_Sql:
             output_artifacts=output_artifacts,
         )
 
-    def get_graph_execution_state(
-        self, session: orm.Session, id: bts.IdType
-    ) -> GetGraphExecutionStateResponse:
-        ExecutionNode_Child = orm.aliased(
-            bts.ExecutionNode, name="child_execution_node"
-        )
-        ExecutionNode_Descendant = orm.aliased(
-            bts.ExecutionNode, name="descendant_execution_node"
-        )
-        # # We cannot use this query since ContainerExecution do not exist
-        # # for not yet started container execution nodes.
-        # query = (
-        #     sql.select(
-        #         ExecutionNode_Child.id.label("child_execution_id"),
-        #         bts.ContainerExecution.status,
-        #         sql.func.count().label("count"),
-        #     )
-        #     .where(ExecutionNode_Child.parent_execution_id == id)
-        #     .join(
-        #         bts.ExecutionToAncestorExecutionLink,
-        #         bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-        #         == ExecutionNode_Child.id,
-        #     )
-        #     .join(
-        #         ExecutionNode_Descendant,
-        #         ExecutionNode_Descendant.id
-        #         == bts.ExecutionToAncestorExecutionLink.execution_id,
-        #     )
-        #     .join(
-        #         bts.ContainerExecution,
-        #         bts.ContainerExecution.id
-        #         == ExecutionNode_Descendant.container_execution_id,
-        #     )
-        #     .group_by(
-        #         ExecutionNode_Child.id,
-        #         bts.ContainerExecution.status,
-        #     )
-        # )
+    def get_graph_execution_state(self, session: orm.Session, id: bts.IdType) -> GetGraphExecutionStateResponse:
+        ExecutionNode_Child = orm.aliased(bts.ExecutionNode, name="child_execution_node")
+        ExecutionNode_Descendant = orm.aliased(bts.ExecutionNode, name="descendant_execution_node")
         child_descendants_query = (
             sql.select(
                 ExecutionNode_Child.id.label("child_execution_id"),
@@ -623,13 +550,11 @@ class ExecutionNodesApiService_Sql:
             .where(ExecutionNode_Child.parent_execution_id == id)
             .join(
                 bts.ExecutionToAncestorExecutionLink,
-                bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-                == ExecutionNode_Child.id,
+                bts.ExecutionToAncestorExecutionLink.ancestor_execution_id == ExecutionNode_Child.id,
             )
             .join(
                 ExecutionNode_Descendant,
-                ExecutionNode_Descendant.id
-                == bts.ExecutionToAncestorExecutionLink.execution_id,
+                ExecutionNode_Descendant.id == bts.ExecutionToAncestorExecutionLink.execution_id,
             )
             .where(ExecutionNode_Descendant.container_execution_status != None)
             .group_by(
@@ -650,38 +575,28 @@ class ExecutionNodesApiService_Sql:
                 ExecutionNode_Child.container_execution_status,
             )
         )
-        child_descendants_execution_stat_rows = session.execute(
-            child_descendants_query
-        ).all()
-        child_container_execution_stat_rows = session.execute(
-            direct_container_children_query
-        ).all()
-        child_execution_stat_rows = tuple(
-            child_descendants_execution_stat_rows
-        ) + tuple(child_container_execution_stat_rows)
+        child_descendants_execution_stat_rows = session.execute(child_descendants_query).all()
+        child_container_execution_stat_rows = session.execute(direct_container_children_query).all()
+        child_execution_stat_rows = tuple(child_descendants_execution_stat_rows) + tuple(
+            child_container_execution_stat_rows
+        )
         child_execution_status_stats: dict[bts.IdType, dict[str, int]] = {}
 
         for row in child_execution_stat_rows:
             child_execution_id, status, count = row.tuple()
-            status_stats = child_execution_status_stats.setdefault(
-                child_execution_id, {}
-            )
-            status_stats[status.value] = count
+            status_stats = child_execution_status_stats.setdefault(child_execution_id, {})
+            status_stats[status.value] = count  # type: ignore[union-attr]
         return GetGraphExecutionStateResponse(
             child_execution_status_stats=child_execution_status_stats,
         )
 
-    def get_container_execution_state(
-        self, session: orm.Session, id: bts.IdType
-    ) -> GetContainerExecutionStateResponse:
+    def get_container_execution_state(self, session: orm.Session, id: bts.IdType) -> GetContainerExecutionStateResponse:
         execution = session.get(bts.ExecutionNode, id)
         if not execution:
             raise ItemNotFoundError(f"Execution with {id=} does not exist.")
         container_execution = execution.container_execution
         if not container_execution:
-            raise RuntimeError(
-                f"Execution with {id=} does not have container execution information."
-            )
+            raise RuntimeError(f"Execution with {id=} does not have container execution information.")
         return GetContainerExecutionStateResponse(
             status=container_execution.status,
             exit_code=container_execution.exit_code,
@@ -690,43 +605,27 @@ class ExecutionNodesApiService_Sql:
             debug_info=container_execution.launcher_data,
         )
 
-    def get_artifacts(
-        self, session: orm.Session, id: bts.IdType
-    ) -> GetExecutionArtifactsResponse:
-        if not session.scalar(
-            sql.select(sql.exists().where(bts.ExecutionNode.id == id))
-        ):
+    def get_artifacts(self, session: orm.Session, id: bts.IdType) -> GetExecutionArtifactsResponse:
+        if not session.scalar(sql.select(sql.exists().where(bts.ExecutionNode.id == id))):
             raise ItemNotFoundError(f"Execution with {id=} does not exist.")
 
         input_artifact_links = session.scalars(
             sql.select(bts.InputArtifactLink)
             .where(bts.InputArtifactLink.execution_id == id)
-            .options(
-                orm.joinedload(bts.InputArtifactLink.artifact).joinedload(
-                    bts.ArtifactNode.artifact_data
-                )
-            )
+            .options(orm.joinedload(bts.InputArtifactLink.artifact).joinedload(bts.ArtifactNode.artifact_data))
         )
         output_artifact_links = session.scalars(
             sql.select(bts.OutputArtifactLink)
             .where(bts.OutputArtifactLink.execution_id == id)
-            .options(
-                orm.joinedload(bts.OutputArtifactLink.artifact).joinedload(
-                    bts.ArtifactNode.artifact_data
-                )
-            )
+            .options(orm.joinedload(bts.OutputArtifactLink.artifact).joinedload(bts.ArtifactNode.artifact_data))
         )
 
         input_artifacts = {
-            input_artifact_link.input_name: ArtifactNodeResponse.from_db(
-                input_artifact_link.artifact
-            )
+            input_artifact_link.input_name: ArtifactNodeResponse.from_db(input_artifact_link.artifact)
             for input_artifact_link in input_artifact_links
         }
         output_artifacts = {
-            output_artifact_link.output_name: ArtifactNodeResponse.from_db(
-                output_artifact_link.artifact
-            )
+            output_artifact_link.output_name: ArtifactNodeResponse.from_db(output_artifact_link.artifact)
             for output_artifact_link in output_artifact_links
         }
         return GetExecutionArtifactsResponse(
@@ -752,21 +651,14 @@ class ExecutionNodesApiService_Sql:
             bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
         )
         # Temporarily putting the orchestration error into the system error field for compatibility.
-        system_error_exception_full = (
-            system_error_exception_full or orchestration_error_message
-        )
+        system_error_exception_full = system_error_exception_full or orchestration_error_message
         if not container_execution:
-            if (
-                execution.container_execution_status
-                == bts.ContainerExecutionStatus.SYSTEM_ERROR
-            ):
+            if execution.container_execution_status == bts.ContainerExecutionStatus.SYSTEM_ERROR:
                 return GetContainerExecutionLogResponse(
                     system_error_exception_full=system_error_exception_full,
                     orchestration_error_message=orchestration_error_message,
                 )
-            raise RuntimeError(
-                f"Execution with {id=} does not have container execution information."
-            )
+            raise RuntimeError(f"Execution with {id=} does not have container execution information.")
         log_text: str | None = None
         if container_execution.status in (
             bts.ContainerExecutionStatus.SUCCEEDED,
@@ -782,36 +674,25 @@ class ExecutionNodesApiService_Sql:
                 # TODO: Make the ContainerLauncher._storage_provider part of the public interface or create a better solution for log retrieval
                 # Try getting the configured storage provider from the launcher so that it has correct access credentials.
                 storage_provider = (
-                    getattr(container_launcher, "_storage_provider", None)
-                    if container_launcher
-                    else None
+                    getattr(container_launcher, "_storage_provider", None) if container_launcher else None
                 )
                 log_text = _read_container_execution_log_from_uri(
                     log_uri=container_execution.log_uri,
                     storage_provider=storage_provider,
                 )
-            except:
+            except Exception:
                 # Do not raise exception if the execution is in SYSTEM_ERROR state
                 # We want to return the system error exception.
-                if (
-                    container_execution.status
-                    != bts.ContainerExecutionStatus.SYSTEM_ERROR
-                ):
+                if container_execution.status != bts.ContainerExecutionStatus.SYSTEM_ERROR:
                     raise
         elif container_execution.status == bts.ContainerExecutionStatus.RUNNING:
             if not container_launcher:
-                raise ApiServiceError(
-                    f"Reading log of an unfinished container requires `container_launcher`."
-                )
+                raise ApiServiceError("Reading log of an unfinished container requires `container_launcher`.")
             if not container_execution.launcher_data:
-                raise ApiServiceError(
-                    f"Execution does not have container launcher data."
-                )
+                raise ApiServiceError("Execution does not have container launcher data.")
 
-            launched_container = (
-                container_launcher.deserialize_launched_container_from_dict(
-                    container_execution.launcher_data
-                )
+            launched_container = container_launcher.deserialize_launched_container_from_dict(
+                container_execution.launcher_data
             )
             log_text = launched_container.get_log()
 
@@ -832,32 +713,20 @@ class ExecutionNodesApiService_Sql:
             raise ItemNotFoundError(f"Execution with {execution_id=} does not exist.")
         container_execution = execution.container_execution
         if not container_execution:
-            raise ApiServiceError(
-                f"Execution does not have container execution information."
-            )
+            raise ApiServiceError("Execution does not have container execution information.")
         if not container_execution.launcher_data:
-            raise ApiServiceError(
-                f"Execution does not have container launcher information."
-            )
+            raise ApiServiceError("Execution does not have container launcher information.")
         if container_execution.status == bts.ContainerExecutionStatus.RUNNING:
-            launched_container = (
-                container_launcher.deserialize_launched_container_from_dict(
-                    container_execution.launcher_data
-                )
+            launched_container = container_launcher.deserialize_launched_container_from_dict(
+                container_execution.launcher_data
             )
             return launched_container.stream_log_lines()
         else:
             if not container_execution.log_uri:
-                raise RuntimeError(
-                    f"Container execution {container_execution.id=} does not have log_uri. Impossible."
-                )
+                raise RuntimeError(f"Container execution {container_execution.id=} does not have log_uri. Impossible.")
             # TODO: Make the ContainerLauncher._storage_provider part of the public interface or create a better solution for log retrieval
             # Try getting the configured storage provider from the launcher so that it has correct access credentials.
-            storage_provider = (
-                getattr(container_launcher, "_storage_provider", None)
-                if container_launcher
-                else None
-            )
+            storage_provider = getattr(container_launcher, "_storage_provider", None) if container_launcher else None
             log_text = _read_container_execution_log_from_uri(
                 log_uri=container_execution.log_uri,
                 storage_provider=storage_provider,
@@ -870,9 +739,7 @@ def _read_container_execution_log_from_uri(
     storage_provider: "storage_provider_interfaces.StorageProvider | None" = None,
 ) -> str:
     if ".." in log_uri:
-        raise ValueError(
-            f"_read_container_execution_log_from_uri: log_uri contains '..': {log_uri=}"
-        )
+        raise ValueError(f"_read_container_execution_log_from_uri: log_uri contains '..': {log_uri=}")
 
     if storage_provider:
         # TODO: Switch to storage_provider.parse_uri_get_accessor
@@ -882,7 +749,7 @@ def _read_container_execution_log_from_uri(
 
     if "://" not in log_uri:
         # Consider the URL to be an absolute local path (`/path` or `C:\path` or `C:/path`)
-        with open(log_uri, "r") as reader:
+        with open(log_uri) as reader:
             return reader.read()
     elif log_uri.startswith("gs://"):
         # TODO: Switch to using storage providers.
@@ -920,15 +787,10 @@ class ArtifactNodeResponse:
     @classmethod
     def from_db(cls, artifact_node: bts.ArtifactNode) -> "ArtifactNodeResponse":
         result = ArtifactNodeResponse(
-            **{
-                field.name: getattr(artifact_node, field.name)
-                for field in dataclasses.fields(ArtifactNodeResponse)
-            }
+            **{field.name: getattr(artifact_node, field.name) for field in dataclasses.fields(ArtifactNodeResponse)}
         )
         if artifact_node.artifact_data:
-            result.artifact_data = ArtifactDataResponse.from_db(
-                artifact_data=artifact_node.artifact_data
-            )
+            result.artifact_data = ArtifactDataResponse.from_db(artifact_data=artifact_node.artifact_data)
         return result
 
 
@@ -947,10 +809,7 @@ class ArtifactDataResponse:
     @classmethod
     def from_db(cls, artifact_data: bts.ArtifactData) -> "ArtifactDataResponse":
         return ArtifactDataResponse(
-            **{
-                field.name: getattr(artifact_data, field.name)
-                for field in dataclasses.fields(ArtifactDataResponse)
-            }
+            **{field.name: getattr(artifact_data, field.name) for field in dataclasses.fields(ArtifactDataResponse)}
         )
 
 
@@ -966,7 +825,6 @@ class GetArtifactSignedUrlResponse:
 
 
 class ArtifactNodesApiService_Sql:
-
     def get(self, session: orm.Session, id: bts.IdType) -> GetArtifactInfoResponse:
         artifact_node = session.get(bts.ArtifactNode, id)
         if artifact_node is None:
@@ -977,34 +835,28 @@ class ArtifactNodesApiService_Sql:
             result.artifact_data = artifact_data
         return result
 
-    def get_signed_artifact_url(
-        self, session: orm.Session, id: bts.IdType
-    ) -> GetArtifactSignedUrlResponse:
+    def get_signed_artifact_url(self, session: orm.Session, id: bts.IdType) -> GetArtifactSignedUrlResponse:
         artifact_data = session.scalar(
-            sql.select(bts.ArtifactData)
-            .join(bts.ArtifactNode)
-            .where(bts.ArtifactNode.id == id)
+            sql.select(bts.ArtifactData).join(bts.ArtifactNode).where(bts.ArtifactNode.id == id)
         )
         if not artifact_data:
             raise ItemNotFoundError(f"Artifact node with {id=} does not exist.")
         if not artifact_data.uri:
             raise ValueError(f"Artifact node with {id=} does not have artifact URI.")
         if artifact_data.is_dir:
-            raise ValueError(f"Cannot generate signer URL for a directory artifact.")
+            raise ValueError("Cannot generate signer URL for a directory artifact.")
         if not artifact_data.uri.startswith("gs://"):
             raise ValueError(
                 f"The get_signed_artifact_url method only supports Google Cloud Storage URIs, but got {artifact_data.uri=}."
             )
 
-        from google.cloud import storage
         from google import auth
+        from google.cloud import storage
 
         # Avoiding error: "you need a private key to sign credentials."
         # "the credentials you are currently using <class 'google.auth.compute_engine.credentials.Credentials'> just contains a token.
         # "see https://googleapis.dev/python/google-api-core/latest/auth.html#setting-up-a-service-account for more details."
-        credentials = auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"]
-        )[0]
+        credentials = auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"])[0]
         storage_client = storage.Client(credentials=credentials)
         blob = storage.Blob.from_string(uri=artifact_data.uri, client=storage_client)
         signed_url = blob.generate_signed_url(
@@ -1040,7 +892,6 @@ class ListSecretsResponse:
 
 
 class SecretsApiService:
-
     def create_secret(
         self,
         *,
@@ -1053,7 +904,7 @@ class SecretsApiService:
     ) -> SecretInfoResponse:
         secret_name = secret_name.strip()
         if not secret_name:
-            raise ApiServiceError(f"Secret name must not be empty.")
+            raise ApiServiceError("Secret name must not be empty.")
         return self._create_or_update_secret(
             session=session,
             user_id=user_id,
@@ -1100,16 +951,12 @@ class SecretsApiService:
         secret = session.get(bts.Secret, (user_id, secret_name))
         if secret:
             if raise_if_exists:
-                raise errors.ItemAlreadyExistsError(
-                    f"Secret with name '{secret_name}' already exists."
-                )
+                raise errors.ItemAlreadyExistsError(f"Secret with name '{secret_name}' already exists.")
             secret.secret_value = secret_value
             secret.updated_at = current_time
         else:
             if raise_if_not_exists:
-                raise errors.ItemNotFoundError(
-                    f"Secret with name '{secret_name}' does not exist."
-                )
+                raise errors.ItemNotFoundError(f"Secret with name '{secret_name}' does not exist.")
             secret = bts.Secret(
                 user_id=user_id,
                 secret_name=secret_name,
@@ -1135,9 +982,7 @@ class SecretsApiService:
     ) -> None:
         secret = session.get(bts.Secret, (user_id, secret_name))
         if not secret:
-            raise errors.ItemNotFoundError(
-                f"Secret with name '{secret_name}' does not exist."
-            )
+            raise errors.ItemNotFoundError(f"Secret with name '{secret_name}' does not exist.")
         session.delete(secret)
         session.commit()
 
@@ -1147,28 +992,11 @@ class SecretsApiService:
         session: orm.Session,
         user_id: str,
     ) -> ListSecretsResponse:
-        secrets = session.scalars(
-            sql.select(bts.Secret).where(bts.Secret.user_id == user_id)
-        ).all()
-        return ListSecretsResponse(
-            secrets=[SecretInfoResponse.from_db(secret) for secret in secrets]
-        )
+        secrets = session.scalars(sql.select(bts.Secret).where(bts.Secret.user_id == user_id)).all()
+        return ListSecretsResponse(secrets=[SecretInfoResponse.from_db(secret) for secret in secrets])
 
 
-# ============
-
-# Idea for how to add deep nested graph:
-# First: Recursively create all task execution nodes and create their output artifacts
-# Then: For each execution node starting from root:
-#       Set/create input argument artifacts
-#       If the node is a graph, process the node's children
-# ---
-# No. Decided to first do topological sort and then 1-stage generation.
-
-
-_ArtifactNodeOrDynamicDataType = typing.Union[
-    bts.ArtifactNode, structures.DynamicDataArgument
-]
+_ArtifactNodeOrDynamicDataType = typing.Union[bts.ArtifactNode, structures.DynamicDataArgument]
 
 
 def _recursively_create_all_executions_and_artifacts_root(
@@ -1179,18 +1007,12 @@ def _recursively_create_all_executions_and_artifacts_root(
 
     root_component_spec = root_task_spec.component_ref.spec
     if not root_component_spec:
-        raise ApiServiceError(
-            f"root_task_spec.component_ref.spec is empty. {root_task_spec=}"
-        )
-    input_specs = {
-        input_spec.name: input_spec for input_spec in root_component_spec.inputs or []
-    }
+        raise ApiServiceError(f"root_task_spec.component_ref.spec is empty. {root_task_spec=}")
+    input_specs = {input_spec.name: input_spec for input_spec in root_component_spec.inputs or []}
     for input_name, input_argument in (root_task_spec.arguments or {}).items():
         input_spec = input_specs.get(input_name)
         if not input_spec:
-            raise ApiServiceError(
-                f"Argument given for non-existing input '{input_name}'. {root_task_spec=}"
-            )
+            raise ApiServiceError(f"Argument given for non-existing input '{input_name}'. {root_task_spec=}")
         if isinstance(
             input_argument,
             (
@@ -1207,9 +1029,7 @@ def _recursively_create_all_executions_and_artifacts_root(
                 # _construct_constant_artifact_node_and_add_to_session(
                 #     session=session, value=input_argument, artifact_type=input_spec.type
                 # )
-                _construct_constant_artifact_node(
-                    value=input_argument, artifact_type=input_spec.type
-                )
+                _construct_constant_artifact_node(value=input_argument, artifact_type=input_spec.type)
             )
             # This constant artifact won't be added to the DB
             # TODO: Actually, they will be added...
@@ -1238,15 +1058,11 @@ def _recursively_create_all_executions_and_artifacts(
 ) -> bts.ExecutionNode:
     root_component_spec = root_task_spec.component_ref.spec
     if not root_component_spec:
-        raise ApiServiceError(
-            f"root_task.component_ref.spec is empty. {root_task_spec=}"
-        )
+        raise ApiServiceError(f"root_task.component_ref.spec is empty. {root_task_spec=}")
 
     implementation = root_component_spec.implementation
     if not implementation:
-        raise ApiServiceError(
-            f"component_spec.implementation is empty. {root_task_spec=}"
-        )
+        raise ApiServiceError(f"component_spec.implementation is empty. {root_task_spec=}")
 
     root_execution_node = bts.ExecutionNode(
         task_spec=root_task_spec.to_json_dict(),
@@ -1269,31 +1085,26 @@ def _recursively_create_all_executions_and_artifacts(
         if isinstance(input_artifact_node, structures.DynamicDataArgument):
             if not (
                 isinstance(input_artifact_node.dynamic_data, str)
-                or (
-                    isinstance(input_artifact_node.dynamic_data, dict)
-                    and len(input_artifact_node.dynamic_data) == 1
-                )
+                or (isinstance(input_artifact_node.dynamic_data, dict) and len(input_artifact_node.dynamic_data) == 1)
             ):
                 raise ApiServiceError(
                     f"Dynamic data argument must be a string or a dict with a single key set, but got {input_artifact_node.dynamic_data}"
                 )
             # Storing the dynamic data arguments for later use by the orchestrator.
             extra_data = root_execution_node.extra_data or {}
-            extra_data.setdefault(
-                bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {}
-            )[input_spec.name] = input_artifact_node.dynamic_data
+            extra_data.setdefault(bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {})[input_spec.name] = (
+                input_artifact_node.dynamic_data
+            )
 
             root_execution_node.extra_data = extra_data
             # Not adding any artifact link for secret inputs
             continue
         if input_artifact_node is None and not input_spec.optional:
             if input_spec.default:
-                input_artifact_node = (
-                    _construct_constant_artifact_node_and_add_to_session(
-                        session=session,
-                        value=input_spec.default,
-                        artifact_type=input_spec.type,
-                    )
+                input_artifact_node = _construct_constant_artifact_node_and_add_to_session(
+                    session=session,
+                    value=input_spec.default,
+                    artifact_type=input_spec.type,
                 )
                 # # Not adding constant inputs to the DB. We'll add them to `ExecutionNode.constant_arguments`
                 # input_artifact_node = (
@@ -1351,8 +1162,7 @@ def _recursively_create_all_executions_and_artifacts(
         root_execution_node.container_execution_status = (
             bts.ContainerExecutionStatus.QUEUED
             if all(
-                not isinstance(artifact_node, bts.ArtifactNode)
-                or artifact_node.artifact_data
+                not isinstance(artifact_node, bts.ArtifactNode) or artifact_node.artifact_data
                 for artifact_node in input_artifact_nodes.values()
             )
             else bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
@@ -1376,15 +1186,11 @@ def _recursively_create_all_executions_and_artifacts(
         for child_task_id, child_task_spec in child_tasks.items():
             child_component_spec = child_task_spec.component_ref.spec
             if not child_component_spec:
-                raise ApiServiceError(
-                    f"child_task_spec.component_ref.spec is empty. {child_task_spec=}"
-                )
-            child_task_input_artifact_nodes: dict[
-                str, _ArtifactNodeOrDynamicDataType
-            ] = {}
+                raise ApiServiceError(f"child_task_spec.component_ref.spec is empty. {child_task_spec=}")
+            child_task_input_artifact_nodes: dict[str, _ArtifactNodeOrDynamicDataType] = {}
             for input_spec in child_component_spec.inputs or []:
                 input_argument = (child_task_spec.arguments or {}).get(input_spec.name)
-                input_artifact_node: _ArtifactNodeOrDynamicDataType | None = None
+                input_artifact_node: _ArtifactNodeOrDynamicDataType | None = None  # type: ignore[no-redef]
                 if input_argument is None and not input_spec.optional:
                     # Not failing on unconnected required input if there is a default value
                     if input_spec.default is None:
@@ -1396,9 +1202,7 @@ def _recursively_create_all_executions_and_artifacts(
                 if input_argument is None:
                     pass
                 elif isinstance(input_argument, structures.GraphInputArgument):
-                    input_artifact_node = input_artifact_nodes.get(
-                        input_argument.graph_input.input_name
-                    )
+                    input_artifact_node = input_artifact_nodes.get(input_argument.graph_input.input_name)
                     if input_artifact_node is None:
                         # Warning: unconnected upstream
                         # TODO: Support using upstream graph input's default value when needed for required input (non-trivial feature).
@@ -1406,16 +1210,14 @@ def _recursively_create_all_executions_and_artifacts(
                         pass
                 elif isinstance(input_argument, structures.TaskOutputArgument):
                     task_output_source = input_argument.task_output
-                    input_artifact_node = task_output_artifact_nodes[
-                        task_output_source.task_id
-                    ][task_output_source.output_name]
+                    input_artifact_node = task_output_artifact_nodes[task_output_source.task_id][
+                        task_output_source.output_name
+                    ]
                 elif isinstance(input_argument, str):
-                    input_artifact_node = (
-                        _construct_constant_artifact_node_and_add_to_session(
-                            session=session,
-                            value=input_argument,
-                            artifact_type=input_spec.type,
-                        )
+                    input_artifact_node = _construct_constant_artifact_node_and_add_to_session(
+                        session=session,
+                        value=input_argument,
+                        artifact_type=input_spec.type,
                     )
                     # Not adding constant inputs to the DB. We'll add them to `ExecutionNode.constant_arguments`
                     # input_artifact_node = (
@@ -1432,9 +1234,7 @@ def _recursively_create_all_executions_and_artifacts(
                         f"Unexpected task argument: {input_spec.name}={input_argument}. {child_task_spec=}"
                     )
                 if input_artifact_node:
-                    child_task_input_artifact_nodes[input_spec.name] = (
-                        input_artifact_node
-                    )
+                    child_task_input_artifact_nodes[input_spec.name] = input_artifact_node
 
             # Creating child task nodes and their output artifacts
             child_execution_node = _recursively_create_all_executions_and_artifacts(
@@ -1448,8 +1248,7 @@ def _recursively_create_all_executions_and_artifacts(
             # task_id_to_execution_node[child_task_id] = child_execution_node
             # TODO: ! Ensure this relationship works properly (is populated and does not query DB),
             task_output_artifact_nodes[child_task_id] = {
-                link.output_name: link.artifact
-                for link in child_execution_node.output_artifact_links
+                link.output_name: link.artifact for link in child_execution_node.output_artifact_links
             }
 
         # Processing root graph output artifacts
@@ -1459,9 +1258,7 @@ def _recursively_create_all_executions_and_artifacts(
                     f"graph_spec.output_values values can only be of type TaskOutputArgument, but got {output_source=}"
                 )
             task_output_source = output_source.task_output
-            source_artifact = task_output_artifact_nodes[task_output_source.task_id][
-                task_output_source.output_name
-            ]
+            source_artifact = task_output_artifact_nodes[task_output_source.task_id][task_output_source.output_name]
             output_artifact_link = bts.OutputArtifactLink(
                 execution=root_execution_node,
                 output_name=output_name,
@@ -1469,9 +1266,7 @@ def _recursively_create_all_executions_and_artifacts(
             )
             session.add(output_artifact_link)
     else:
-        raise ApiServiceError(
-            f"Unknown ComponentSpec.implementation. {root_component_spec=}"
-        )
+        raise ApiServiceError(f"Unknown ComponentSpec.implementation. {root_component_spec=}")
     return root_execution_node
 
 
@@ -1489,47 +1284,32 @@ def _toposort_tasks(
                 if isinstance(argument, structures.TaskOutputArgument):
                     dependencies[argument.task_output.task_id] = True
                     if argument.task_output.task_id not in tasks:
-                        raise TypeError(
-                            'Argument "{}" references non-existing task.'.format(
-                                argument
-                            )
-                        )
+                        raise TypeError(f'Argument "{argument}" references non-existing task.')
 
     # Topologically sorting tasks to detect cycles
-    task_dependents = {k: {} for k in task_dependencies.keys()}
+    task_dependents: dict[str, dict[str, bool]] = {k: {} for k in task_dependencies}
     for task_id, dependencies in task_dependencies.items():
         for dependency in dependencies:
             task_dependents[dependency][task_id] = True
-    task_number_of_remaining_dependencies = {
-        k: len(v) for k, v in task_dependencies.items()
-    }
+    task_number_of_remaining_dependencies = {k: len(v) for k, v in task_dependencies.items()}
     sorted_tasks = {}  # Python dictionaries preserve order now
 
     def process_task(task_id):
-        if (
-            task_number_of_remaining_dependencies[task_id] == 0
-            and task_id not in sorted_tasks
-        ):
+        if task_number_of_remaining_dependencies[task_id] == 0 and task_id not in sorted_tasks:
             sorted_tasks[task_id] = tasks[task_id]
             for dependent_task in task_dependents[task_id]:
                 task_number_of_remaining_dependencies[dependent_task] -= 1
                 process_task(dependent_task)
 
-    for task_id in task_dependencies.keys():
+    for task_id in task_dependencies:
         process_task(task_id)
     if len(sorted_tasks) != len(task_dependencies):
-        tasks_with_unsatisfied_dependencies = {
-            k: v for k, v in task_number_of_remaining_dependencies.items() if v > 0
-        }
+        tasks_with_unsatisfied_dependencies = {k: v for k, v in task_number_of_remaining_dependencies.items() if v > 0}
         task_with_minimal_number_of_unsatisfied_dependencies = min(
             tasks_with_unsatisfied_dependencies.keys(),
             key=lambda task_id: tasks_with_unsatisfied_dependencies[task_id],
         )
-        raise ValueError(
-            'Task "{}" has cyclical dependency.'.format(
-                task_with_minimal_number_of_unsatisfied_dependencies
-            )
-        )
+        raise ValueError(f'Task "{task_with_minimal_number_of_unsatisfied_dependencies}" has cyclical dependency.')
 
     return sorted_tasks
 

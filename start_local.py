@@ -7,9 +7,7 @@ import fastapi
 # region Paths configuration
 
 root_data_dir = (
-    os.environ.get("CLOUD_PIPELINES_BACKEND_DATA_DIR")
-    or os.environ.get("TANGLE_BACKEND_DATA_DIR")
-    or "data"
+    os.environ.get("CLOUD_PIPELINES_BACKEND_DATA_DIR") or os.environ.get("TANGLE_BACKEND_DATA_DIR") or "data"
 )
 root_data_dir_path = pathlib.Path(root_data_dir).expanduser()
 artifacts_dir_path = root_data_dir_path / "artifacts"
@@ -37,6 +35,7 @@ logs_root_uri = logs_dir_path.as_posix()
 
 # region: Launcher configuration
 import docker
+
 from cloud_pipelines_backend.launchers import local_docker_launchers
 
 docker_client = docker.DockerClient.from_env(timeout=5)
@@ -53,7 +52,6 @@ sleep_seconds_between_queue_sweeps: float = 1.0
 # endregion
 
 # region: Authentication configuration
-import fastapi
 
 ADMIN_USER_NAME = "admin"
 default_component_library_owner_username = ADMIN_USER_NAME
@@ -78,6 +76,7 @@ def get_user_details(request: fastapi.Request):
 
 # region: Logging configuration
 import logging.config
+
 from cloud_pipelines_backend.instrumentation import structured_logging
 
 LOGGING_CONFIG = {
@@ -147,11 +146,11 @@ import logging
 import pathlib
 
 import sqlalchemy
-from sqlalchemy import orm
-
 from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_interfaces,
 )
+from sqlalchemy import orm
+
 from cloud_pipelines_backend import orchestrator_sql
 
 
@@ -179,9 +178,7 @@ def run_orchestrator(
     logger.info("Starting the orchestrator")
 
     # With autobegin=False you always need to begin a transaction, even to query the DB.
-    session_factory = orm.sessionmaker(
-        autocommit=False, autoflush=False, bind=db_engine
-    )
+    session_factory = orm.sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
 
     orchestrator = orchestrator_sql.OrchestratorService_Sql(
         session_factory=session_factory,
@@ -213,11 +210,8 @@ import traceback
 import fastapi
 from fastapi import staticfiles
 
-from cloud_pipelines_backend import api_router
-from cloud_pipelines_backend import database_ops
-from cloud_pipelines_backend.instrumentation import api_tracing
-from cloud_pipelines_backend.instrumentation import contextual_logging
-from cloud_pipelines_backend.instrumentation import otel_tracing
+from cloud_pipelines_backend import api_router, database_ops
+from cloud_pipelines_backend.instrumentation import api_tracing, contextual_logging, otel_tracing
 
 
 @contextlib.asynccontextmanager
@@ -230,9 +224,7 @@ async def lifespan(app: fastapi.FastAPI):
     if os.environ.get("GOOGLE_CLOUD_SHELL") == "true":
         # TODO: Find a way to get fastapi/starlette/uvicorn port
         port = 8000
-        logger.info(
-            f"View app at: https://shell.cloud.google.com/devshell/proxy?port={port}"
-        )
+        logger.info(f"View app at: https://shell.cloud.google.com/devshell/proxy?port={port}")
     yield
 
 
@@ -293,9 +285,7 @@ found_frontend_build_files = False
 for web_app_dir in web_app_search_dirs:
     if web_app_dir.exists():
         found_frontend_build_files = True
-        logger.info(
-            f"Found the Web app static files at {str(web_app_dir)}. Mounting them."
-        )
+        logger.info(f"Found the Web app static files at {web_app_dir!s}. Mounting them.")
         # The Web app base URL is currently static and hardcoded.
         # TODO: Remove this mount once the base URL becomes relative.
         app.mount(

@@ -4,16 +4,14 @@ import datetime
 import logging
 import pathlib
 import typing
-from typing import Any, Optional
+from typing import Any
 
 import huggingface_hub
-
 from cloud_pipelines.orchestration.launchers import naming_utils
-from ..storage_providers import huggingface_repo_storage
-from .. import component_structures as structures
-from . import container_component_utils
-from . import interfaces
 
+from .. import component_structures as structures
+from ..storage_providers import huggingface_repo_storage
+from . import container_component_utils, interfaces
 
 _logger = logging.getLogger(__name__)
 
@@ -22,30 +20,24 @@ _MAX_INPUT_VALUE_SIZE = 10000
 _CONTAINER_FILE_NAME = "data"
 
 
-class HuggingFaceJobsContainerLauncher(
-    interfaces.ContainerTaskLauncher["LaunchedHuggingFaceJobContainer"]
-):
+class HuggingFaceJobsContainerLauncher(interfaces.ContainerTaskLauncher["LaunchedHuggingFaceJobContainer"]):
     """Launcher that uses HuggingFace Jobs installed locally"""
 
     def __init__(
         self,
         *,
-        client: Optional[huggingface_hub.HfApi] = None,
-        namespace: Optional[str] = None,
-        hf_token: Optional[str] = None,
-        hf_job_token: Optional[str] = None,
-        job_timeout: Optional[int | float | str] = None,
+        client: huggingface_hub.HfApi | None = None,
+        namespace: str | None = None,
+        hf_token: str | None = None,
+        hf_job_token: str | None = None,
+        job_timeout: int | float | str | None = None,
     ):
         # The HF Jobs that we launch need token to write the output artifacts and logs
         hf_token = hf_token or huggingface_hub.get_token()
         hf_job_token = hf_job_token or hf_token
         self._api_client = client or huggingface_hub.HfApi(token=hf_token)
         self._namespace: str = namespace or self._api_client.whoami()["name"]
-        self._storage_provider = (
-            huggingface_repo_storage.HuggingFaceRepoStorageProvider(
-                client=self._api_client
-            )
-        )
+        self._storage_provider = huggingface_repo_storage.HuggingFaceRepoStorageProvider(client=self._api_client)
         self._job_timeout = job_timeout
         self._hf_job_token = hf_job_token
 
@@ -62,12 +54,8 @@ class HuggingFaceJobsContainerLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedHuggingFaceJobContainer":
-        if not isinstance(
-            component_spec.implementation, structures.ContainerImplementation
-        ):
-            raise TypeError(
-                f"Container launchers only support container implementations. Got {component_spec=}"
-            )
+        if not isinstance(component_spec.implementation, structures.ContainerImplementation):
+            raise TypeError(f"Container launchers only support container implementations. Got {component_spec=}")
         container_spec = component_spec.implementation.container
 
         # TODO: Validate the input/output URIs.
@@ -87,9 +75,7 @@ class HuggingFaceJobsContainerLauncher(
         def get_input_value(input_name: str) -> str:
             input_argument = input_arguments[input_name]
             if input_argument.is_dir:
-                raise interfaces.LauncherError(
-                    f"Cannot consume directory as value. {input_name=}, {input_argument=}"
-                )
+                raise interfaces.LauncherError(f"Cannot consume directory as value. {input_name=}, {input_argument=}")
             if input_argument.total_size > _MAX_INPUT_VALUE_SIZE:
                 raise interfaces.LauncherError(
                     f"Artifact is too big to consume as value. Consume it as file instead. {input_name=}, {input_argument=}"
@@ -101,9 +87,7 @@ class HuggingFaceJobsContainerLauncher(
                     raise interfaces.LauncherError(
                         f"Artifact data has no value and no uri. This cannot happen. {input_name=}, {input_argument=}"
                     )
-                uri_reader = self._storage_provider.make_uri(
-                    input_argument.uri
-                ).get_reader()
+                uri_reader = self._storage_provider.make_uri(input_argument.uri).get_reader()
                 try:
                     data = uri_reader.download_as_bytes()
                 except Exception as ex:
@@ -128,9 +112,7 @@ class HuggingFaceJobsContainerLauncher(
                     raise interfaces.LauncherError(
                         f"Artifact data has no value and no uri. This cannot happen. {input_name=}, {input_argument=}"
                     )
-                uri_writer = self._storage_provider.make_uri(
-                    input_argument.staging_uri
-                ).get_writer()
+                uri_writer = self._storage_provider.make_uri(input_argument.staging_uri).get_writer()
                 try:
                     uri_writer.upload_from_text(input_argument.value)
                 except Exception as ex:
@@ -142,9 +124,7 @@ class HuggingFaceJobsContainerLauncher(
                 input_argument.uri = uri
 
             container_path = (
-                container_inputs_root
-                / naming_utils.sanitize_file_name(input_name)
-                / _CONTAINER_FILE_NAME
+                container_inputs_root / naming_utils.sanitize_file_name(input_name) / _CONTAINER_FILE_NAME
             ).as_posix()
             # hf_uri = huggingface_repo_storage.HuggingFaceRepoUri.parse(uri)
             download_input_uris[uri] = container_path
@@ -174,9 +154,7 @@ class HuggingFaceJobsContainerLauncher(
             # TODO: Use common URI here
             hf_uri = huggingface_repo_storage.HuggingFaceRepoUri.parse(log_uri)
             uri_path_in_repo = hf_uri.path
-            container_path = str(
-                (container_outputs_root / uri_path_in_repo).with_name("exit_code.txt")
-            )
+            container_path = str((container_outputs_root / uri_path_in_repo).with_name("exit_code.txt"))
             return container_path
 
         container_log_path = get_log_path()
@@ -354,15 +332,13 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
             return interfaces.ContainerStatus.RUNNING
         elif status_str == huggingface_hub.JobStage.COMPLETED:
             return interfaces.ContainerStatus.SUCCEEDED
-        elif status_str == huggingface_hub.JobStage.ERROR:
-            return interfaces.ContainerStatus.FAILED
-        elif status_str == huggingface_hub.JobStage.CANCELED:
+        elif status_str == huggingface_hub.JobStage.ERROR or status_str == huggingface_hub.JobStage.CANCELED:
             return interfaces.ContainerStatus.FAILED
         else:  # "DELETED"
             return interfaces.ContainerStatus.ERROR
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         # HF Jobs do not provide exit code
         if not self.has_ended:
             return None
@@ -401,9 +377,7 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
     def launcher_error_message(self) -> str | None:
         if self._job.status.message:
             # TODO: Check what kind of messages this returns and when.
-            _logger.info(
-                f"launcher_error_message: {self._id=}: {self._job.status.message=}"
-            )
+            _logger.info(f"launcher_error_message: {self._id=}: {self._job.status.message=}")
             return self._job.status.message
         return None
 
@@ -411,9 +385,7 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
         if self.has_ended:
             try:
                 return (
-                    huggingface_repo_storage.HuggingFaceRepoStorageProvider(
-                        client=self._get_api_client()
-                    )
+                    huggingface_repo_storage.HuggingFaceRepoStorageProvider(client=self._get_api_client())
                     .make_uri(self._log_uri)
                     .get_reader()
                     .download_as_text()

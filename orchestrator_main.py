@@ -1,13 +1,13 @@
 import logging
-import pathlib
 import os
+import pathlib
 
 import sqlalchemy
+from cloud_pipelines.orchestration.storage_providers import local_storage
 from sqlalchemy import orm
 
 from cloud_pipelines_backend import orchestrator_sql
 from cloud_pipelines_backend.launchers import kubernetes_launchers
-from cloud_pipelines.orchestration.storage_providers import local_storage
 
 
 def main():
@@ -39,19 +39,17 @@ def main():
     logger.info("Completed sqlalchemy.create_engine")
 
     # With autobegin=False you always need to beging a transaction, even to query the DB.
-    session_factory = orm.sessionmaker(
-        autocommit=False, autoflush=False, bind=db_engine
-    )
+    session_factory = orm.sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
 
     artifact_store_root_dir = (pathlib.Path.cwd() / "tmp" / "artifacts").as_posix()
     log_store_root_dir = (pathlib.Path.cwd() / "tmp" / "logs").as_posix()
 
-    from kubernetes import config as k8s_config_lib
     from kubernetes import client as k8s_client_lib
+    from kubernetes import config as k8s_config_lib
 
     try:
         k8s_config_lib.load_incluster_config()
-    except:
+    except Exception:
         k8s_config_lib.load_kube_config()
     k8s_client = k8s_client_lib.ApiClient()
 
@@ -81,13 +79,10 @@ def main():
 
 
 if __name__ == "__main__":
-
     # This sets the root logger to write to stdout (your console).
     # Your script/app needs to call this somewhere at least once.
     # logging.basicConfig()
-    logging.basicConfig(
-        format="%(asctime)s\t%(levelname)s\t%(message)s", level=logging.NOTSET
-    )
+    logging.basicConfig(format="%(asctime)s\t%(levelname)s\t%(message)s", level=logging.NOTSET)
 
     # # By default the root logger is set to WARNING and all loggers you define
     # # inherit that value. Here we set the root logger to NOTSET. This logging

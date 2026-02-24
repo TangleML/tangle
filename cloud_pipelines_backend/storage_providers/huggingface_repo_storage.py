@@ -2,12 +2,10 @@ import copy
 import dataclasses
 import logging
 import pathlib
-from typing import Optional
 
 import huggingface_hub
-from huggingface_hub import hf_api
-
 from cloud_pipelines.orchestration.storage_providers import interfaces
+from huggingface_hub import hf_api
 
 _LOGGER = logging.getLogger(name=__name__)
 
@@ -36,18 +34,14 @@ class HuggingFaceRepoUri(interfaces.DataUri):
     def parse(cls, uri_string: str) -> "HuggingFaceRepoUri":
         # Validating the URI
         if not uri_string.startswith("hf://"):
-            raise ValueError(
-                f"HuggingFace URI must start with hf://, but got {uri_string}"
-            )
+            raise ValueError(f"HuggingFace URI must start with hf://, but got {uri_string}")
         parts = uri_string.split("/", 5)
         repo_type = parts[2].rstrip("s")  # Making type singular
         user = parts[3]
         repo, _, branch = parts[4].partition("@")
         path = parts[5]
         if repo_type not in ("model", "dataset", "space"):
-            raise ValueError(
-                f"HuggingFace URI repo_type must be (model | dataset | space), but got {uri_string}"
-            )
+            raise ValueError(f"HuggingFace URI repo_type must be (model | dataset | space), but got {uri_string}")
         if not user:
             raise ValueError(f"HuggingFace URI must have user, but got {uri_string}")
         if not repo:
@@ -72,7 +66,7 @@ HuggingFaceRepoUri._register_subclass("huggingface_repo_storage")
 
 
 class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
-    def __init__(self, client: Optional[huggingface_hub.HfApi] = None) -> None:
+    def __init__(self, client: huggingface_hub.HfApi | None = None) -> None:
         self._client = client or huggingface_hub.HfApi()
 
     def make_uri(self, uri: str) -> interfaces.UriAccessor:
@@ -89,7 +83,7 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
 
     def upload(self, source_path: str, destination_uri: HuggingFaceRepoUri):
         _LOGGER.debug(f"Uploading from {source_path} to {destination_uri}")
-        if pathlib.Path(source_path).is_dir:
+        if pathlib.Path(source_path).is_dir():
             self._client.upload_folder(
                 repo_type=destination_uri.repo_type,
                 repo_id=destination_uri.repo_id,
@@ -119,7 +113,7 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
         )
         import shutil
 
-        if cache_data_path.is_dir:
+        if cache_data_path.is_dir():
             shutil.copytree(cache_data_path, destination_path, dirs_exist_ok=True)
         else:
             pathlib.Path(destination_path).parent.mkdir(parents=True, exist_ok=True)
@@ -134,29 +128,23 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
         return pathlib.Path(cache_path).read_bytes()
 
     def exists(self, uri: HuggingFaceRepoUri) -> bool:
-        repo_objects = self._client.get_paths_info(
-            repo_type=uri.repo_type, repo_id=uri.repo_id, paths=[uri.path]
-        )
+        repo_objects = self._client.get_paths_info(repo_type=uri.repo_type, repo_id=uri.repo_id, paths=[uri.path])
         return len(repo_objects) > 0
 
     def calculate_data_hash(self, *, data: bytes) -> dict[str, str]:
         import hashlib
 
-        header = f"blob {len(data)}\0".encode("utf-8")
+        header = f"blob {len(data)}\0".encode()
         hasher = hashlib.sha1(header)
         hasher.update(data)
         return {"GitBlobHash": hasher.hexdigest()}
 
     def get_info(self, uri: HuggingFaceRepoUri) -> interfaces.DataInfo:
-        repo_objects = self._client.get_paths_info(
-            repo_type=uri.repo_type, repo_id=uri.repo_id, paths=[uri.path]
-        )
+        repo_objects = self._client.get_paths_info(repo_type=uri.repo_type, repo_id=uri.repo_id, paths=[uri.path])
         if not repo_objects:
             raise ValueError(f"Uri {uri} was not found.")
         if len(repo_objects) > 1:
-            raise ValueError(
-                f"Uri {uri} was found more than once. This cannot happen. {repo_objects}"
-            )
+            raise ValueError(f"Uri {uri} was found more than once. This cannot happen. {repo_objects}")
         repo_object = repo_objects[0]
 
         if isinstance(repo_object, hf_api.RepoFile):
@@ -184,6 +172,4 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
                 hashes={"GitTreeHash": repo_object.tree_id},
             )
         else:
-            raise ValueError(
-                f"Got repo object that is neither RepoFile nor RepoFolder: {repo_object}"
-            )
+            raise ValueError(f"Got repo object that is neither RepoFile nor RepoFolder: {repo_object}")

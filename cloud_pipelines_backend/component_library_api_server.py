@@ -4,13 +4,12 @@ import datetime
 import hashlib
 from typing import Any
 
-import yaml
 import sqlalchemy as sql
+import yaml
 from sqlalchemy import orm
 
 from . import backend_types_sql as bts
-from . import errors
-from . import component_structures
+from . import component_structures, errors
 
 
 def calculate_digest_for_component_text(text: str) -> str:
@@ -106,9 +105,7 @@ class ComponentService:
             raise errors.ItemNotFoundError(f"Component with {digest=} was not found.")
         return ComponentResponse.from_db(component_row)
 
-    def add_from_text(
-        self, *, session: orm.Session, component_text: str
-    ) -> ComponentResponse:
+    def add_from_text(self, *, session: orm.Session, component_text: str) -> ComponentResponse:
         # TODO: !! validate component
         digest = calculate_digest_for_component_text(component_text)
         component_spec = load_component_spec_from_text_and_validate(component_text)
@@ -194,15 +191,9 @@ class PublishedComponentService:
         if not include_deprecated:
             query = query.filter(PublishedComponentRow.deprecated == False)
         if name_substring:
-            query = query.filter(
-                PublishedComponentRow.name.icontains(name_substring, autoescape=True)
-            )
+            query = query.filter(PublishedComponentRow.name.icontains(name_substring, autoescape=True))
         if published_by_substring:
-            query = query.filter(
-                PublishedComponentRow.published_by.icontains(
-                    published_by_substring, autoescape=True
-                )
-            )
+            query = query.filter(PublishedComponentRow.published_by.icontains(published_by_substring, autoescape=True))
         published_component_rows = session.scalars(query).all()
         return ListPublishedComponentsResponse(
             published_components=[
@@ -227,23 +218,19 @@ class PublishedComponentService:
         component_text = component_ref.text
         digest = None
         if component_text:
-            component_response = component_service.add_from_text(
-                session=session, component_text=component_text
-            )
+            component_response = component_service.add_from_text(session=session, component_text=component_text)
             digest = component_response.digest
         else:
             # We currently don't load from URL for security reasons.
             if component_ref.digest:
-                existing_component_row = component_service.get(
-                    session=session, digest=component_ref.digest
-                )
+                existing_component_row = component_service.get(session=session, digest=component_ref.digest)
                 if existing_component_row:
                     # Component with such digest already exists int he DB.
                     component_text = existing_component_row.text
                     digest = component_ref.digest
             if not (digest and component_text):
                 raise ValueError(
-                    f"Component text is missing, cannot get component by digest (or digest is missing). Currently we cannot get component by URL for security reasons (you can get text from url yourself before publishing)."
+                    "Component text is missing, cannot get component by digest (or digest is missing). Currently we cannot get component by URL for security reasons (you can get text from url yourself before publishing)."
                 )
 
         component_spec = load_component_spec_from_text_and_validate(component_text)
@@ -280,9 +267,7 @@ class PublishedComponentService:
         key = (digest, user_name)
         published_component_row = session.get(PublishedComponentRow, key)
         if not published_component_row:
-            raise errors.ItemNotFoundError(
-                f"PublishedComponent with {key=} was not found."
-            )
+            raise errors.ItemNotFoundError(f"PublishedComponent with {key=} was not found.")
         if deprecated is not None:
             published_component_row.deprecated = deprecated
         if superseded_by is not None:
@@ -336,9 +321,7 @@ class ComponentLibraryRow(bts._TableBase):
     __tablename__ = "component_library"
 
     # Id can be set manually
-    id: orm.Mapped[str] = orm.mapped_column(
-        primary_key=True, init=False, insert_default=bts.generate_unique_id
-    )
+    id: orm.Mapped[str] = orm.mapped_column(primary_key=True, init=False, insert_default=bts.generate_unique_id)
     name: orm.Mapped[str]
     # root_folder: ComponentLibraryFolder # Store the whole structure as JSON
     #    name: str
@@ -371,9 +354,7 @@ class ComponentLibraryRow(bts._TableBase):
         if id.startswith(USER_LIBRARY_ID_PREFIX):
             user_name = id.partition(":")[2]
         else:
-            raise ValueError(
-                f"make_empty_user_library only supports user component libraries."
-            )
+            raise ValueError("make_empty_user_library only supports user component libraries.")
 
         name = f"{user_name} components"
 
@@ -437,25 +418,17 @@ class ListComponentLibrariesResponse:
 
 
 class ComponentLibraryService:
-    def list(
-        self, *, session: orm.Session, name_substring: str | None = None
-    ) -> ListComponentLibrariesResponse:
+    def list(self, *, session: orm.Session, name_substring: str | None = None) -> ListComponentLibrariesResponse:
         # TODO: Implement filtering by user, URL
         # TODO: Implement visibility/access control
-        query = sql.select(ComponentLibraryRow).filter(
-            ComponentLibraryRow.hide_from_search == False
-        )
+        query = sql.select(ComponentLibraryRow).filter(ComponentLibraryRow.hide_from_search == False)
         if name_substring:
-            query = query.filter(
-                ComponentLibraryRow.name.icontains(name_substring, autoescape=True)
-            )
+            query = query.filter(ComponentLibraryRow.name.icontains(name_substring, autoescape=True))
         session.rollback()
         component_library_rows = session.scalars(query).all()
         response = ListComponentLibrariesResponse(
             component_libraries=[
-                ComponentLibraryResponse.from_db(
-                    component_library_row, include_root_folder=False
-                )
+                ComponentLibraryResponse.from_db(component_library_row, include_root_folder=False)
                 for component_library_row in component_library_rows
             ]
         )
@@ -475,13 +448,9 @@ class ComponentLibraryService:
             # Handling empty user Library
             if id.startswith(USER_LIBRARY_ID_PREFIX):
                 library_user_name = id.removeprefix(USER_LIBRARY_ID_PREFIX)
-                library_row = ComponentLibraryRow.make_empty_user_library(
-                    library_user_name
-                )
+                library_row = ComponentLibraryRow.make_empty_user_library(library_user_name)
             else:
-                raise errors.ItemNotFoundError(
-                    f"ComponentLibrary with {id=} was not found."
-                )
+                raise errors.ItemNotFoundError(f"ComponentLibrary with {id=} was not found.")
         response = ComponentLibraryResponse.from_db(library_row)
         if include_component_texts:
             assert response.root_folder
@@ -491,15 +460,11 @@ class ComponentLibraryService:
         return response
 
     @staticmethod
-    def _fill_component_texts_for_library_folder(
-        session: orm.Session, library_folder: ComponentLibraryFolder
-    ):
+    def _fill_component_texts_for_library_folder(session: orm.Session, library_folder: ComponentLibraryFolder):
         for component_ref in library_folder.components or []:
             component_row = session.get(ComponentRow, component_ref.digest)
             if not component_row:
-                raise errors.ItemNotFoundError(
-                    f"Component with {component_ref.digest=} was not found"
-                )
+                raise errors.ItemNotFoundError(f"Component with {component_ref.digest=} was not found")
             component_ref.text = component_row.text
         for child_folder in library_folder.folders or []:
             ComponentLibraryService._fill_component_texts_for_library_folder(
@@ -520,14 +485,12 @@ class ComponentLibraryService:
         service = PublishedComponentService()
         session.rollback()
         component_count = 0
-        for (
-            component_ref
-        ) in ComponentLibraryService._recursively_iterate_over_all_component_refs_in_library_folder(
+        for component_ref in ComponentLibraryService._recursively_iterate_over_all_component_refs_in_library_folder(
             library.root_folder
         ):
             if not component_ref.text:
                 # TODO: Support publishing component from URL
-                raise ValueError(f"Currently every library component must have text.")
+                raise ValueError("Currently every library component must have text.")
             digest = calculate_digest_for_component_text(component_ref.text)
             if publish_components:
                 try:
@@ -586,13 +549,9 @@ class ComponentLibraryService:
         response = ComponentLibraryResponse.from_db(component_library_row)
         return response
 
-    def _initialize_empty_default_library_if_missing(
-        self, *, session: orm.Session, published_by: str
-    ):
+    def _initialize_empty_default_library_if_missing(self, *, session: orm.Session, published_by: str):
         session.rollback()
-        existing_default_component_library = session.get(
-            ComponentLibraryRow, DEFAULT_COMPONENT_LIBRARY_ID
-        )
+        existing_default_component_library = session.get(ComponentLibraryRow, DEFAULT_COMPONENT_LIBRARY_ID)
         if existing_default_component_library:
             return
         current_time = _get_current_time()
@@ -625,17 +584,11 @@ class ComponentLibraryService:
             # Handling empty user Library
             if id.startswith(USER_LIBRARY_ID_PREFIX):
                 library_user_name = id.removeprefix(USER_LIBRARY_ID_PREFIX)
-                component_library_row = ComponentLibraryRow.make_empty_user_library(
-                    library_user_name
-                )
+                component_library_row = ComponentLibraryRow.make_empty_user_library(library_user_name)
                 session.add(component_library_row)
             else:
-                raise errors.ItemNotFoundError(
-                    f"ComponentLibrary with {id=} was not found."
-                )
-        owners = [component_library_row.published_by] + (
-            component_library_row.extra_owners or []
-        )
+                raise errors.ItemNotFoundError(f"ComponentLibrary with {id=} was not found.")
+        owners = [component_library_row.published_by] + (component_library_row.extra_owners or [])
         if user_name not in owners:
             raise errors.PermissionError(
                 f"User {user_name} does not have permission to update the component library {id}. {owners=}"
@@ -654,9 +607,7 @@ class ComponentLibraryService:
         component_library_row.updated_at = new_component_library_row.updated_at
         component_library_row.name = new_component_library_row.name
         component_library_row.annotations = new_component_library_row.annotations
-        component_library_row.component_count = (
-            new_component_library_row.component_count
-        )
+        component_library_row.component_count = new_component_library_row.component_count
         response = ComponentLibraryResponse.from_db(component_library_row)
         session.commit()
         return response
@@ -669,8 +620,7 @@ class ComponentLibraryService:
             yield from ComponentLibraryService._recursively_iterate_over_all_component_refs_in_library_folder(
                 child_folder
             )
-        for component_ref in library_folder.components or []:
-            yield component_ref
+        yield from library_folder.components or []
 
 
 ### UserService
@@ -681,9 +631,7 @@ class UserRow(bts._TableBase):
 
     # Unique user name
     id: orm.Mapped[str] = orm.mapped_column(primary_key=True)
-    component_library_pin_ids: orm.Mapped[list[str] | None] = orm.mapped_column(
-        default=None
-    )
+    component_library_pin_ids: orm.Mapped[list[str] | None] = orm.mapped_column(default=None)
     extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
 
 
@@ -701,34 +649,22 @@ class UserService:
         ]
 
     # ! User name must be set from Authentication and not exposed as an API parameter
-    def get_component_library_pins(
-        self, *, session: orm.Session, user_name: str
-    ) -> UserComponentLibraryPinsResponse:
+    def get_component_library_pins(self, *, session: orm.Session, user_name: str) -> UserComponentLibraryPinsResponse:
         session.rollback()
         user_row = session.get(UserRow, user_name)
         if user_row and user_row.component_library_pin_ids is not None:
-            return UserComponentLibraryPinsResponse(
-                component_library_ids=user_row.component_library_pin_ids
-            )
+            return UserComponentLibraryPinsResponse(component_library_ids=user_row.component_library_pin_ids)
         return UserComponentLibraryPinsResponse(
-            component_library_ids=self._get_default_pinned_library_ids_for_user_name(
-                user_name
-            ),
+            component_library_ids=self._get_default_pinned_library_ids_for_user_name(user_name),
         )
 
-    def set_component_library_pins(
-        self, *, session: orm.Session, user_name: str, component_library_ids: list[str]
-    ):
+    def set_component_library_pins(self, *, session: orm.Session, user_name: str, component_library_ids: list[str]):
         # Security note: User can try to pin libraries they don't have access to.
         # But they won't be able to request their contents (when we implement visibility/access control).
         # TODO: Verify that library IDs actually exist.
         session.rollback()
         user_row = session.get(UserRow, user_name)
-        if (
-            not user_row
-            and component_library_ids
-            == self._get_default_pinned_library_ids_for_user_name(user_name)
-        ):
+        if not user_row and component_library_ids == self._get_default_pinned_library_ids_for_user_name(user_name):
             return
         if not user_row:
             user_row = UserRow(id=user_name)

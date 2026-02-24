@@ -1,10 +1,8 @@
 """Tests for the request_middleware module in instrumentation."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
-from starlette.requests import Request
-from starlette.responses import Response
 from starlette.applications import Starlette
+from starlette.responses import Response
 from starlette.testclient import TestClient
 
 from cloud_pipelines_backend.instrumentation import contextual_logging
@@ -86,9 +84,7 @@ class TestRequestContextMiddleware:
         @app.route("/test")
         def test_route(request):
             # Capture the request_id during request processing
-            request_ids_seen.append(
-                contextual_logging.get_context_metadata("request_id")
-            )
+            request_ids_seen.append(contextual_logging.get_context_metadata("request_id"))
             return Response("ok")
 
         client = TestClient(app)
@@ -185,9 +181,7 @@ class TestRequestContextMiddleware:
 
         @app.route("/test")
         def test_route(request):
-            request_id_during_exception = contextual_logging.get_context_metadata(
-                "request_id"
-            )
+            request_id_during_exception = contextual_logging.get_context_metadata("request_id")
             assert request_id_during_exception is not None
             raise ValueError("Test exception")
 
@@ -207,16 +201,12 @@ class TestRequestContextMiddleware:
 
         @app.route("/route1")
         def route1(request):
-            request_ids_by_route["route1"] = contextual_logging.get_context_metadata(
-                "request_id"
-            )
+            request_ids_by_route["route1"] = contextual_logging.get_context_metadata("request_id")
             return Response("route1")
 
         @app.route("/route2")
         def route2(request):
-            request_ids_by_route["route2"] = contextual_logging.get_context_metadata(
-                "request_id"
-            )
+            request_ids_by_route["route2"] = contextual_logging.get_context_metadata("request_id")
             return Response("route2")
 
         client = TestClient(app)
@@ -232,12 +222,8 @@ class TestRequestContextMiddleware:
         assert request_ids_by_route["route1"] != request_ids_by_route["route2"]
 
         # Response headers should match
-        assert (
-            response1.headers["x-tangle-request-id"] == request_ids_by_route["route1"]
-        )
-        assert (
-            response2.headers["x-tangle-request-id"] == request_ids_by_route["route2"]
-        )
+        assert response1.headers["x-tangle-request-id"] == request_ids_by_route["route1"]
+        assert response2.headers["x-tangle-request-id"] == request_ids_by_route["route2"]
 
 
 class TestRequestContextMiddlewareIntegration:
@@ -264,9 +250,7 @@ class TestRequestContextMiddlewareIntegration:
         class TestHandler(logging.Handler):
             def emit(self, record):
                 # In real usage, LoggingContextFilter would add request_id to logs
-                current_request_id = contextual_logging.get_context_metadata(
-                    "request_id"
-                )
+                current_request_id = contextual_logging.get_context_metadata("request_id")
                 if current_request_id:
                     logged_request_ids.append(current_request_id)
 
@@ -299,19 +283,13 @@ class TestRequestContextMiddlewareIntegration:
 
         def helper_function():
             """Helper function that accesses request_id."""
-            request_ids_collected.append(
-                contextual_logging.get_context_metadata("request_id")
-            )
+            request_ids_collected.append(contextual_logging.get_context_metadata("request_id"))
 
         @app.route("/test")
         def test_route(request):
-            request_ids_collected.append(
-                contextual_logging.get_context_metadata("request_id")
-            )
+            request_ids_collected.append(contextual_logging.get_context_metadata("request_id"))
             helper_function()
-            request_ids_collected.append(
-                contextual_logging.get_context_metadata("request_id")
-            )
+            request_ids_collected.append(contextual_logging.get_context_metadata("request_id"))
             return Response("ok")
 
         client = TestClient(app)
@@ -319,9 +297,5 @@ class TestRequestContextMiddlewareIntegration:
 
         # All three captures should have the same request_id
         assert len(request_ids_collected) == 3
-        assert (
-            request_ids_collected[0]
-            == request_ids_collected[1]
-            == request_ids_collected[2]
-        )
+        assert request_ids_collected[0] == request_ids_collected[1] == request_ids_collected[2]
         assert request_ids_collected[0] == response.headers["x-tangle-request-id"]

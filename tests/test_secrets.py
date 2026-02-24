@@ -1,11 +1,9 @@
-from typing import Callable
+from collections.abc import Callable
 from unittest import mock
 
 from sqlalchemy import orm
 
-from cloud_pipelines_backend import api_server_sql
-from cloud_pipelines_backend import component_structures
-from cloud_pipelines_backend import database_ops
+from cloud_pipelines_backend import api_server_sql, component_structures, database_ops
 from cloud_pipelines_backend.launchers import interfaces as launcher_interfaces
 
 
@@ -33,9 +31,7 @@ def test_running_pipeline_with_secrets():
     task_spec1 = component_structures.TaskSpec(
         component_ref=component_structures.ComponentReference(spec=component_spec),
         arguments={
-            secret_input_name: component_structures.DynamicDataArgument(
-                dynamic_data={"secret": {"name": secret_name}}
-            )
+            secret_input_name: component_structures.DynamicDataArgument(dynamic_data={"secret": {"name": secret_name}})
         },
     )
 
@@ -44,9 +40,7 @@ def test_running_pipeline_with_secrets():
         component_ref=component_structures.ComponentReference(spec=component_spec),
         arguments={
             secret_input_name: component_structures.GraphInputArgument(
-                graph_input=component_structures.GraphInputReference(
-                    input_name=graph_input_name
-                )
+                graph_input=component_structures.GraphInputReference(input_name=graph_input_name)
             )
         },
     )
@@ -103,9 +97,7 @@ def test_running_pipeline_with_secrets():
             status=launcher_interfaces.ContainerStatus.PENDING,
             to_dict=lambda: {"foo": "bar"},
         )
-        launch_container_task_mock = mock.MagicMock(
-            return_value=launched_container_mock
-        )
+        launch_container_task_mock = mock.MagicMock(return_value=launched_container_mock)
         launcher_mock = mock.MagicMock(launch_container_task=launch_container_task_mock)
         data_root_uri = "file:///tmp/artifacts"
         logs_root_uri = "file:///tmp/logs"

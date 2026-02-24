@@ -4,7 +4,6 @@ import abc
 import dataclasses
 import datetime
 import enum
-
 import typing
 from typing import Any
 
@@ -14,9 +13,7 @@ import typing_extensions
 from .. import component_structures as structures
 
 _T = typing.TypeVar("_T")
-_TLaunchedContainer = typing.TypeVar(
-    "_TLaunchedContainer", bound="LaunchedContainer", covariant=True
-)
+_TLaunchedContainer = typing.TypeVar("_TLaunchedContainer", bound="LaunchedContainer", covariant=True)
 
 
 __all__ = [
@@ -52,9 +49,7 @@ class ContainerTaskLauncher(typing.Generic[_TLaunchedContainer], abc.ABC):
     ) -> _TLaunchedContainer:
         raise NotImplementedError()
 
-    def deserialize_launched_container_from_dict(
-        self, launched_container_dict: dict[str, Any]
-    ) -> _TLaunchedContainer:
+    def deserialize_launched_container_from_dict(self, launched_container_dict: dict[str, Any]) -> _TLaunchedContainer:
         raise NotImplementedError()
 
     def get_refreshed_launched_container_from_dict(
@@ -72,15 +67,6 @@ class ContainerStatus(str, enum.Enum):
 
 
 class LaunchedContainer(abc.ABC):
-
-    # @classmethod
-    # def get(cls: typing.Type[_TLaunchedContainer]) -> _TLaunchedContainer:
-    #     raise NotImplementedError()
-
-    # @property
-    # def id(self) -> str:
-    #     raise NotImplementedError()
-
     @property
     def status(self) -> ContainerStatus:
         raise NotImplementedError()

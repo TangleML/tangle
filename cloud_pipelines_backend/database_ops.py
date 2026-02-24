@@ -1,3 +1,5 @@
+from typing import Any
+
 import sqlalchemy
 
 from . import backend_types_sql as bts
@@ -5,7 +7,7 @@ from . import backend_types_sql as bts
 
 def create_db_engine_and_migrate_db(
     database_uri: str,
-    **kwargs,
+    **kwargs: Any,
 ) -> sqlalchemy.Engine:
     db_engine = create_db_engine(database_uri=database_uri, **kwargs)
     bts._TableBase.metadata.create_all(db_engine)
@@ -13,23 +15,23 @@ def create_db_engine_and_migrate_db(
     return db_engine
 
 
-def initialize_and_migrate_db(db_engine: sqlalchemy.Engine):
+def initialize_and_migrate_db(db_engine: sqlalchemy.Engine) -> None:
     bts._TableBase.metadata.create_all(db_engine)
     migrate_db(db_engine=db_engine)
 
 
 def create_db_engine(
     database_uri: str,
-    **kwargs,
+    **kwargs: Any,
 ) -> sqlalchemy.Engine:
     if database_uri.startswith("mysql://"):
         try:
-            import MySQLdb
+            import MySQLdb  # noqa: F401 — feature detection; unused if available
         except ImportError:
             # Using PyMySQL instead of missing MySQLdb
             database_uri = database_uri.replace("mysql://", "mysql+pymysql://")
 
-    create_engine_kwargs = {}
+    create_engine_kwargs: dict[str, Any] = {}
     if database_uri == "sqlite://":
         create_engine_kwargs["poolclass"] = sqlalchemy.pool.StaticPool
 
@@ -54,7 +56,7 @@ def create_db_engine(
     return db_engine
 
 
-def migrate_db(db_engine: sqlalchemy.Engine):
+def migrate_db(db_engine: sqlalchemy.Engine) -> None:
     # # Example:
     # sqlalchemy.Index(
     #     "ix_pipeline_run_created_by_created_at_desc",
@@ -74,6 +76,6 @@ def migrate_db(db_engine: sqlalchemy.Engine):
     # bts.ExecutionNode.__table__.indexes.remove(index1)
     # Or we need to avoid calling the Index constructor.
 
-    for index in bts.ExecutionNode.__table__.indexes:
+    for index in bts.ExecutionNode.__table__.indexes:  # type: ignore[attr-defined]
         if index.name == "ix_execution_node_container_execution_cache_key":
             index.create(db_engine, checkfirst=True)

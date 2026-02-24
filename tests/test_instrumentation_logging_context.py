@@ -1,6 +1,7 @@
 """Tests for the logging_context module in instrumentation."""
 
 import pytest
+
 from cloud_pipelines_backend.instrumentation import contextual_logging
 from cloud_pipelines_backend.instrumentation.api_tracing import generate_request_id
 
@@ -81,14 +82,10 @@ class TestLoggingContextManager:
 
     def test_context_manager_with_multiple_keys(self):
         """Test that context manager handles multiple metadata keys."""
-        with contextual_logging.logging_context(
-            request_id="req123", execution_id="exec456", pipeline_run_id="run789"
-        ):
+        with contextual_logging.logging_context(request_id="req123", execution_id="exec456", pipeline_run_id="run789"):
             assert contextual_logging.get_context_metadata("request_id") == "req123"
             assert contextual_logging.get_context_metadata("execution_id") == "exec456"
-            assert (
-                contextual_logging.get_context_metadata("pipeline_run_id") == "run789"
-            )
+            assert contextual_logging.get_context_metadata("pipeline_run_id") == "run789"
 
         assert contextual_logging.get_context_metadata("request_id") is None
         assert contextual_logging.get_context_metadata("execution_id") is None
@@ -106,10 +103,9 @@ class TestLoggingContextManager:
         """Test that context manager restores metadata even when exception occurs."""
         test_id = "exception_test"
 
-        with pytest.raises(ValueError):
-            with contextual_logging.logging_context(request_id=test_id):
-                assert contextual_logging.get_context_metadata("request_id") == test_id
-                raise ValueError("Test exception")
+        with pytest.raises(ValueError), contextual_logging.logging_context(request_id=test_id):
+            assert contextual_logging.get_context_metadata("request_id") == test_id
+            raise ValueError("Test exception")
 
         # Metadata should be cleared even after exception
         assert contextual_logging.get_context_metadata("request_id") is None
@@ -151,9 +147,7 @@ class TestLoggingContextManager:
 
     def test_context_manager_preserves_existing_metadata(self):
         """Test that nested context preserves existing metadata not being overwritten."""
-        with contextual_logging.logging_context(
-            request_id="req123", execution_id="exec456"
-        ):
+        with contextual_logging.logging_context(request_id="req123", execution_id="exec456"):
             assert contextual_logging.get_context_metadata("request_id") == "req123"
             assert contextual_logging.get_context_metadata("execution_id") == "exec456"
 
@@ -161,13 +155,8 @@ class TestLoggingContextManager:
             with contextual_logging.logging_context(pipeline_run_id="run789"):
                 # Previous values should still be accessible
                 assert contextual_logging.get_context_metadata("request_id") == "req123"
-                assert (
-                    contextual_logging.get_context_metadata("execution_id") == "exec456"
-                )
-                assert (
-                    contextual_logging.get_context_metadata("pipeline_run_id")
-                    == "run789"
-                )
+                assert contextual_logging.get_context_metadata("execution_id") == "exec456"
+                assert contextual_logging.get_context_metadata("pipeline_run_id") == "run789"
 
             # After inner exits, pipeline_run_id is gone but others remain
             assert contextual_logging.get_context_metadata("request_id") == "req123"

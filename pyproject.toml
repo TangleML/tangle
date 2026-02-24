@@ -19,9 +19,12 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "black>=26.1.0",
+    "mypy>=1.15.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.25.2",
+    "pytest-cov>=6.1.0",
+    "ruff>=0.11.0",
+    "types-pyyaml>=6.0.12.20250915",
 ]
 huggingface = [
     "huggingface-hub[oauth]>=0.35.3",
@@ -29,4 +32,96 @@ huggingface = [
 
 [tool.setuptools.packages.find]
 include = ["cloud_pipelines_backend*"]
-namespaces = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes (unused imports, undefined names, etc.)
+    "I",      # isort (import sorting/grouping)
+    "UP",     # pyupgrade (modern Python syntax)
+    "B",      # flake8-bugbear (common bugs and design problems)
+    "SIM",    # flake8-simplify (simplifiable code)
+    "RUF",    # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E711",   # None comparison — SQLAlchemy requires `== None` for `IS NULL`
+    "E712",   # True/False comparison — SQLAlchemy requires `== True` for SQL generation
+    "E741",   # ambiguous variable name
+    "B024",   # abstract class without abstract method — uses raise NotImplementedError pattern
+    "B905",   # zip without strict=
+    "RUF005", # collection concatenation style (preference)
+    "RUF012", # mutable class default — required pattern for SQLAlchemy/pydantic models
+    "RUF015", # next() vs [0] (preference)
+    "SIM108", # ternary operator (preference)
+    "SIM116", # dict lookup vs if/elif (preference)
+    "UP007",  # X | Y union syntax (keep Optional[] for readability)
+    "UP031",  # printf string formatting (% formatting reads well for hex/padding)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"start_local.py" = [
+    "E402",   # script uses section-based import + config pattern
+    "E731",   # lambda assignment is fine in scripts
+]
+"tests/**" = [
+    "B011",   # assert False
+    "B018",   # useless expression (common in tests)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cloud_pipelines_backend"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+ignore_missing_imports = true
+show_error_codes = true
+show_column_numbers = true
+disable_error_code = [
+    "no-any-return",   # Too noisy for now — many functions return untyped library results
+    "return",          # Missing return statements in functions with complex control flow
+]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+check_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "-q",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests that require external services",
+]
+
+[tool.coverage.run]
+source = ["cloud_pipelines_backend"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

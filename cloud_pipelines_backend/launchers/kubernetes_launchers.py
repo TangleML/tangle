@@ -7,19 +7,18 @@ import logging
 import os
 import pathlib
 import typing
-from typing import Any, Optional
-
-from kubernetes import client as k8s_client_lib
-from kubernetes import watch as k8s_watch_lib
+from typing import Any
 
 from cloud_pipelines.orchestration.launchers import naming_utils
 from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_provider_interfaces,
 )
 from cloud_pipelines.orchestration.storage_providers import local_storage
+from kubernetes import client as k8s_client_lib
+from kubernetes import watch as k8s_watch_lib
+
 from .. import component_structures as structures
-from . import container_component_utils
-from . import interfaces
+from . import container_component_utils, interfaces
 
 if typing.TYPE_CHECKING:
     from google.cloud import storage
@@ -35,12 +34,8 @@ _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY = "cloud-pipelines.net"
 _KUBERNETES_LAUNCHER_ANNOTATION_KEY = "cloud-pipelines.net/launchers.kubernetes"
 # ComponentSpec annotation keys
 RESOURCES_CPU_ANNOTATION_KEY = "cloud-pipelines.net/launchers/generic/resources.cpu"
-RESOURCES_MEMORY_ANNOTATION_KEY = (
-    "cloud-pipelines.net/launchers/generic/resources.memory"
-)
-RESOURCES_ACCELERATORS_ANNOTATION_KEY = (
-    "cloud-pipelines.net/launchers/generic/resources.accelerators"
-)
+RESOURCES_MEMORY_ANNOTATION_KEY = "cloud-pipelines.net/launchers/generic/resources.memory"
+RESOURCES_ACCELERATORS_ANNOTATION_KEY = "cloud-pipelines.net/launchers/generic/resources.accelerators"
 
 
 _T = typing.TypeVar("_T")
@@ -160,9 +155,7 @@ class _KubernetesContainerLauncherBase:
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
 
         try:
-            k8s_client_lib.VersionApi(self._api_client).get_code(
-                _request_timeout=request_timeout
-            )
+            k8s_client_lib.VersionApi(self._api_client).get_code(_request_timeout=request_timeout)
         except Exception as ex:
             raise RuntimeError(
                 "Connection to the Kubernetes cluster does not seem to be working."
@@ -184,12 +177,8 @@ class _KubernetesContainerLauncherBase:
         pod_annotations: dict[str, str] | None = None,
         pod_service_account: str | None = None,
     ) -> k8s_client_lib.V1Pod:
-        if not isinstance(
-            component_spec.implementation, structures.ContainerImplementation
-        ):
-            raise interfaces.LauncherError(
-                f"Component must have container implementation. {component_spec=}"
-            )
+        if not isinstance(component_spec.implementation, structures.ContainerImplementation):
+            raise interfaces.LauncherError(f"Component must have container implementation. {component_spec=}")
         container_spec = component_spec.implementation.container
 
         volume_map: dict[str, k8s_client_lib.V1Volume] = {}
@@ -205,9 +194,7 @@ class _KubernetesContainerLauncherBase:
         def get_input_value(input_name: str) -> str:
             input_argument = input_arguments[input_name]
             if input_argument.is_dir:
-                raise interfaces.LauncherError(
-                    f"Cannot consume directory as value. {input_name=}, {input_argument=}"
-                )
+                raise interfaces.LauncherError(f"Cannot consume directory as value. {input_name=}, {input_argument=}")
             if input_argument.total_size > _MAX_INPUT_VALUE_SIZE:
                 raise interfaces.LauncherError(
                     f"Artifact is too big to consume as value. Consume it as file instead. {input_name=}, {input_argument=}"
@@ -219,9 +206,7 @@ class _KubernetesContainerLauncherBase:
                     raise interfaces.LauncherError(
                         f"Artifact data has no value and no uri. This cannot happen. {input_name=}, {input_argument=}"
                     )
-                uri_reader = self._storage_provider.make_uri(
-                    input_argument.uri
-                ).get_reader()
+                uri_reader = self._storage_provider.make_uri(input_argument.uri).get_reader()
                 try:
                     data = uri_reader.download_as_bytes()
                 except Exception as ex:
@@ -246,9 +231,7 @@ class _KubernetesContainerLauncherBase:
                     raise interfaces.LauncherError(
                         f"Artifact data has no value and no uri. This cannot happen. {input_name=}, {input_argument=}"
                     )
-                uri_writer = self._storage_provider.make_uri(
-                    input_argument.staging_uri
-                ).get_writer()
+                uri_writer = self._storage_provider.make_uri(input_argument.staging_uri).get_writer()
                 try:
                     uri_writer.upload_from_text(input_argument.value)
                 except Exception as ex:
@@ -260,14 +243,10 @@ class _KubernetesContainerLauncherBase:
                 input_argument.uri = uri
 
             container_path = (
-                container_inputs_root
-                / naming_utils.sanitize_file_name(input_name)
-                / _CONTAINER_FILE_NAME
+                container_inputs_root / naming_utils.sanitize_file_name(input_name) / _CONTAINER_FILE_NAME
             ).as_posix()
-            volume_name = naming_utils.sanitize_kubernetes_resource_name(
-                "inputs-" + input_name
-            )
-            volume, volume_mount = self._create_volume_and_volume_mount(
+            volume_name = naming_utils.sanitize_kubernetes_resource_name("inputs-" + input_name)
+            volume, volume_mount = self._create_volume_and_volume_mount(  # type: ignore[call-arg]
                 container_path=container_path,
                 artifact_uri=uri,
                 suggested_volume_name=volume_name,
@@ -280,14 +259,10 @@ class _KubernetesContainerLauncherBase:
         def get_output_path(output_name: str) -> str:
             uri = output_uris[output_name]
             container_path = (
-                container_outputs_root
-                / naming_utils.sanitize_file_name(output_name)
-                / _CONTAINER_FILE_NAME
+                container_outputs_root / naming_utils.sanitize_file_name(output_name) / _CONTAINER_FILE_NAME
             ).as_posix()
-            volume_name = naming_utils.sanitize_kubernetes_resource_name(
-                "outputs-" + output_name
-            )
-            volume, volume_mount = self._create_volume_and_volume_mount(
+            volume_name = naming_utils.sanitize_kubernetes_resource_name("outputs-" + output_name)
+            volume, volume_mount = self._create_volume_and_volume_mount(  # type: ignore[call-arg]
                 container_path=container_path,
                 artifact_uri=uri,
                 suggested_volume_name=volume_name,
@@ -307,8 +282,7 @@ class _KubernetesContainerLauncherBase:
         )
 
         container_env = [
-            k8s_client_lib.V1EnvVar(name=name, value=value)
-            for name, value in (container_spec.env or {}).items()
+            k8s_client_lib.V1EnvVar(name=name, value=value) for name, value in (container_spec.env or {}).items()
         ]
         main_container_spec = k8s_client_lib.V1Container(
             name=_MAIN_CONTAINER_NAME,
@@ -417,7 +391,7 @@ class _KubernetesPodLauncher(
         output_uris: dict[str, str],
         log_uri: str,
         annotations: dict[str, Any] | None = None,
-    ) -> "LaunchedKubernetesContainer":
+    ) -> LaunchedKubernetesContainer:
         namespace = self._choose_namespace(annotations=annotations)
 
         pod = self._prepare_kubernetes_pod(
@@ -445,9 +419,7 @@ class _KubernetesPodLauncher(
                 _request_timeout=self._request_timeout,
             )
         except Exception as ex:
-            raise interfaces.LauncherError(
-                f"Failed to create pod: {_kubernetes_serialize(pod)}"
-            ) from ex
+            raise interfaces.LauncherError(f"Failed to create pod: {_kubernetes_serialize(pod)}") from ex
 
         pod_name: str = created_pod.metadata.name
         pod_namespace: str = created_pod.metadata.namespace
@@ -464,27 +436,17 @@ class _KubernetesPodLauncher(
         )
         return launched_kubernetes_container
 
-    def get_refreshed_launched_container_from_dict(
-        self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesContainer":
-        launched_container = LaunchedKubernetesContainer.from_dict(
-            launched_container_dict, launcher=self
-        )
+    def get_refreshed_launched_container_from_dict(self, launched_container_dict: dict) -> LaunchedKubernetesContainer:
+        launched_container = LaunchedKubernetesContainer.from_dict(launched_container_dict, launcher=self)
         return launched_container.get_refreshed()
 
-    def deserialize_launched_container_from_dict(
-        self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesContainer":
-        launched_container = LaunchedKubernetesContainer.from_dict(
-            launched_container_dict, launcher=self
-        )
+    def deserialize_launched_container_from_dict(self, launched_container_dict: dict) -> LaunchedKubernetesContainer:
+        launched_container = LaunchedKubernetesContainer.from_dict(launched_container_dict, launcher=self)
         return launched_container
 
 
 # https://cloud.google.com/kubernetes-engine/docs/concepts/spot-vms
-KUBERNETES_GOOGLE_USE_SPOT_VMS_ANNOTATION_KEY = (
-    "cloud-pipelines.net/launchers/kubernetes/google/use_spot_vms"
-)
+KUBERNETES_GOOGLE_USE_SPOT_VMS_ANNOTATION_KEY = "cloud-pipelines.net/launchers/kubernetes/google/use_spot_vms"
 
 
 def _google_kubernetes_engine_accelerator_pod_postprocessor(
@@ -493,9 +455,7 @@ def _google_kubernetes_engine_accelerator_pod_postprocessor(
     if not annotations:
         return pod
 
-    accelerators_resource_request = annotations.get(
-        RESOURCES_ACCELERATORS_ANNOTATION_KEY
-    )
+    accelerators_resource_request = annotations.get(RESOURCES_ACCELERATORS_ANNOTATION_KEY)
     use_spot_vms = annotations.get(KUBERNETES_GOOGLE_USE_SPOT_VMS_ANNOTATION_KEY, False)
     pod = copy.deepcopy(pod)
     pod_spec: k8s_client_lib.V1PodSpec = pod.spec
@@ -512,9 +472,7 @@ def _google_kubernetes_engine_accelerator_pod_postprocessor(
         accelerators_dict = json.loads(accelerators_resource_request)
         nvidia_gpu_count = 0
         if len(accelerators_dict) > 1:
-            raise interfaces.LauncherError(
-                f"Multiple accelerator types were specified: {accelerators_dict=}"
-            )
+            raise interfaces.LauncherError(f"Multiple accelerator types were specified: {accelerators_dict=}")
         for resource_name, quantity in (accelerators_dict or {}).items():
             pod_spec.node_selector["cloud.google.com/gke-accelerator"] = resource_name
             if resource_name.startswith("nvidia"):
@@ -582,7 +540,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
-        gcs_client: "storage.Client | None" = None,
+        gcs_client: storage.Client | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
@@ -600,9 +558,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             api_client=api_client,
             request_timeout=request_timeout,
             pod_name_prefix=pod_name_prefix,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
-                gcs_client
-            ),
+            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(gcs_client),
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
@@ -616,7 +572,6 @@ class KubernetesWithGcsFuseContainerLauncher(GoogleKubernetesEngineLauncher):
 
 
 class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
-
     def __init__(
         self,
         pod_name: str,
@@ -648,22 +603,14 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         pod_status: k8s_client_lib.V1PodStatus = self._debug_pod.status
         if not pod_status or not pod_status.container_statuses:
             return None
-        container_statuses: list[k8s_client_lib.V1ContainerStatus] = (
-            pod_status.container_statuses
-        )
+        container_statuses: list[k8s_client_lib.V1ContainerStatus] = pod_status.container_statuses
         main_container_statuses = [
-            container_status
-            for container_status in container_statuses
-            if container_status.name == _MAIN_CONTAINER_NAME
+            container_status for container_status in container_statuses if container_status.name == _MAIN_CONTAINER_NAME
         ]
         if len(main_container_statuses) != 1:
-            raise RuntimeError(
-                f"Cannot get the main container status form the pod: {self._debug_pod}"
-            )
+            raise RuntimeError(f"Cannot get the main container status form the pod: {self._debug_pod}")
         main_container_status = main_container_statuses[0]
-        main_container_state: k8s_client_lib.V1ContainerState = (
-            main_container_status.state
-        )
+        main_container_state: k8s_client_lib.V1ContainerState = main_container_status.state
         return main_container_state
 
     def _get_main_container_terminated_state(
@@ -693,7 +640,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             return interfaces.ContainerStatus.ERROR
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         main_container_terminated_state = self._get_main_container_terminated_state()
         if main_container_terminated_state is None:
             return None
@@ -717,14 +664,10 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         main_container_state = self._get_main_container_state()
         if main_container_state is None:
             return None
-        terminated_state: k8s_client_lib.V1ContainerStateTerminated = (
-            main_container_state.terminated
-        )
+        terminated_state: k8s_client_lib.V1ContainerStateTerminated = main_container_state.terminated
         if terminated_state is not None:
             return terminated_state.started_at
-        running_state: k8s_client_lib.V1ContainerStateRunning = (
-            main_container_state.running
-        )
+        running_state: k8s_client_lib.V1ContainerStateRunning = main_container_state.running
         if running_state is not None:
             return running_state.started_at
         return None
@@ -741,10 +684,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         main_container_terminated_state = self._get_main_container_terminated_state()
         if main_container_terminated_state is None:
             return None
-        if (
-            main_container_terminated_state.message is None
-            and main_container_terminated_state.reason == "Error"
-        ):
+        if main_container_terminated_state.message is None and main_container_terminated_state.reason == "Error":
             # Do not confuse users with message-less error messages
             return None
         launcher_error_message = f"Kubernetes error. Reason: {main_container_terminated_state.reason}, message: {main_container_terminated_state.message}"
@@ -782,7 +722,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             launcher=launcher,
         )
 
-    def get_refreshed(self) -> "LaunchedKubernetesContainer":
+    def get_refreshed(self) -> LaunchedKubernetesContainer:
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
         pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
@@ -891,7 +831,7 @@ class _KubernetesJobLauncher(
         output_uris: dict[str, str],
         log_uri: str,
         annotations: dict[str, Any] | None = None,
-    ) -> "LaunchedKubernetesJob":
+    ) -> LaunchedKubernetesJob:
         namespace = self._choose_namespace(annotations=annotations)
 
         pod = self._prepare_kubernetes_pod(
@@ -913,12 +853,8 @@ class _KubernetesJobLauncher(
         assert pod.spec
         assert pod.spec.containers
 
-        MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
-            "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
-        )
-        num_nodes_annotation_str = (annotations or {}).get(
-            MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, 1
-        )
+        MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
+        num_nodes_annotation_str = (annotations or {}).get(MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, 1)
         enable_multi_node = num_nodes_annotation_str is not None
         num_nodes = int(num_nodes_annotation_str) if num_nodes_annotation_str else 1
         if not (0 < num_nodes <= 16):
@@ -929,9 +865,7 @@ class _KubernetesJobLauncher(
         if enable_multi_node:
             # Temporary implementation of implicitly passing multi-node information to the component code.
             # After testing, this implementation will be replaced by more explicit way to consume multi-node information (dynamicData arguments passed to component inputs).
-            MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME = (
-                "_TANGLE_MULTI_NODE_NUMBER_OF_NODES"
-            )
+            MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NUMBER_OF_NODES"
             MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 
             main_container_spec = pod.spec.containers[0]
@@ -991,9 +925,7 @@ class _KubernetesJobLauncher(
                 _request_timeout=self._request_timeout,
             )
         except Exception as ex:
-            raise interfaces.LauncherError(
-                f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}"
-            ) from ex
+            raise interfaces.LauncherError(f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}") from ex
 
         job_name: str = created_job.metadata.name
         job_namespace: str = created_job.metadata.namespace
@@ -1018,25 +950,16 @@ class _KubernetesJobLauncher(
         del annotations
         return job
 
-    def get_refreshed_launched_container_from_dict(
-        self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesJob":
-        launched_container = LaunchedKubernetesJob.from_dict(
-            launched_container_dict, launcher=self
-        )
+    def get_refreshed_launched_container_from_dict(self, launched_container_dict: dict) -> LaunchedKubernetesJob:
+        launched_container = LaunchedKubernetesJob.from_dict(launched_container_dict, launcher=self)
         return launched_container.get_refreshed()
 
-    def deserialize_launched_container_from_dict(
-        self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesJob":
-        launched_container = LaunchedKubernetesJob.from_dict(
-            launched_container_dict, launcher=self
-        )
+    def deserialize_launched_container_from_dict(self, launched_container_dict: dict) -> LaunchedKubernetesJob:
+        launched_container = LaunchedKubernetesJob.from_dict(launched_container_dict, launcher=self)
         return launched_container
 
 
 class LaunchedKubernetesJob(interfaces.LaunchedContainer):
-
     def __init__(
         self,
         job_name: str,
@@ -1071,12 +994,10 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         if not job_status:
             return interfaces.ContainerStatus.PENDING
         has_succeeded_condition = any(
-            condition.type == "Complete" and condition.status == "True"
-            for condition in job_status.conditions or []
+            condition.type == "Complete" and condition.status == "True" for condition in job_status.conditions or []
         )
         has_failed_condition = any(
-            condition.type == "Failed" and condition.status == "True"
-            for condition in job_status.conditions or []
+            condition.type == "Failed" and condition.status == "True" for condition in job_status.conditions or []
         )
         if has_failed_condition:
             return interfaces.ContainerStatus.FAILED
@@ -1091,7 +1012,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         return interfaces.ContainerStatus.RUNNING
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         if not self.has_ended:
             return None
         # Shortcut for succeeded jobs
@@ -1104,13 +1025,9 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             if pod.status and pod.status.container_statuses
         ]
         terminated_container_states = [
-            state.terminated
-            for state in main_container_states
-            if state and state.terminated
+            state.terminated for state in main_container_states if state and state.terminated
         ]
-        non_zero_exit_codes = [
-            state.exit_code for state in terminated_container_states if state.exit_code
-        ]
+        non_zero_exit_codes = [state.exit_code for state in terminated_container_states if state.exit_code]
         if len(non_zero_exit_codes) != 1:
             _logger.warning(
                 f"LaunchedKubernetesJob.exit_code: Expected exactly 1 non-zero exit code for failed job, but got {non_zero_exit_codes}."
@@ -1144,7 +1061,6 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
     @property
     def ended_at(self) -> datetime.datetime | None:
-        job = self._debug_job
         job_status = self._debug_job.status
         if not job_status:
             return None
@@ -1169,8 +1085,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         pod_dicts = None
         if self._debug_pods is not None:
             pod_dicts = [
-                _serialize_kubernetes_object_to_compact_dict(pod) if pod else None
-                for pod in self._debug_pods.values()
+                _serialize_kubernetes_object_to_compact_dict(pod) if pod else None for pod in self._debug_pods.values()
             ]
         result = {
             self.SERIALIZATION_ROOT_KEY: dict(
@@ -1187,9 +1102,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         return result
 
     @classmethod
-    def from_dict(
-        cls, d: dict[str, Any], launcher: _KubernetesJobLauncher | None = None
-    ) -> LaunchedKubernetesJob:
+    def from_dict(cls, d: dict[str, Any], launcher: _KubernetesJobLauncher | None = None) -> LaunchedKubernetesJob:
         d = d[cls.SERIALIZATION_ROOT_KEY]
         debug_job = _kubernetes_deserialize(d["debug_job"], cls=k8s_client_lib.V1Job)
         debug_pod_dicts = d.get("debug_pods")
@@ -1210,7 +1123,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             launcher=launcher,
         )
 
-    def get_refreshed(self) -> "LaunchedKubernetesJob":
+    def get_refreshed(self) -> LaunchedKubernetesJob:
         launcher = self._get_launcher()
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
         job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
@@ -1221,21 +1134,17 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         # Refreshing the job pods. We do not strictly need them.
         # But this information is useful for debugging and it will also allow slightly better status reporting.
         core_api_client = k8s_client_lib.CoreV1Api(launcher._api_client)
-        pod_list_response: k8s_client_lib.V1PodList = (
-            core_api_client.list_namespaced_pod(
-                namespace=self._namespace,
-                label_selector=f"job-name={self._job_name}",
-                watch=False,
-                _request_timeout=launcher._request_timeout,
-            )
+        pod_list_response: k8s_client_lib.V1PodList = core_api_client.list_namespaced_pod(
+            namespace=self._namespace,
+            label_selector=f"job-name={self._job_name}",
+            watch=False,
+            _request_timeout=launcher._request_timeout,
         )
         pod_map: dict[str, k8s_client_lib.V1Pod] = {}
         if job.spec.completion_mode == "Indexed":
             for pod in pod_list_response.items:
                 index_str = (
-                    pod.metadata.annotations.get(
-                        "batch.kubernetes.io/job-completion-index"
-                    )
+                    pod.metadata.annotations.get("batch.kubernetes.io/job-completion-index")
                     if pod.metadata and pod.metadata.annotations
                     else None
                 )
@@ -1246,8 +1155,8 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 pod_map[index_str] = pod
         else:
             for pod in pod_list_response.items:
-                index_str: str = pod.metadata.name
-                pod_map[index_str] = pod
+                index_str: str = pod.metadata.name  # type: ignore[no-redef]
+                pod_map[index_str] = pod  # type: ignore[index]
         new_launched_container = copy.copy(self)
         new_launched_container._debug_job = job
         new_launched_container._debug_pods = pod_map
@@ -1266,10 +1175,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         return log
 
     def _get_all_logs(self) -> dict[str, str]:
-        logs = {
-            pod_key: self._get_log_by_pod_key(pod.metadata.name)
-            for pod_key, pod in self._debug_pods.items()
-        }
+        logs = {pod_key: self._get_log_by_pod_key(pod.metadata.name) for pod_key, pod in self._debug_pods.items()}
         return logs
 
     def _merge_logs(self, logs: dict[str, str]) -> str:
@@ -1283,9 +1189,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             for line in log.splitlines():
                 timestamp, _, line = line.partition(" ")
                 all_log_lines.append(f"{timestamp} {pod_key} {line}")
-        all_log_lines.sort(
-            key=lambda line: line.partition(" ")[0]
-        )  # Sorting by timestamp
+        all_log_lines.sort(key=lambda line: line.partition(" ")[0])  # Sorting by timestamp
         return "\n".join(all_log_lines) + "\n"
 
     def get_log(self) -> str:
@@ -1305,9 +1209,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         # Uploading per-pod logs.
         # It's not ideal to construct new URIs ourselves. But Orchestrator only supports single log per container execution.
         for pod_key, log in all_logs.items():
-            uri_writer = launcher._storage_provider.make_uri(
-                self._log_uri + f".{pod_key}"
-            ).get_writer()
+            uri_writer = launcher._storage_provider.make_uri(self._log_uri + f".{pod_key}").get_writer()
             uri_writer.upload_from_text(log)
 
     def stream_log_lines(self) -> typing.Iterator[str]:
@@ -1348,9 +1250,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         _logger.info(f"Terminated job {self._job_name} in namespace {self._namespace}")
 
 
-class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
-    _KubernetesJobLauncher
-):
+class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(_KubernetesJobLauncher):
     def __init__(
         self,
         *,
@@ -1407,7 +1307,7 @@ def _kubernetes_serialize(obj) -> dict[str, Any]:
     return shallow_client.sanitize_for_serialization(obj)
 
 
-def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: typing.Type[_T]) -> _T:
+def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: type[_T]) -> _T:
     shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
     return shallow_client._ApiClient__deserialize(obj_dict, cls)
 

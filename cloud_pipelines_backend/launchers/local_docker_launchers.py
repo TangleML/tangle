@@ -3,18 +3,16 @@ import datetime
 import logging
 import pathlib
 import typing
-from typing import Any, Optional
+from typing import Any
 
 import docker
-import docker.types
 import docker.models.containers
-
+import docker.types
 from cloud_pipelines.orchestration.launchers import naming_utils
 from cloud_pipelines.orchestration.storage_providers import local_storage
-from .. import component_structures as structures
-from . import container_component_utils
-from . import interfaces
 
+from .. import component_structures as structures
+from . import container_component_utils, interfaces
 
 _logger = logging.getLogger(__name__)
 
@@ -39,12 +37,7 @@ def _construct_docker_volume_mount(
     container_path_obj = pathlib.PurePosixPath(container_path)
     host_path_obj = pathlib.Path(artifact_uri)
     if not container_path_obj.is_absolute():
-        raise ValueError(
-            f"When creating a mount, container path must be absolute, but got {container_path}."
-        )
-    # Maybe it's OK to allow relative paths. (To enable portable self-contained local DB+data directory.)
-    # if not host_path_obj.is_absolute():
-    #     raise ValueError(f"When creating a mount, host path must be absolute, but got {host_path_obj}.")
+        raise ValueError(f"When creating a mount, container path must be absolute, but got {container_path}.")
     host_path_obj = host_path_obj.resolve()
     if container_path_obj.name != host_path_obj.name:
         raise interfaces.LauncherError(
@@ -61,12 +54,10 @@ def _construct_docker_volume_mount(
     )
 
 
-class DockerContainerLauncher(
-    interfaces.ContainerTaskLauncher["LaunchedDockerContainer"]
-):
+class DockerContainerLauncher(interfaces.ContainerTaskLauncher["LaunchedDockerContainer"]):
     """Launcher that uses Docker installed locally"""
 
-    def __init__(self, client: Optional[docker.DockerClient] = None):
+    def __init__(self, client: docker.DockerClient | None = None):
         try:
             self._docker_client = client or docker.from_env(timeout=5)
         except Exception as ex:
@@ -86,9 +77,7 @@ class DockerContainerLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedDockerContainer":
-        container_spec = component_spec.implementation.container
-        input_names = list(input_arguments.keys())
-        output_names = list(output_uris.keys())
+        container_spec = component_spec.implementation.container  # type: ignore[union-attr]
 
         # TODO: Validate the output URIs. Don't forget about (`C:\*` and `C:/*` paths)
 
@@ -104,9 +93,7 @@ class DockerContainerLauncher(
         def get_input_value(input_name: str) -> str:
             input_argument = input_arguments[input_name]
             if input_argument.is_dir:
-                raise interfaces.LauncherError(
-                    f"Cannot consume directory as value. {input_name=}, {input_argument=}"
-                )
+                raise interfaces.LauncherError(f"Cannot consume directory as value. {input_name=}, {input_argument=}")
             if input_argument.total_size > _MAX_INPUT_VALUE_SIZE:
                 raise interfaces.LauncherError(
                     f"Artifact is too big to consume as value. Consume it as file instead. {input_name=}, {input_argument=}"
@@ -118,9 +105,7 @@ class DockerContainerLauncher(
                     raise interfaces.LauncherError(
                         f"Artifact data has no value and no uri. This cannot happen. {input_name=}, {input_argument=}"
                     )
-                uri_reader = self._storage_provider.make_uri(
-                    input_argument.uri
-                ).get_reader()
+                uri_reader = self._storage_provider.make_uri(input_argument.uri).get_reader()
                 try:
                     data = uri_reader.download_as_bytes()
                 except Exception as ex:
@@ -145,9 +130,7 @@ class DockerContainerLauncher(
                     raise interfaces.LauncherError(
                         f"Artifact data has no value and no uri. This cannot happen. {input_name=}, {input_argument=}"
                     )
-                uri_writer = self._storage_provider.make_uri(
-                    input_argument.staging_uri
-                ).get_writer()
+                uri_writer = self._storage_provider.make_uri(input_argument.staging_uri).get_writer()
                 try:
                     uri_writer.upload_from_text(input_argument.value)
                 except Exception as ex:
@@ -159,9 +142,7 @@ class DockerContainerLauncher(
                 input_argument.uri = uri
 
             container_path = (
-                container_inputs_root
-                / naming_utils.sanitize_file_name(input_name)
-                / _CONTAINER_FILE_NAME
+                container_inputs_root / naming_utils.sanitize_file_name(input_name) / _CONTAINER_FILE_NAME
             ).as_posix()
 
             mounts.append(
@@ -176,9 +157,7 @@ class DockerContainerLauncher(
         def get_output_path(output_name: str) -> str:
             uri = output_uris[output_name]
             container_path = (
-                container_outputs_root
-                / naming_utils.sanitize_file_name(output_name)
-                / _CONTAINER_FILE_NAME
+                container_outputs_root / naming_utils.sanitize_file_name(output_name) / _CONTAINER_FILE_NAME
             ).as_posix()
             mounts.append(
                 _construct_docker_volume_mount(
@@ -226,23 +205,17 @@ class DockerContainerLauncher(
     def _storage_provider(self):
         return local_storage.LocalStorageProvider()
 
-    def deserialize_launched_container_from_dict(
-        self, launched_container_dict: dict
-    ) -> "LaunchedDockerContainer":
+    def deserialize_launched_container_from_dict(self, launched_container_dict: dict) -> "LaunchedDockerContainer":
         launched_container = LaunchedDockerContainer.from_dict(
             launched_container_dict, docker_client=self._docker_client
         )
         return launched_container
 
-    def get_refreshed_launched_container_from_dict(
-        self, launched_container_dict: dict
-    ) -> "LaunchedDockerContainer":
+    def get_refreshed_launched_container_from_dict(self, launched_container_dict: dict) -> "LaunchedDockerContainer":
         launched_container = LaunchedDockerContainer.from_dict(
             launched_container_dict, docker_client=self._docker_client
         )
-        container = self._docker_client.containers.get(
-            container_id=launched_container.id
-        )
+        container = self._docker_client.containers.get(container_id=launched_container.id)
         new_launched_container = copy.copy(launched_container)
         new_launched_container._container = container
         return new_launched_container
@@ -281,7 +254,7 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
             return interfaces.ContainerStatus.ERROR
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         if not self.has_ended:
             return None
         return self._container.attrs["State"]["ExitCode"]
@@ -319,21 +292,15 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
         return None
 
     def get_log(self) -> str:
-        return self._container.logs(stdout=True, stderr=True, timestamps=True).decode(
-            "utf-8", errors="replace"
-        )
+        return self._container.logs(stdout=True, stderr=True, timestamps=True).decode("utf-8", errors="replace")
 
     def upload_log(self):
         log = self.get_log()
-        uri_writer = (
-            local_storage.LocalStorageProvider().make_uri(self._log_uri).get_writer()
-        )
+        uri_writer = local_storage.LocalStorageProvider().make_uri(self._log_uri).get_writer()
         uri_writer.upload_from_text(log)
 
     def stream_log_lines(self) -> typing.Iterator[str]:
-        for log_bytes in self._container.logs(
-            stdout=True, stderr=True, stream=True, follow=True
-        ):
+        for log_bytes in self._container.logs(stdout=True, stderr=True, stream=True, follow=True):
             yield log_bytes.decode("utf-8", errors="replace")
 
     def terminate(self):
@@ -370,6 +337,7 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
             output_uris=output_uris,
             log_uri=log_uri,
         )
+
 
 def _parse_docker_time(date_string: str) -> datetime.datetime:
     # Workaround for Python <3.11 failing to parse timestamps that include nanoseconds:

@@ -5,10 +5,10 @@ This module sets up distributed tracing with OTLP exporter for sending traces
 to an OpenTelemetry collector endpoint.
 """
 
-import fastapi
 import logging
 import os
 
+import fastapi
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc import (
     trace_exporter as otel_grpc_trace_exporter,
@@ -59,17 +59,11 @@ def setup_api_tracing(app: fastapi.FastAPI) -> None:
         _validate_otel_config(otel_endpoint, otel_protocol)
 
         if otel_protocol == _OTEL_PROTOCOL_GRPC:
-            otel_exporter = otel_grpc_trace_exporter.OTLPSpanExporter(
-                endpoint=otel_endpoint
-            )
+            otel_exporter = otel_grpc_trace_exporter.OTLPSpanExporter(endpoint=otel_endpoint)
         else:
-            otel_exporter = otel_http_trace_exporter.OTLPSpanExporter(
-                endpoint=otel_endpoint
-            )
+            otel_exporter = otel_http_trace_exporter.OTLPSpanExporter(endpoint=otel_endpoint)  # type: ignore[assignment]
 
-        resource = otel_resources.Resource(
-            attributes={otel_resources.SERVICE_NAME: service_name}
-        )
+        resource = otel_resources.Resource(attributes={otel_resources.SERVICE_NAME: service_name})
         tracer_provider = otel_trace.TracerProvider(resource=resource)
         span_processor = otel_trace_export.BatchSpanProcessor(otel_exporter)
         tracer_provider.add_span_processor(span_processor)
@@ -79,7 +73,7 @@ def setup_api_tracing(app: fastapi.FastAPI) -> None:
         # https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/fastapi/fastapi.html
         otel_fastapi.FastAPIInstrumentor.instrument_app(app)
 
-        _logger.info(f"OpenTelemetry tracing configured successfully.")
+        _logger.info("OpenTelemetry tracing configured successfully.")
 
     except Exception as e:
         _logger.exception(f"Failed to configure OpenTelemetry tracing: {e}")

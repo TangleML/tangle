@@ -1,9 +1,10 @@
-name: Run tests on push
+name: CI
 
 # https://docs.astral.sh/uv/guides/integration/github/
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
     branches:
       - master
@@ -15,8 +16,45 @@ on:
       - ".github/workflows/**/*.yaml"
 
 jobs:
-  uv-pytest:
-    name: python
+  lint:
+    name: lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: auto
+
+      - name: Install the project
+        run: uv sync --locked --all-extras --dev
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+  type-check:
+    name: type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: auto
+
+      - name: Install the project
+        run: uv sync --locked --all-extras --dev
+
+      - name: Mypy
+        run: uv run mypy cloud_pipelines_backend
+
+  test:
+    name: test (python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -38,14 +76,14 @@ jobs:
       - name: Install the project
         run: uv sync --locked --all-extras --dev
 
-      - name: Run tests
-        # Without "--with ." we get `ModuleNotFoundError` for the main module
-        run: uv run --with . pytest tests --verbose --junitxml=junit/test-results-${{ matrix.python-version }}.xml
+      - name: Run tests with coverage
+        run: uv run --with . pytest tests --verbose --cov --cov-report=xml --junitxml=junit/test-results-${{ matrix.python-version }}.xml
 
       - name: Upload pytest test results
         uses: actions/upload-artifact@v4
         with:
           name: pytest-results-${{ matrix.python-version }}
-          path: junit/test-results-${{ matrix.python-version }}.xml
-        # Use always() to always run this step to publish test results when there are test failures
+          path: |
+            junit/test-results-${{ matrix.python-version }}.xml
+            coverage.xml
         if: ${{ always() }}

@@ -1,11 +1,9 @@
-from sqlalchemy import orm
-import yaml
 import pytest
+import yaml
+from sqlalchemy import orm
 
-from cloud_pipelines_backend import component_structures
 from cloud_pipelines_backend import component_library_api_server as components_api
-from cloud_pipelines_backend import database_ops
-from cloud_pipelines_backend import errors
+from cloud_pipelines_backend import component_structures, database_ops, errors
 
 
 def _make_component_spec(name: str):
@@ -48,9 +46,7 @@ def test_published_component_service():
 
     # Test listing
     with session_factory() as session:
-        all_published_components = published_component_service.list(
-            session=session
-        ).published_components
+        all_published_components = published_component_service.list(session=session).published_components
         assert len(all_published_components) == 1
 
     # Test component search by digest
@@ -64,14 +60,7 @@ def test_published_component_service():
             == 1
         )
     with session_factory() as session:
-        assert (
-            len(
-                published_component_service.list(
-                    session=session, digest="XXX"
-                ).published_components
-            )
-            == 0
-        )
+        assert len(published_component_service.list(session=session, digest="XXX").published_components) == 0
 
     # Test component search by name substring
     with session_factory() as session:
@@ -94,20 +83,17 @@ def test_published_component_service():
             deprecated=True,
         )
         assert published_component_2.deprecated == True
-    with session_factory() as session:
-        with pytest.raises(errors.ItemNotFoundError):
-            published_component_service.update(
-                session=session,
-                digest=published_component.digest,
-                user_name="XXX",
-                deprecated=True,
-            )
+    with session_factory() as session, pytest.raises(errors.ItemNotFoundError):
+        published_component_service.update(
+            session=session,
+            digest=published_component.digest,
+            user_name="XXX",
+            deprecated=True,
+        )
 
     # Test listing deprecated components
     with session_factory() as session:
-        all_published_components_2 = published_component_service.list(
-            session=session
-        ).published_components
+        all_published_components_2 = published_component_service.list(session=session).published_components
         assert len(all_published_components_2) == 0
     with session_factory() as session:
         all_published_components_3 = published_component_service.list(
@@ -130,9 +116,7 @@ def test_component_library_service():
 
     # Test: The list of libraries contains the built-in default library
     with session_factory() as session:
-        libraries_1 = component_library_service.list(
-            session=session
-        ).component_libraries
+        libraries_1 = component_library_service.list(session=session).component_libraries
         assert len(libraries_1) == 1
         assert libraries_1[0].id == components_api.DEFAULT_COMPONENT_LIBRARY_ID
         assert libraries_1[0].name == components_api.DEFAULT_COMPONENT_LIBRARY_NAME
@@ -188,9 +172,7 @@ def test_component_library_service():
 
     # Test: Test `get()`, `include_component_texts`
     with session_factory() as session:
-        library_3 = component_library_service.get(
-            session=session, id=library_2.id, include_component_texts=True
-        )
+        library_3 = component_library_service.get(session=session, id=library_2.id, include_component_texts=True)
         assert library_3.root_folder.folders
         assert library_3.root_folder.folders[0].components
         component_ref_3 = library_3.root_folder.folders[0].components[0]
@@ -209,16 +191,12 @@ def test_component_library_service():
 
     # Test: New library can be found in `list()` results
     with session_factory() as session:
-        libraries_5 = component_library_service.list(
-            session=session
-        ).component_libraries
+        libraries_5 = component_library_service.list(session=session).component_libraries
         assert len(libraries_5) == 2
 
     # Test: New library can be found by name
     with session_factory() as session:
-        libraries_6 = component_library_service.list(
-            session=session, name_substring=library_name
-        ).component_libraries
+        libraries_6 = component_library_service.list(session=session, name_substring=library_name).component_libraries
         assert len(libraries_6) == 1
 
     # Test: Replacing the library
@@ -241,14 +219,13 @@ def test_component_library_service():
         name=library_name_7,
         root_folder=library_folder_7,
     )
-    with pytest.raises(errors.PermissionError):
-        with session_factory() as session:
-            component_library_service.replace(
-                session=session,
-                id=library_2.id,
-                library=library_request_7,
-                user_name="XXX",
-            )
+    with pytest.raises(errors.PermissionError), session_factory() as session:
+        component_library_service.replace(
+            session=session,
+            id=library_2.id,
+            library=library_request_7,
+            user_name="XXX",
+        )
 
     with session_factory() as session:
         library_7 = component_library_service.replace(
@@ -260,13 +237,9 @@ def test_component_library_service():
         assert library_7.name == library_name_7
 
     # Test: Getting user library
-    user_library_id = components_api._get_component_library_id_for_user_name(
-        user_name=user_name
-    )
+    user_library_id = components_api._get_component_library_id_for_user_name(user_name=user_name)
     with session_factory() as session:
-        library_8 = component_library_service.get(
-            session=session, id=user_library_id
-        )
+        library_8 = component_library_service.get(session=session, id=user_library_id)
         assert library_8.id == user_library_id
         assert library_8.hide_from_search == True
         assert user_name in library_8.name
@@ -277,14 +250,13 @@ def test_component_library_service():
         name=library_name_9,
         root_folder=library_folder_7,
     )
-    with pytest.raises(errors.PermissionError):
-        with session_factory() as session:
-            component_library_service.replace(
-                session=session,
-                id=user_library_id,
-                library=library_request_9,
-                user_name="XXX",
-            )
+    with pytest.raises(errors.PermissionError), session_factory() as session:
+        component_library_service.replace(
+            session=session,
+            id=user_library_id,
+            library=library_request_9,
+            user_name="XXX",
+        )
     with session_factory() as session:
         library_9 = component_library_service.replace(
             session=session,
@@ -296,9 +268,7 @@ def test_component_library_service():
 
     # Test: Getting user library pins
     with session_factory() as session:
-        pins_10 = user_service.get_component_library_pins(
-            session=session, user_name=user_name
-        ).component_library_ids
+        pins_10 = user_service.get_component_library_pins(session=session, user_name=user_name).component_library_ids
         assert len(pins_10) == 2
         assert components_api.DEFAULT_COMPONENT_LIBRARY_ID in pins_10
         assert user_library_id in pins_10
@@ -306,13 +276,9 @@ def test_component_library_service():
     # Test: Setting user library pins
     pins_11 = pins_10 + [library_2.id]
     with session_factory() as session:
-        user_service.set_component_library_pins(
-            session=session, user_name=user_name, component_library_ids=pins_11
-        )
+        user_service.set_component_library_pins(session=session, user_name=user_name, component_library_ids=pins_11)
     with session_factory() as session:
-        pins_11b = user_service.get_component_library_pins(
-            session=session, user_name=user_name
-        ).component_library_ids
+        pins_11b = user_service.get_component_library_pins(session=session, user_name=user_name).component_library_ids
         assert pins_11b == pins_11
 
 

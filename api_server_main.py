@@ -3,11 +3,8 @@ import traceback
 
 import fastapi
 
-from cloud_pipelines_backend import api_router
-from cloud_pipelines_backend import database_ops
-from cloud_pipelines_backend.instrumentation import api_tracing
-from cloud_pipelines_backend.instrumentation import contextual_logging
-from cloud_pipelines_backend.instrumentation import otel_tracing
+from cloud_pipelines_backend import api_router, database_ops
+from cloud_pipelines_backend.instrumentation import api_tracing, contextual_logging, otel_tracing
 
 app = fastapi.FastAPI(
     title="Cloud Pipelines API",
@@ -36,11 +33,7 @@ def handle_error(request: fastapi.Request, exc: BaseException):
 
 
 DEFAULT_DATABASE_URI = "sqlite:///db.sqlite"
-database_uri = (
-    os.environ.get("DATABASE_URI")
-    or os.environ.get("DATABASE_URL")
-    or DEFAULT_DATABASE_URI
-)
+database_uri = os.environ.get("DATABASE_URI") or os.environ.get("DATABASE_URL") or DEFAULT_DATABASE_URI
 
 db_engine = database_ops.create_db_engine_and_migrate_db(
     database_uri=database_uri,

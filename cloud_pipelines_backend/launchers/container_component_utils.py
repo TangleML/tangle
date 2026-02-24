@@ -1,6 +1,7 @@
 import dataclasses
 import typing
-from typing import List, Mapping, Sequence, Union
+from collections.abc import Mapping, Sequence
+from typing import Union
 
 from .. import component_structures as structures
 
@@ -23,30 +24,24 @@ def resolve_container_command_line(
 ) -> _ResolvedCommandLineAndPaths:
     """Resolves the command line argument placeholders. Also produces the maps of the generated input/output paths."""
 
-    if not isinstance(
-        component_spec.implementation, structures.ContainerImplementation
-    ):
+    if not isinstance(component_spec.implementation, structures.ContainerImplementation):
         raise TypeError("Only container components have command line to resolve")
 
-    inputs_dict = {
-        input_spec.name: input_spec for input_spec in component_spec.inputs or []
-    }
+    inputs_dict = {input_spec.name: input_spec for input_spec in component_spec.inputs or []}
     container_spec = component_spec.implementation.container
 
     # Need to preserve the order to make the kubernetes output names deterministic
-    output_paths = dict()
+    output_paths: dict[str, str] = {}
     input_paths = dict()
     inputs_consumed_by_value = {}
 
-    def expand_command_part(arg) -> Union[str, List[str], None]:
+    def expand_command_part(arg) -> Union[str, list[str], None]:
         if arg is None:
             return None
         if isinstance(arg, (str, int, float, bool)):
             return str(arg)
 
-        if isinstance(
-            arg, (structures.InputValuePlaceholder, structures.InputPathPlaceholder)
-        ):
+        if isinstance(arg, (structures.InputValuePlaceholder, structures.InputPathPlaceholder)):
             input_name = arg.input_name
             if input_name in provided_input_names:
                 if isinstance(arg, structures.InputValuePlaceholder):
@@ -64,9 +59,7 @@ def resolve_container_command_line(
                 if input_spec.optional:
                     return None
                 else:
-                    raise ValueError(
-                        f"No argument provided for required input {input_name}"
-                    )
+                    raise ValueError(f"No argument provided for required input {input_name}")
 
         elif isinstance(arg, structures.OutputPathPlaceholder):
             output_name = arg.output_name
@@ -74,9 +67,7 @@ def resolve_container_command_line(
             if arg.output_name in output_paths:
                 if output_paths[output_name] != output_filename:
                     raise ValueError(
-                        "Conflicting output files specified for port {}: {} and {}".format(
-                            output_name, output_paths[output_name], output_filename
-                        )
+                        f"Conflicting output files specified for port {output_name}: {output_paths[output_name]} and {output_filename}"
                     )
             else:
                 output_paths[output_name] = output_filename
@@ -90,9 +81,7 @@ def resolve_container_command_line(
         elif isinstance(arg, structures.IfPlaceholder):
             arg = arg.if_structure
             condition_result = expand_command_part(arg.condition)
-            condition_result_bool = (
-                condition_result and condition_result.lower() == "true"
-            )
+            condition_result_bool = condition_result and condition_result.lower() == "true"  # type: ignore[union-attr]
             result_node = arg.then_value if condition_result_bool else arg.else_value
             if result_node is None:
                 return []
@@ -100,14 +89,14 @@ def resolve_container_command_line(
                 expanded_result = expand_argument_list(result_node)
             else:
                 expanded_result = expand_command_part(result_node)
-            return expanded_result
+            return expanded_result  # type: ignore[no-any-return]
 
         elif isinstance(arg, structures.IsPresentPlaceholder):
             input_name = arg.is_present
             argument_is_present = input_name in provided_input_names
             return str(argument_is_present)
         else:
-            raise TypeError("Unrecognized argument type: {}".format(arg))
+            raise TypeError(f"Unrecognized argument type: {arg}")
 
     def expand_argument_list(argument_list):
         expanded_list = []

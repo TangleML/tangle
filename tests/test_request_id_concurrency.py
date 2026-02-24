@@ -1,6 +1,7 @@
 """Test that request_id works correctly with concurrent requests."""
 
 import asyncio
+
 import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -78,34 +79,22 @@ def test_request_id_isolation_with_nested_async_calls():
 
     async def helper_function_1():
         """First level helper."""
-        request_ids_collected.append(
-            ("helper1", contextual_logging.get_context_metadata("request_id"))
-        )
+        request_ids_collected.append(("helper1", contextual_logging.get_context_metadata("request_id")))
         await asyncio.sleep(0.01)
         await helper_function_2()
-        request_ids_collected.append(
-            ("helper1_after", contextual_logging.get_context_metadata("request_id"))
-        )
+        request_ids_collected.append(("helper1_after", contextual_logging.get_context_metadata("request_id")))
 
     async def helper_function_2():
         """Second level helper."""
-        request_ids_collected.append(
-            ("helper2", contextual_logging.get_context_metadata("request_id"))
-        )
+        request_ids_collected.append(("helper2", contextual_logging.get_context_metadata("request_id")))
         await asyncio.sleep(0.01)
-        request_ids_collected.append(
-            ("helper2_after", contextual_logging.get_context_metadata("request_id"))
-        )
+        request_ids_collected.append(("helper2_after", contextual_logging.get_context_metadata("request_id")))
 
     @app.route("/test")
     async def test_route(request):
-        request_ids_collected.append(
-            ("start", contextual_logging.get_context_metadata("request_id"))
-        )
+        request_ids_collected.append(("start", contextual_logging.get_context_metadata("request_id")))
         await helper_function_1()
-        request_ids_collected.append(
-            ("end", contextual_logging.get_context_metadata("request_id"))
-        )
+        request_ids_collected.append(("end", contextual_logging.get_context_metadata("request_id")))
         return JSONResponse({"ok": True})
 
     client = TestClient(app)
@@ -172,25 +161,19 @@ async def test_contextvars_isolation_across_async_tasks():
         contextual_logging.set_context_metadata("request_id", expected_request_id)
 
         # Verify it's set correctly
-        assert (
-            contextual_logging.get_context_metadata("request_id") == expected_request_id
-        )
+        assert contextual_logging.get_context_metadata("request_id") == expected_request_id
 
         # Simulate some work
         await asyncio.sleep(0.01)
 
         # Verify request_id is still correct after async work
-        assert (
-            contextual_logging.get_context_metadata("request_id") == expected_request_id
-        )
+        assert contextual_logging.get_context_metadata("request_id") == expected_request_id
 
         # More work
         await asyncio.sleep(0.01)
 
         # Still correct
-        assert (
-            contextual_logging.get_context_metadata("request_id") == expected_request_id
-        )
+        assert contextual_logging.get_context_metadata("request_id") == expected_request_id
 
         # Clean up
         contextual_logging.clear_context_metadata()
@@ -233,10 +216,7 @@ def test_request_id_with_context_manager_is_thread_safe():
     import threading
 
     # Create threads that will process with different request_ids
-    threads = [
-        threading.Thread(target=simulate_request_processing, args=(f"request_{i:03d}",))
-        for i in range(10)
-    ]
+    threads = [threading.Thread(target=simulate_request_processing, args=(f"request_{i:03d}",)) for i in range(10)]
 
     # Start all threads
     for thread in threads:
