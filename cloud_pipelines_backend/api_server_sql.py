@@ -30,6 +30,7 @@ from . import component_structures as structures
 from . import backend_types_sql as bts
 from . import errors
 from .errors import ItemNotFoundError
+from .status_utils import update_pipeline_run_status
 
 
 # ==== PipelineJobService
@@ -38,7 +39,8 @@ class PipelineRunResponse:
     id: bts.IdType
     root_execution_id: bts.IdType
     annotations: dict[str, Any] | None = None
-    # status: "PipelineJobStatus"
+    status: bts.ContainerExecutionStatus | None = None
+    has_ended: bool = False
     created_by: str | None = None
     created_at: datetime.datetime | None = None
     pipeline_name: str | None = None
@@ -50,6 +52,8 @@ class PipelineRunResponse:
             id=pipeline_run.id,
             root_execution_id=pipeline_run.root_execution_id,
             annotations=pipeline_run.annotations,
+            status=pipeline_run.status,
+            has_ended=pipeline_run.has_ended,
             created_by=pipeline_run.created_by,
             created_at=pipeline_run.created_at,
         )
@@ -109,6 +113,8 @@ class PipelineRunsApiService_Sql:
                 pipeline_name=pipeline_name,
             )
             session.add(pipeline_run)
+            session.flush()
+            update_pipeline_run_status(session, root_execution_node.id)
             session.commit()
 
         session.refresh(pipeline_run)
@@ -159,6 +165,7 @@ class PipelineRunsApiService_Sql:
             if execution_node.extra_data is None:
                 execution_node.extra_data = {}
             execution_node.extra_data["desired_state"] = "TERMINATED"
+        pipeline_run.status = bts.ContainerExecutionStatus.CANCELLING
         session.commit()
 
     # Note: This method must be last to not shadow the "list" type
@@ -227,38 +234,7 @@ class PipelineRunsApiService_Sql:
                         f"Invalid status filter value: {value!r}. "
                         f"Valid values: {[s.value for s in bts.ContainerExecutionStatus]}"
                     )
-                target_priority = _STATUS_PRIORITY[target_status]
-                priority_case = _build_status_priority_case()
-
-                # Subquery: compute the highest-priority (min priority number) status
-                # for each pipeline run from its descendant execution nodes.
-                status_subquery = (
-                    sql.select(
-                        bts.PipelineRun.id.label("run_id"),
-                        sql.func.min(priority_case).label("min_priority"),
-                    )
-                    .join(
-                        bts.ExecutionToAncestorExecutionLink,
-                        bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-                        == bts.PipelineRun.root_execution_id,
-                    )
-                    .join(
-                        bts.ExecutionNode,
-                        bts.ExecutionNode.id
-                        == bts.ExecutionToAncestorExecutionLink.execution_id,
-                    )
-                    .where(bts.ExecutionNode.container_execution_status != None)
-                    .group_by(bts.PipelineRun.id)
-                    .subquery()
-                )
-
-                where_clauses.append(
-                    bts.PipelineRun.id.in_(
-                        sql.select(status_subquery.c.run_id).where(
-                            status_subquery.c.min_priority == target_priority
-                        )
-                    )
-                )
+                where_clauses.append(bts.PipelineRun.status == target_status)
 
             elif key == "created_after":
                 dt = datetime.datetime.fromisoformat(value)
@@ -488,38 +464,6 @@ def _parse_filter(filter: str) -> dict[str, list[str]]:
             parsed_filter.setdefault("_text", []).append(part)
     return parsed_filter
 
-
-# Priority order for deriving overall pipeline run status.
-# Lower number = higher priority (takes precedence).
-_STATUS_PRIORITY: dict[bts.ContainerExecutionStatus, int] = {
-    bts.ContainerExecutionStatus.SYSTEM_ERROR: 1,
-    bts.ContainerExecutionStatus.FAILED: 2,
-    bts.ContainerExecutionStatus.INVALID: 3,
-    bts.ContainerExecutionStatus.CANCELLING: 4,
-    bts.ContainerExecutionStatus.CANCELLED: 5,
-    bts.ContainerExecutionStatus.RUNNING: 6,
-    bts.ContainerExecutionStatus.PENDING: 7,
-    bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM: 8,
-    bts.ContainerExecutionStatus.QUEUED: 9,
-    bts.ContainerExecutionStatus.UNINITIALIZED: 10,
-    bts.ContainerExecutionStatus.SKIPPED: 11,
-    bts.ContainerExecutionStatus.SUCCEEDED: 12,
-}
-
-_PRIORITY_TO_STATUS: dict[int, bts.ContainerExecutionStatus] = {
-    v: k for k, v in _STATUS_PRIORITY.items()
-}
-
-
-def _build_status_priority_case() -> sql.Case:
-    """Build a SQL CASE expression mapping container_execution_status to priority int."""
-    return sql.case(
-        *[
-            (bts.ExecutionNode.container_execution_status == status, priority)
-            for status, priority in _STATUS_PRIORITY.items()
-        ],
-        else_=99,
-    )
 
 
 # ========== ExecutionNodeApiService_Sql

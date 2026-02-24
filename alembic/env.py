@@ -1,6 +1,7 @@
 import os
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
@@ -79,7 +80,13 @@ def run_migrations_online() -> None:
         with context.begin_transaction():
             context.run_migrations()
 
-    if hasattr(connectable, "connect"):
+    try:
+        connectable.connect
+        is_engine = hasattr(connectable, "pool")
+    except AttributeError:
+        is_engine = False
+
+    if is_engine:
         with connectable.connect() as connection:
             _run_with_connection(connection)
     else:
