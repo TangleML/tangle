@@ -1,5 +1,6 @@
 import base64
 import json
+import enum
 from typing import Any, Final
 
 import sqlalchemy as sql
@@ -7,6 +8,21 @@ import sqlalchemy as sql
 from . import backend_types_sql as bts
 from . import errors
 from . import filter_query_models
+
+SYSTEM_KEY_PREFIX: Final[str] = "system/"
+
+
+class PipelineRunAnnotationSystemKey(enum.StrEnum):
+    CREATED_BY = f"{SYSTEM_KEY_PREFIX}pipeline_run.created_by"
+
+
+SYSTEM_KEY_SUPPORTED_PREDICATES: dict[PipelineRunAnnotationSystemKey, set[type]] = {
+    PipelineRunAnnotationSystemKey.CREATED_BY: {
+        filter_query_models.KeyExistsPredicate,
+        filter_query_models.ValueEqualsPredicate,
+        filter_query_models.ValueInPredicate,
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Page-token helpers
@@ -45,6 +61,78 @@ def _resolve_filter_value(
 
 
 # ---------------------------------------------------------------------------
+# PipelineRunAnnotationSystemKey validation and resolution
+# ---------------------------------------------------------------------------
+
+
+def _check_predicate_allowed(*, predicate: filter_query_models.Predicate) -> None:
+    """Raise if a system key is used with an unsupported predicate type."""
+    if not isinstance(predicate, filter_query_models.KeyPredicateBase):
+        return
+    key = predicate.key
+
+    try:
+        system_key = PipelineRunAnnotationSystemKey(key)
+    except ValueError:
+        return
+
+    supported = SYSTEM_KEY_SUPPORTED_PREDICATES.get(system_key, set())
+    if type(predicate) not in supported:
+        raise errors.ApiValidationError(
+            f"Predicate {type(predicate).__name__} is not supported "
+            f"for system key {system_key!r}. "
+            f"Supported: {[t.__name__ for t in supported]}"
+        )
+
+
+def _resolve_system_key_value(
+    *,
+    key: str,
+    value: str,
+    current_user: str | None,
+) -> str:
+    """Resolve special placeholder values for system keys."""
+    if key == PipelineRunAnnotationSystemKey.CREATED_BY and value == "me":
+        return current_user if current_user is not None else ""
+    return value
+
+
+def _maybe_resolve_system_values(
+    *,
+    predicate: filter_query_models.ValueEqualsPredicate,
+    current_user: str | None,
+) -> filter_query_models.ValueEqualsPredicate:
+    """Resolve special values in a ValueEqualsPredicate."""
+    key = predicate.value_equals.key
+    value = predicate.value_equals.value
+    resolved = _resolve_system_key_value(
+        key=key,
+        value=value,
+        current_user=current_user,
+    )
+    if resolved != value:
+        return filter_query_models.ValueEqualsPredicate(
+            value_equals=filter_query_models.ValueEquals(key=key, value=resolved)
+        )
+    return predicate
+
+
+def _validate_and_resolve_predicate(
+    *,
+    predicate: filter_query_models.Predicate,
+    current_user: str | None,
+) -> filter_query_models.Predicate:
+    """Validate system key support, then resolve special values."""
+    _check_predicate_allowed(predicate=predicate)
+    if isinstance(predicate, filter_query_models.ValueEqualsPredicate):
+        return _maybe_resolve_system_values(
+            predicate=predicate,
+            current_user=current_user,
+        )
+    return predicate
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -79,7 +167,12 @@ def build_list_filters(
 
     if filter_query_value:
         parsed = filter_query_models.FilterQuery.model_validate_json(filter_query_value)
-        where_clauses.append(filter_query_to_where_clause(filter_query=parsed))
+        where_clauses.append(
+            filter_query_to_where_clause(
+                filter_query=parsed,
+                current_user=current_user,
+            )
+        )
 
     next_page_token = _encode_page_token(
         page_token_dict={
@@ -95,10 +188,13 @@ def build_list_filters(
 def filter_query_to_where_clause(
     *,
     filter_query: filter_query_models.FilterQuery,
+    current_user: str | None = None,
 ) -> sql.ColumnElement:
     predicates = filter_query.and_ or filter_query.or_
     is_and = filter_query.and_ is not None
-    clauses = [_predicate_to_clause(predicate=p) for p in predicates]
+    clauses = [
+        _predicate_to_clause(predicate=p, current_user=current_user) for p in predicates
+    ]
     return sql.and_(*clauses) if is_and else sql.or_(*clauses)
 
 
@@ -163,17 +259,35 @@ def _build_filter_where_clauses(
 
 def _predicate_to_clause(
     *,
-    predicate,
+    predicate: filter_query_models.Predicate,
+    current_user: str | None = None,
 ) -> sql.ColumnElement:
+    predicate = _validate_and_resolve_predicate(
+        predicate=predicate,
+        current_user=current_user,
+    )
+
     match predicate:
         case filter_query_models.AndPredicate():
             return sql.and_(
-                *[_predicate_to_clause(predicate=p) for p in predicate.and_]
+                *[
+                    _predicate_to_clause(predicate=p, current_user=current_user)
+                    for p in predicate.and_
+                ]
             )
         case filter_query_models.OrPredicate():
-            return sql.or_(*[_predicate_to_clause(predicate=p) for p in predicate.or_])
+            return sql.or_(
+                *[
+                    _predicate_to_clause(predicate=p, current_user=current_user)
+                    for p in predicate.or_
+                ]
+            )
         case filter_query_models.NotPredicate():
-            return sql.not_(_predicate_to_clause(predicate=predicate.not_))
+            return sql.not_(
+                _predicate_to_clause(
+                    predicate=predicate.not_, current_user=current_user
+                )
+            )
         case filter_query_models.KeyExistsPredicate():
             return _key_exists_to_clause(predicate=predicate)
         case filter_query_models.ValueEqualsPredicate():

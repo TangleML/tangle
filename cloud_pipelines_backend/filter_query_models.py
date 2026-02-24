@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 from typing import Annotated
 
 import pydantic
@@ -58,20 +59,44 @@ class TimeRange(_BaseModel):
 # --- Predicate wrapper models (one field each) ---
 
 
-class KeyExistsPredicate(_BaseModel):
+class KeyPredicateBase(_BaseModel):
+    """Base for predicates that target an annotation key."""
+
+    @property
+    @abc.abstractmethod
+    def key(self) -> str: ...
+
+
+class KeyExistsPredicate(KeyPredicateBase):
     key_exists: KeyExists
 
+    @property
+    def key(self) -> str:
+        return self.key_exists.key
 
-class ValueContainsPredicate(_BaseModel):
+
+class ValueContainsPredicate(KeyPredicateBase):
     value_contains: ValueContains
 
+    @property
+    def key(self) -> str:
+        return self.value_contains.key
 
-class ValueInPredicate(_BaseModel):
+
+class ValueInPredicate(KeyPredicateBase):
     value_in: ValueIn
 
+    @property
+    def key(self) -> str:
+        return self.value_in.key
 
-class ValueEqualsPredicate(_BaseModel):
+
+class ValueEqualsPredicate(KeyPredicateBase):
     value_equals: ValueEquals
+
+    @property
+    def key(self) -> str:
+        return self.value_equals.key
 
 
 class TimeRangePredicate(_BaseModel):
