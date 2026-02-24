@@ -464,28 +464,13 @@ class _KubernetesPodLauncher(
         )
         return launched_kubernetes_container
 
-    def get_refreshed_launched_container(
-        self, launched_container: "LaunchedKubernetesContainer"
-    ) -> "LaunchedKubernetesContainer":
-        core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
-        pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
-            name=launched_container._pod_name,
-            namespace=launched_container._namespace,
-            _request_timeout=self._request_timeout,
-        )
-
-        new_launched_container = copy.copy(launched_container)
-        new_launched_container._debug_pod = pod
-        new_launched_container._launcher = self
-        return new_launched_container
-
     def get_refreshed_launched_container_from_dict(
         self, launched_container_dict: dict
     ) -> "LaunchedKubernetesContainer":
         launched_container = LaunchedKubernetesContainer.from_dict(
             launched_container_dict, launcher=self
         )
-        return self.get_refreshed_launched_container(launched_container)
+        return launched_container.get_refreshed()
 
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
