@@ -919,10 +919,41 @@ class _KubernetesJobLauncher(
         num_nodes_annotation_str = (annotations or {}).get(
             MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, 1
         )
+        enable_multi_node = num_nodes_annotation_str is not None
         num_nodes = int(num_nodes_annotation_str) if num_nodes_annotation_str else 1
         if not (0 < num_nodes <= 16):
             raise interfaces.LauncherError(
                 f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and 16, but got {num_nodes}."
+            )
+
+        if enable_multi_node:
+            # Temporary implementation of implicitly passing multi-node information to the component code.
+            # After testing, this implementation will be replaced by more explicit way to consume multi-node information (dynamicData arguments passed to component inputs).
+            MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME = (
+                "_TANGLE_MULTI_NODE_NUMBER_OF_NODES"
+            )
+            MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
+
+            main_container_spec = pod.spec.containers[0]
+            main_container_spec.env = main_container_spec.env or []
+            main_container_spec.env.append(
+                k8s_client_lib.V1EnvVar(
+                    name=MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME,
+                    value=str(num_nodes),
+                )
+            )
+            main_container_spec.env.append(
+                k8s_client_lib.V1EnvVar(
+                    name=MULTI_NODE_NODE_INDEX_ENV_VAR_NAME,
+                    # We cannot use "$(JOB_COMPLETION_INDEX)" in env variables since it's added after all other env variables.
+                    # value="$(JOB_COMPLETION_INDEX)",
+                    # So we just recreate it by reading the pod annotation/label that Kubernetes sets on pods of indexed jobs.
+                    value_from=k8s_client_lib.V1EnvVarSource(
+                        field_ref=k8s_client_lib.V1ObjectFieldSelector(
+                            field_path="metadata.annotations['batch.kubernetes.io/job-completion-index']"
+                        )
+                    ),
+                )
             )
 
         job_name_prefix = "job-" + pod.metadata.generate_name
