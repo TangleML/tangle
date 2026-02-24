@@ -1,6 +1,8 @@
 import sqlalchemy
+from sqlalchemy import orm
 
 from . import backend_types_sql as bts
+from . import filter_query_sql
 
 
 def create_db_engine_and_migrate_db(
@@ -83,3 +85,34 @@ def migrate_db(db_engine: sqlalchemy.Engine):
         if index.name == bts.IX_ANNOTATION_RUN_ID_KEY_VALUE:
             index.create(db_engine, checkfirst=True)
             break
+
+    backfill_created_by_annotations(db_engine)
+
+
+def backfill_created_by_annotations(db_engine: sqlalchemy.Engine):
+    """Copy pipeline_run.created_by into pipeline_run_annotation so
+    annotation-based search works for created_by.
+
+    Idempotent -- skips rows that already have the annotation.
+    """
+    with orm.Session(db_engine) as session:
+        stmt = sqlalchemy.insert(bts.PipelineRunAnnotation).from_select(
+            ["pipeline_run_id", "key", "value"],
+            sqlalchemy.select(
+                bts.PipelineRun.id,
+                sqlalchemy.literal(filter_query_sql.SystemKey.CREATED_BY),
+                bts.PipelineRun.created_by,
+            ).where(
+                bts.PipelineRun.created_by.isnot(None),
+                # NOT EXISTS makes the backfill idempotent
+                ~sqlalchemy.exists(
+                    sqlalchemy.select(bts.PipelineRunAnnotation.pipeline_run_id).where(
+                        bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id,
+                        bts.PipelineRunAnnotation.key
+                        == filter_query_sql.SystemKey.CREATED_BY,
+                    )
+                ),
+            ),
+        )
+        session.execute(stmt)
+        session.commit()
