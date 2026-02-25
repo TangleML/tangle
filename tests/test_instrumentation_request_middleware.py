@@ -1,10 +1,9 @@
 """Tests for the request_middleware module in instrumentation."""
 
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
-from starlette.requests import Request
-from starlette.responses import Response
 from starlette.applications import Starlette
+from starlette.responses import Response
 from starlette.testclient import TestClient
 
 from cloud_pipelines_backend.instrumentation import contextual_logging

@@ -1,26 +1,24 @@
 import copy
-import json
 import datetime
+import json
 import logging
 import time
 import traceback
 import typing
 from typing import Any
 
-
 import sqlalchemy as sql
-from sqlalchemy import orm
-
+from cloud_pipelines.orchestration.launchers import naming_utils
 from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_provider_interfaces,
 )
-from cloud_pipelines.orchestration.launchers import naming_utils
+from sqlalchemy import orm
 
 from . import backend_types_sql as bts
 from . import component_structures as structures
+from .instrumentation import contextual_logging
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
-from .instrumentation import contextual_logging
 
 _logger = logging.getLogger(__name__)
 
@@ -125,7 +123,7 @@ class OrchestratorService_Sql:
         else:
             if not self._queued_executions_queue_idle:
                 self._queued_executions_queue_idle = True
-                _logger.debug(f"No queued executions found")
+                _logger.debug("No queued executions found")
             return False
 
     def internal_process_running_executions_queue(self, session: orm.Session):
@@ -201,7 +199,7 @@ class OrchestratorService_Sql:
             return True
         else:
             if not self._running_executions_queue_idle:
-                _logger.debug(f"No running container executions found")
+                _logger.debug("No running container executions found")
                 self._running_executions_queue_idle = True
             return False
 
@@ -707,7 +705,7 @@ class OrchestratorService_Sql:
         execution_nodes = container_execution.execution_nodes
         if not execution_nodes:
             raise OrchestratorError(
-                f"Could not find ExecutionNode associated with ContainerExecution."
+                "Could not find ExecutionNode associated with ContainerExecution."
             )
         if len(execution_nodes) > 1:
             execution_node_ids = [execution.id for execution in execution_nodes]
@@ -752,9 +750,9 @@ class OrchestratorService_Sql:
                     # Those values may be useful for preservation, but not so important that we should fail a successfully completed container execution.
                     try:
                         data = uri_reader.download_as_bytes()
-                    except Exception as ex:
+                    except Exception:
                         _logger.exception(
-                            f"Error during preloading small artifact values."
+                            "Error during preloading small artifact values."
                         )
                         return None
                     try:
@@ -932,7 +930,7 @@ def _mark_all_downstream_executions_as_skipped(
         )
 
 
-def _assert_type(value: typing.Any, typ: typing.Type[_T]) -> _T:
+def _assert_type(value: typing.Any, typ: type[_T]) -> _T:
     if not isinstance(value, typ):
         raise TypeError(f"Expected type {typ}, but got {type(value)}: {value}")
     return value
@@ -1054,8 +1052,8 @@ def _maybe_get_small_artifact_value(
         # Those values may be useful for preservation, but not so important that we should fail a successfully completed container execution.
         try:
             data = uri_reader.download_as_bytes()
-        except Exception as ex:
-            _logger.exception(f"Error during preloading small artifact values.")
+        except Exception:
+            _logger.exception("Error during preloading small artifact values.")
             return None
         try:
             text = data.decode("utf-8")
