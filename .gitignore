@@ -174,3 +174,6 @@ client_ts/*
 pipeline-studio-app/*
 # Local execution files
 data/*
+
+# Ignore all files in the .idea directory
+.ideas/
