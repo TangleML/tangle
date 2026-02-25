@@ -141,7 +141,7 @@ class _KubernetesContainerLauncherBase:
         pod_postprocessor: PodPostProcessor | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
-            [str, str, str, bool],
+            ...,
             tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
         ],
     ):
@@ -275,7 +275,7 @@ class _KubernetesContainerLauncherBase:
             )
             volume_map[volume.name] = volume
             volume_mounts.append(volume_mount)
-            return container_path
+            return str(container_path)
 
         def get_output_path(output_name: str) -> str:
             uri = output_uris[output_name]
@@ -294,7 +294,7 @@ class _KubernetesContainerLauncherBase:
             )
             volume_map[volume.name] = volume
             volume_mounts.append(volume_mount)
-            return container_path
+            return str(container_path)
 
         # Resolving the command line.
         # Also indirectly populates volumes and volume_mounts.
@@ -391,7 +391,7 @@ class _KubernetesPodLauncher(
         pod_postprocessor: PodPostProcessor | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
-            [str, str, str, bool],
+            ...,
             tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
         ],
     ):
@@ -696,7 +696,8 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         main_container_terminated_state = self._get_main_container_terminated_state()
         if main_container_terminated_state is None:
             return None
-        return main_container_terminated_state.exit_code
+        exit_code: int = main_container_terminated_state.exit_code
+        return exit_code
 
     @property
     def has_ended(self) -> bool:
@@ -720,12 +721,14 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             main_container_state.terminated
         )
         if terminated_state is not None:
-            return terminated_state.started_at
+            started_at: datetime.datetime | None = terminated_state.started_at
+            return started_at
         running_state: k8s_client_lib.V1ContainerStateRunning = (
             main_container_state.running
         )
         if running_state is not None:
-            return running_state.started_at
+            started_at_running: datetime.datetime | None = running_state.started_at
+            return started_at_running
         return None
 
     @property
@@ -733,7 +736,8 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         terminated_state = self._get_main_container_terminated_state()
         if terminated_state is None:
             return None
-        return terminated_state.finished_at
+        finished_at: datetime.datetime | None = terminated_state.finished_at
+        return finished_at
 
     @property
     def launcher_error_message(self) -> str | None:
@@ -796,7 +800,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
     def get_log(self) -> str:
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-        return core_api_client.read_namespaced_pod_log(
+        log: str = core_api_client.read_namespaced_pod_log(
             name=self._pod_name,
             namespace=self._namespace,
             container=_MAIN_CONTAINER_NAME,
@@ -806,6 +810,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             # stream="All",
             _request_timeout=launcher._request_timeout,
         )
+        return log
 
     def upload_log(self):
         launcher = self._get_launcher()
@@ -864,7 +869,7 @@ class _KubernetesJobLauncher(
         pod_postprocessor: PodPostProcessor | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
-            [str, str, str, bool],
+            ...,
             tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
         ],
     ):
@@ -1116,7 +1121,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         if non_zero_exit_codes:
             # Returning 1st non-zero exit code.
             # There should only be one.
-            return non_zero_exit_codes[0]
+            return int(non_zero_exit_codes[0])
         # We should not reach here. Failed jobs should have at least one non-zero exit code.
         # But just in case, we return None instead of 0 to indicate that exit code is unknown.
         return None
@@ -1138,7 +1143,8 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         job_status = self._debug_job.status
         if not job_status:
             return None
-        return job_status.start_time
+        start_time: datetime.datetime | None = job_status.start_time
+        return start_time
 
     @property
     def ended_at(self) -> datetime.datetime | None:
@@ -1152,7 +1158,8 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         ]
         if not ended_condition_times:
             return None
-        return ended_condition_times[0]
+        transition_time: datetime.datetime | None = ended_condition_times[0]
+        return transition_time
 
     @property
     def launcher_error_message(self) -> str | None:
@@ -1243,7 +1250,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 pod_map[index_str] = pod
         else:
             for pod in pod_list_response.items:
-                index_str: str = pod.metadata.name
+                index_str = str(pod.metadata.name)
                 pod_map[index_str] = pod
         new_launched_container = copy.copy(self)
         new_launched_container._debug_job = job
@@ -1253,7 +1260,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     def _get_log_by_pod_key(self, pod_name: str) -> str:
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-        log = core_api_client.read_namespaced_pod_log(
+        log: str = core_api_client.read_namespaced_pod_log(
             name=pod_name,
             namespace=self._namespace,
             container=_MAIN_CONTAINER_NAME,
@@ -1401,12 +1408,14 @@ def windows_path_to_docker_path(path: str) -> str:
 
 def _kubernetes_serialize(obj) -> dict[str, Any]:
     shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
-    return shallow_client.sanitize_for_serialization(obj)
+    result: dict[str, Any] = shallow_client.sanitize_for_serialization(obj)
+    return result
 
 
 def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: type[_T]) -> _T:
     shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
-    return shallow_client._ApiClient__deserialize(obj_dict, cls)
+    result: _T = shallow_client._ApiClient__deserialize(obj_dict, cls)
+    return result
 
 
 def _update_dict_recursively(d1: dict, d2: dict):

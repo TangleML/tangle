@@ -158,7 +158,7 @@ class PublishedComponentResponse:
     # text: str | None = None
 
     @staticmethod
-    def from_db(published_component: PublishedComponentRow):
+    def from_db(published_component: PublishedComponentRow) -> "PublishedComponentResponse":
         return PublishedComponentResponse(
             digest=published_component.digest,
             published_by=published_component.published_by,

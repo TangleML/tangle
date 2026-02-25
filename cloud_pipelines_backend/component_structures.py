@@ -312,7 +312,7 @@ class TaskOutputReference(_BaseModel):
 
     output_name: str
     task_id: str  # Used for linking to the upstream task in serialized component file.
-    # type: Optional[TypeSpecType] = None    # Can be used to override the reference data type
+    # type_: Optional[TypeSpecType] = None    # Can be used to override the reference data type
 
 
 @dataclasses.dataclass

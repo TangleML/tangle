@@ -87,7 +87,10 @@ class PipelineRunsApiService_Sql:
         # TODO: Load and validate all components
         # TODO: Fetch missing components and populate component specs
 
-        pipeline_name = root_task.component_ref.spec.name
+        component_spec = root_task.component_ref.spec
+        if component_spec is None:
+            raise ApiServiceError("component_ref.spec is required")
+        pipeline_name = component_spec.name
 
         with session.begin():
             root_execution_node = _recursively_create_all_executions_and_artifacts_root(
@@ -172,7 +175,7 @@ class PipelineRunsApiService_Sql:
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
     ) -> ListPipelineJobsResponse:
-        page_token_dict = _decode_page_token(page_token)
+        page_token_dict = _decode_page_token(page_token) if page_token else {}
         OFFSET_KEY = "offset"
         offset = page_token_dict.get(OFFSET_KEY, 0)
         page_size = 10
@@ -195,7 +198,7 @@ class PipelineRunsApiService_Sql:
                     value = current_user
                     # TODO: Maybe make this a bit more robust.
                     # We need to change the filter since it goes into the next_page_token.
-                    filter = filter.replace(
+                    filter = (filter or "").replace(
                         "created_by:me", f"created_by:{current_user}"
                     )
                 if value:
@@ -215,7 +218,7 @@ class PipelineRunsApiService_Sql:
         )
         next_page_offset = offset + page_size
         next_page_token_dict = {OFFSET_KEY: next_page_offset, FILTER_KEY: filter}
-        next_page_token = _encode_page_token(next_page_token_dict)
+        next_page_token: str | None = _encode_page_token(next_page_token_dict)
         if len(pipeline_runs) < page_size:
             next_page_token = None
 
@@ -281,8 +284,9 @@ class PipelineRunsApiService_Sql:
             )
         )
         execution_status_stat_rows = session.execute(query).tuples().all()
-        execution_status_stats = dict(execution_status_stat_rows)
-
+        execution_status_stats: dict[bts.ContainerExecutionStatus, int] = {
+            status: count for status, count in execution_status_stat_rows if status is not None
+        }
         return execution_status_stats
 
     def list_annotations(
@@ -665,7 +669,7 @@ class ExecutionNodesApiService_Sql:
             status_stats = child_execution_status_stats.setdefault(
                 child_execution_id, {}
             )
-            status_stats[status.value] = count
+            status_stats[status.value if status is not None else "UNKNOWN"] = count
         return GetGraphExecutionStateResponse(
             child_execution_status_stats=child_execution_status_stats,
         )
@@ -876,7 +880,7 @@ def _read_container_execution_log_from_uri(
     if storage_provider:
         # TODO: Switch to storage_provider.parse_uri_get_accessor
         uri_accessor = storage_provider.make_uri(log_uri)
-        log_text = uri_accessor.get_reader().download_as_text()
+        log_text: str = uri_accessor.get_reader().download_as_text()
         return log_text
 
     if "://" not in log_uri:
@@ -889,14 +893,14 @@ def _read_container_execution_log_from_uri(
 
         gcs_client = storage.Client()
         blob = storage.Blob.from_string(log_uri, client=gcs_client)
-        log_text = blob.download_as_text()
+        log_text = str(blob.download_as_text())
         return log_text
     elif log_uri.startswith("hf://"):
         from cloud_pipelines_backend.storage_providers import huggingface_repo_storage
 
         storage_provider = huggingface_repo_storage.HuggingFaceRepoStorageProvider()
         uri_accessor = storage_provider.parse_uri_get_accessor(uri_string=log_uri)
-        log_text = uri_accessor.get_reader().download_as_text()
+        log_text = str(uri_accessor.get_reader().download_as_text())
         return log_text
     else:
         raise NotImplementedError(
@@ -1378,7 +1382,7 @@ def _recursively_create_all_executions_and_artifacts(
             ] = {}
             for input_spec in child_component_spec.inputs or []:
                 input_argument = (child_task_spec.arguments or {}).get(input_spec.name)
-                input_artifact_node: _ArtifactNodeOrDynamicDataType | None = None
+                child_input_artifact_node: _ArtifactNodeOrDynamicDataType | None = None
                 if input_argument is None and not input_spec.optional:
                     # Not failing on unconnected required input if there is a default value
                     if input_spec.default is None:
@@ -1390,21 +1394,21 @@ def _recursively_create_all_executions_and_artifacts(
                 if input_argument is None:
                     pass
                 elif isinstance(input_argument, structures.GraphInputArgument):
-                    input_artifact_node = input_artifact_nodes.get(
+                    child_input_artifact_node = input_artifact_nodes.get(
                         input_argument.graph_input.input_name
                     )
-                    if input_artifact_node is None:
+                    if child_input_artifact_node is None:
                         # Warning: unconnected upstream
                         # TODO: Support using upstream graph input's default value when needed for required input (non-trivial feature).
                         # Feature: "Unconnected upstream with optional default"
                         pass
                 elif isinstance(input_argument, structures.TaskOutputArgument):
                     task_output_source = input_argument.task_output
-                    input_artifact_node = task_output_artifact_nodes[
+                    child_input_artifact_node = task_output_artifact_nodes[
                         task_output_source.task_id
                     ][task_output_source.output_name]
                 elif isinstance(input_argument, str):
-                    input_artifact_node = (
+                    child_input_artifact_node = (
                         _construct_constant_artifact_node_and_add_to_session(
                             session=session,
                             value=input_argument,
@@ -1412,7 +1416,7 @@ def _recursively_create_all_executions_and_artifacts(
                         )
                     )
                     # Not adding constant inputs to the DB. We'll add them to `ExecutionNode.constant_arguments`
-                    # input_artifact_node = (
+                    # child_input_artifact_node = (
                     #     _construct_constant_artifact_node(
                     #         value=input_argument,
                     #         artifact_type=input_spec.type,
@@ -1420,14 +1424,14 @@ def _recursively_create_all_executions_and_artifacts(
                     # )
                 elif isinstance(input_argument, structures.DynamicDataArgument):
                     # We'll deal with dynamic data (e.g. secrets) when launching the container.
-                    input_artifact_node = input_argument
+                    child_input_artifact_node = input_argument
                 else:
                     raise ApiServiceError(
                         f"Unexpected task argument: {input_spec.name}={input_argument}. {child_task_spec=}"
                     )
-                if input_artifact_node:
+                if child_input_artifact_node:
                     child_task_input_artifact_nodes[input_spec.name] = (
-                        input_artifact_node
+                        child_input_artifact_node
                     )
 
             # Creating child task nodes and their output artifacts
@@ -1488,7 +1492,7 @@ def _toposort_tasks(
                         )
 
     # Topologically sorting tasks to detect cycles
-    task_dependents = {k: {} for k in task_dependencies}
+    task_dependents: dict[str, dict[str, bool]] = {k: {} for k in task_dependencies}
     for task_id, dependencies in task_dependencies.items():
         for dependency in dependencies:
             task_dependents[dependency][task_id] = True

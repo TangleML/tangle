@@ -88,7 +88,7 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
 
     def upload(self, source_path: str, destination_uri: HuggingFaceRepoUri):
         _LOGGER.debug(f"Uploading from {source_path} to {destination_uri}")
-        if pathlib.Path(source_path).is_dir:
+        if pathlib.Path(source_path).is_dir():
             self._client.upload_folder(
                 repo_type=destination_uri.repo_type,
                 repo_id=destination_uri.repo_id,
@@ -118,7 +118,7 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
         )
         import shutil
 
-        if cache_data_path.is_dir:
+        if cache_data_path.is_dir():
             shutil.copytree(cache_data_path, destination_path, dirs_exist_ok=True)
         else:
             pathlib.Path(destination_path).parent.mkdir(parents=True, exist_ok=True)

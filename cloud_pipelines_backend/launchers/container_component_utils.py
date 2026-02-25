@@ -34,11 +34,11 @@ def resolve_container_command_line(
     container_spec = component_spec.implementation.container
 
     # Need to preserve the order to make the kubernetes output names deterministic
-    output_paths = dict()
+    output_paths: dict[str, str] = {}
     input_paths = dict()
     inputs_consumed_by_value = {}
 
-    def expand_command_part(arg) -> str | list[str] | None:
+    def expand_command_part(arg: object) -> str | list[str] | None:
         if arg is None:
             return None
         if isinstance(arg, (str, int, float, bool)):
@@ -89,7 +89,7 @@ def resolve_container_command_line(
             arg = arg.if_structure
             condition_result = expand_command_part(arg.condition)
             condition_result_bool = (
-                condition_result and condition_result.lower() == "true"
+                isinstance(condition_result, str) and condition_result.lower() == "true"
             )
             result_node = arg.then_value if condition_result_bool else arg.else_value
             if result_node is None:
@@ -107,7 +107,7 @@ def resolve_container_command_line(
         else:
             raise TypeError(f"Unrecognized argument type: {arg}")
 
-    def expand_argument_list(argument_list):
+    def expand_argument_list(argument_list: list | None) -> list[str]:
         expanded_list = []
         if argument_list is not None:
             for part in argument_list:

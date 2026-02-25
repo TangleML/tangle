@@ -49,7 +49,7 @@ launcher = local_docker_launchers.DockerContainerLauncher(
 # endregion
 
 # region: Orchestrator configuration
-default_task_annotations = {}
+default_task_annotations: dict[str, str] = {}
 sleep_seconds_between_queue_sweeps: float = 1.0
 # endregion
 

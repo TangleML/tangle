@@ -85,6 +85,8 @@ class DockerContainerLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedDockerContainer":
+        if not isinstance(component_spec.implementation, structures.ContainerImplementation):
+            raise TypeError("Expected ContainerImplementation")
         container_spec = component_spec.implementation.container
 
         # TODO: Validate the output URIs. Don't forget about (`C:\*` and `C:/*` paths)
@@ -168,7 +170,7 @@ class DockerContainerLauncher(
                     read_only=True,
                 )
             )
-            return container_path
+            return str(container_path)
 
         def get_output_path(output_name: str) -> str:
             uri = output_uris[output_name]
@@ -184,7 +186,7 @@ class DockerContainerLauncher(
                     read_only=False,
                 )
             )
-            return container_path
+            return str(container_path)
 
         # Resolving the command line.
         # Also indirectly populates volumes and volume_mounts.
@@ -281,11 +283,11 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
     def exit_code(self) -> int | None:
         if not self.has_ended:
             return None
-        return self._container.attrs["State"]["ExitCode"]
+        return int(self._container.attrs["State"]["ExitCode"])
 
     @property
     def has_ended(self) -> bool:
-        return self._container.attrs["State"]["Status"] == "exited"
+        return str(self._container.attrs["State"]["Status"]) == "exited"
 
     @property
     def has_succeeded(self) -> bool:
@@ -316,9 +318,8 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
         return None
 
     def get_log(self) -> str:
-        return self._container.logs(stdout=True, stderr=True, timestamps=True).decode(
-            "utf-8", errors="replace"
-        )
+        log_bytes: bytes = self._container.logs(stdout=True, stderr=True, timestamps=True)
+        return log_bytes.decode("utf-8", errors="replace")
 
     def upload_log(self):
         log = self.get_log()

@@ -147,7 +147,7 @@ class HuggingFaceJobsContainerLauncher(
             ).as_posix()
             # hf_uri = huggingface_repo_storage.HuggingFaceRepoUri.parse(uri)
             download_input_uris[uri] = container_path
-            return container_path
+            return str(container_path)
 
         def get_output_path(output_name: str) -> str:
             uri = output_uris[output_name]
@@ -387,7 +387,8 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
     @property
     def started_at(self) -> datetime.datetime | None:
         # HF Jobs do not provide started_at, so using created_at
-        return self._job.created_at
+        created_at: datetime.datetime | None = self._job.created_at
+        return created_at
 
     @property
     def ended_at(self) -> datetime.datetime | None:
@@ -404,13 +405,14 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
             _logger.info(
                 f"launcher_error_message: {self._id=}: {self._job.status.message=}"
             )
-            return self._job.status.message
+            message: str | None = self._job.status.message
+            return message
         return None
 
     def get_log(self) -> str:
         if self.has_ended:
             try:
-                return (
+                log_text: str = (
                     huggingface_repo_storage.HuggingFaceRepoStorageProvider(
                         client=self._get_api_client()
                     )
@@ -418,6 +420,7 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
                     .get_reader()
                     .download_as_text()
                 )
+                return log_text
             except Exception as ex:
                 _logger.warning(
                     f"get_log: {self._id=}: Error getting log from URI: {self._log_uri}",
@@ -434,13 +437,11 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
         pass
 
     def stream_log_lines(self) -> typing.Iterator[str]:
-        return (
-            self._get_api_client()
-            .fetch_job_logs(
+        return iter(
+            self._get_api_client().fetch_job_logs(
                 job_id=self._id,
                 namespace=self._namespace,
             )
-            .__iter__()
         )
 
     def terminate(self):

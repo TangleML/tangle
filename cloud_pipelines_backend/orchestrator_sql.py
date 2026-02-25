@@ -45,7 +45,7 @@ class OrchestratorService_Sql:
         logs_root_uri: str,
         default_task_annotations: dict[str, Any] | None = None,
         sleep_seconds_between_queue_sweeps: float = 1.0,
-        output_data_purge_duration: datetime.timedelta = None,
+        output_data_purge_duration: datetime.timedelta | None = None,
     ):
         self._session_factory = session_factory
         self._launcher = launcher
@@ -296,7 +296,8 @@ class OrchestratorService_Sql:
                 # TODO: Move the time filtering to the DB side.
                 # TODO: Filter by `ended_at`, not `created_at`.
                 # Note: Need `.astimezone` to avoid `TypeError: can't compare offset-naive and offset-aware datetimes`
-                if execution_candidate.container_execution.created_at.astimezone(
+                if execution_candidate.container_execution.created_at is not None
+                and execution_candidate.container_execution.created_at.astimezone(
                     datetime.timezone.utc
                 )
                 > data_purge_threshold_time
@@ -513,7 +514,7 @@ class OrchestratorService_Sql:
 
         # Handling annotations
 
-        full_annotations = {}
+        full_annotations: dict[str, Any] = {}
         _update_dict_recursive(
             full_annotations, copy.deepcopy(self._default_task_annotations or {})
         )
@@ -525,7 +526,7 @@ class OrchestratorService_Sql:
         )
 
         full_annotations[common_annotations.PIPELINE_RUN_CREATED_BY_ANNOTATION_KEY] = (
-            pipeline_run.created_by
+            pipeline_run.created_by or ""
         )
         full_annotations[common_annotations.PIPELINE_RUN_ID_ANNOTATION_KEY] = (
             pipeline_run.id
@@ -758,14 +759,16 @@ class OrchestratorService_Sql:
                         )
                         return None
                     try:
-                        text = data.decode("utf-8")
+                        text: str = data.decode("utf-8")
                         return text
                     except Exception:
                         pass
+                return None
 
+            output_artifact_data_map = container_execution.output_artifact_data_map or {}
             output_artifact_uris: dict[str, str] = {
                 output_name: output_artifact_info_dict["uri"]
-                for output_name, output_artifact_info_dict in container_execution.output_artifact_data_map.items()
+                for output_name, output_artifact_info_dict in output_artifact_data_map.items()
             }
 
             # We need to first check that the output data exists. Otherwise `uri_reader.get_info()`` throws `IndexError`
@@ -1062,7 +1065,8 @@ def _maybe_get_small_artifact_value(
             _logger.exception("Error during preloading small artifact values.")
             return None
         try:
-            text = data.decode("utf-8")
+            text: str = data.decode("utf-8")
             return text
         except Exception:
             pass
+    return None
