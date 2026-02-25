@@ -42,6 +42,27 @@ class TestTracingSetup:
         provider = trace.get_tracer_provider()
         assert provider.resource.attributes["service.name"] == "my-service"
 
+    def test_service_version_is_set_on_resource(self):
+        tracing.setup(
+            endpoint="http://localhost:4317",
+            protocol="grpc",
+            service_name="my-service",
+            service_version="abc123",
+        )
+
+        provider = trace.get_tracer_provider()
+        assert provider.resource.attributes["service.version"] == "abc123"
+
+    def test_service_version_omitted_when_none(self):
+        tracing.setup(
+            endpoint="http://localhost:4317",
+            protocol="grpc",
+            service_name="my-service",
+        )
+
+        provider = trace.get_tracer_provider()
+        assert "service.version" not in provider.resource.attributes
+
     def test_catches_exporter_exception(self):
         with mock.patch(
             "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",

@@ -36,6 +36,14 @@ class TestProvidersSetup:
         provider = trace.get_tracer_provider()
         assert provider.resource.attributes["service.name"] == "oasis-orchestrator"
 
+    def test_passes_custom_service_version(self, monkeypatch):
+        monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "http://localhost:4317")
+
+        providers.setup(service_name="test-service", service_version="abc123")
+
+        provider = trace.get_tracer_provider()
+        assert provider.resource.attributes["service.version"] == "abc123"
+
     def test_catches_validation_errors(self, monkeypatch):
         monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "bad-endpoint")
 
