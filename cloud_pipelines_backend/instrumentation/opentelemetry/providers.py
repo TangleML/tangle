@@ -19,7 +19,7 @@ def setup(
     """
     Configure global OpenTelemetry providers (traces, metrics).
 
-    No-op if TANGLE_OTEL_EXPORTER_ENDPOINT is not set.
+    No-op if no signal-specific exporter endpoints are set.
 
     Use this for non-FastAPI entrypoints (e.g. orchestrators, workers) that
     need telemetry but have no ASGI app to auto-instrument.
@@ -40,11 +40,10 @@ def setup(
     if otel_config is None:
         return
 
-    tracing.setup(
-        endpoint=otel_config.endpoint,
-        protocol=otel_config.protocol,
-        service_name=otel_config.service_name,
-        service_version=otel_config.service_version,
-    )
-
-    # TODO: Setup metrics provider once it's available
+    if otel_config.trace_exporter:
+        tracing.setup(
+            endpoint=otel_config.trace_exporter.endpoint,
+            protocol=otel_config.trace_exporter.protocol,
+            service_name=otel_config.service_name,
+            service_version=otel_config.service_version,
+        )
