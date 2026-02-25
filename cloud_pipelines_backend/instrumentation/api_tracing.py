@@ -8,7 +8,7 @@ the response headers.
 import logging
 import secrets
 
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -42,7 +42,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     This ensures all logs during the request processing include the same request_id.
     """
 
-    async def dispatch(self, request: Request, call_next) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         """Process each request with a new request_id.
 
         Args:

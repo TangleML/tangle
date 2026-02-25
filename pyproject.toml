@@ -23,6 +23,7 @@ dev = [
     "pytest>=8.4.2",
     "pytest-asyncio>=0.25.2",
     "ruff>=0.11",
+    "types-pyyaml>=6.0.12.20250915",
 ]
 huggingface = [
     "huggingface-hub[oauth]>=0.35.3",
@@ -56,9 +57,12 @@ known-first-party = ["cloud_pipelines", "cloud_pipelines_backend"]
 
 [tool.mypy]
 python_version = "3.10"
+namespace_packages = true
+explicit_package_bases = true
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
+exclude = ["build/"]
 
 [tool.setuptools.packages.find]
 include = ["cloud_pipelines_backend*"]

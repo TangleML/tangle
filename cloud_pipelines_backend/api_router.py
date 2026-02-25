@@ -169,7 +169,7 @@ def _setup_routes_internal(
 
     SessionDep = typing.Annotated[orm.Session, fastapi.Depends(get_session)]
 
-    def inject_session_dependency(func: typing.Callable) -> typing.Callable:
+    def inject_session_dependency(func: typing.Callable[..., typing.Any]) -> typing.Callable[..., typing.Any]:
         return replace_annotations(
             func, original_annotation=orm.Session, new_annotation=SessionDep
         )
@@ -521,13 +521,18 @@ def _setup_routes_internal(
     ):
         with session.begin():
             execution_node = session.get(backend_types_sql.ExecutionNode, id)
+            if execution_node is None:
+                raise fastapi.HTTPException(status_code=404, detail=f"ExecutionNode {id} not found")
             execution_node.container_execution_status = status
 
     @router.get("/api/admin/sql_engine_connection_pool_status")
     async def get_sql_engine_connection_pool_status(
         session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
     ) -> str:
-        return session.get_bind().pool.status()
+        bind = session.get_bind()
+        if not isinstance(bind, sqlalchemy.Engine):
+            raise TypeError("Expected Engine, got Connection")
+        return bind.pool.status()
 
     # # Needs to be called after all routes have been added to the router
     # app.include_router(router)
@@ -564,14 +569,14 @@ def _setup_routes_internal(
 # https://fastapi.tiangolo.com/tutorial/dependencies
 # We'll replace the original function annotations.
 # It works!!!
-def replace_annotations(func, original_annotation, new_annotation):
+def replace_annotations(func: typing.Callable[..., typing.Any], original_annotation: type, new_annotation: type) -> typing.Callable[..., typing.Any]:
     for name in list(func.__annotations__):
         if func.__annotations__[name] == original_annotation:
             func.__annotations__[name] = new_annotation
     return func
 
 
-def add_parameter_annotation_metadata(func, parameter_name: str, annotation_metadata):
+def add_parameter_annotation_metadata(func: typing.Callable[..., typing.Any], parameter_name: str, annotation_metadata: typing.Any) -> typing.Callable[..., typing.Any]:
     func.__annotations__[parameter_name] = typing.Annotated[
         func.__annotations__[parameter_name], annotation_metadata
     ]

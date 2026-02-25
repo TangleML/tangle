@@ -64,7 +64,7 @@ id_column = orm.mapped_column(
 
 # # Needed to put a union type into DB
 # class SqlIOTypeStruct(_BaseModel):
-#     type: structures.TypeSpecType
+#     type_: structures.TypeSpecType  # renamed to avoid mypy type-comment parsing
 # No. We'll represent TypeSpecType as name:str + properties:dict
 # Supported cases:
 # * type: "name"

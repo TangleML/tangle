@@ -58,6 +58,7 @@ def setup_api_tracing(app: fastapi.FastAPI) -> None:
 
         _validate_otel_config(otel_endpoint, otel_protocol)
 
+        otel_exporter: otel_grpc_trace_exporter.OTLPSpanExporter | otel_http_trace_exporter.OTLPSpanExporter
         if otel_protocol == _OTEL_PROTOCOL_GRPC:
             otel_exporter = otel_grpc_trace_exporter.OTLPSpanExporter(
                 endpoint=otel_endpoint

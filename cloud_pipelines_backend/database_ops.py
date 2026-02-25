@@ -1,3 +1,5 @@
+from typing import Any
+
 import sqlalchemy
 
 from . import backend_types_sql as bts
@@ -29,7 +31,7 @@ def create_db_engine(
             # Using PyMySQL instead of missing MySQLdb
             database_uri = database_uri.replace("mysql://", "mysql+pymysql://")
 
-    create_engine_kwargs = {}
+    create_engine_kwargs: dict[str, Any] = {}
     if database_uri == "sqlite://":
         create_engine_kwargs["poolclass"] = sqlalchemy.pool.StaticPool
 
@@ -74,6 +76,8 @@ def migrate_db(db_engine: sqlalchemy.Engine):
     # bts.ExecutionNode.__table__.indexes.remove(index1)
     # Or we need to avoid calling the Index constructor.
 
-    for index in bts.ExecutionNode.__table__.indexes:
+    table = bts.ExecutionNode.__table__
+    assert isinstance(table, sqlalchemy.Table)
+    for index in table.indexes:
         if index.name == "ix_execution_node_container_execution_cache_key":
             index.create(db_engine, checkfirst=True)
