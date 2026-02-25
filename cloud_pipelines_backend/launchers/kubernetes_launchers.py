@@ -976,6 +976,8 @@ class _KubernetesJobLauncher(
                 completion_mode="Indexed",
                 # backoff_limit=0,
                 backoff_limit_per_index=0,
+                # Without explicit max_failed_indexes=0, the job waits for all pods to end and then succeeds ("Complete") despite pod failures!
+                max_failed_indexes=0,
                 completions=num_nodes,
                 parallelism=num_nodes,
             ),
