@@ -18,48 +18,45 @@
 #   --- * GraphSpec.output_values only supports TaskOutputArgument now.
 
 __all__ = [
-    "InputSpec",
-    "OutputSpec",
-    "InputValuePlaceholder",
-    "InputPathPlaceholder",
-    "OutputPathPlaceholder",
-    "ConcatPlaceholder",
-    "IsPresentPlaceholder",
-    "IfPlaceholderStructure",
-    "IfPlaceholder",
-    "ContainerSpec",
-    "ContainerImplementation",
-    "MetadataSpec",
-    "ComponentSpec",
-    "ComponentReference",
-    "GraphInputReference",
-    "GraphInputArgument",
-    "TaskOutputReference",
-    "TaskOutputArgument",
-    "RetryStrategySpec",
     "CachingStrategySpec",
+    "ComponentReference",
+    "ComponentSpec",
+    "ConcatPlaceholder",
+    "ContainerImplementation",
+    "ContainerSpec",
     "ExecutionOptionsSpec",
-    "TaskSpec",
-    "GraphSpec",
     "GraphImplementation",
+    "GraphInputArgument",
+    "GraphInputReference",
+    "GraphSpec",
+    "IfPlaceholder",
+    "IfPlaceholderStructure",
+    "InputPathPlaceholder",
+    "InputSpec",
+    "InputValuePlaceholder",
+    "IsPresentPlaceholder",
+    "MetadataSpec",
+    "OutputPathPlaceholder",
+    "OutputSpec",
     "PipelineRunSpec",
+    "RetryStrategySpec",
+    "TaskOutputArgument",
+    "TaskOutputReference",
+    "TaskSpec",
 ]
 
 import dataclasses
-from collections import OrderedDict
-
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from collections.abc import Mapping
+from typing import Any, Union
 
 import pydantic
 import pydantic.alias_generators
-from pydantic.dataclasses import dataclass as pydantic_dataclasses
-
 
 # PrimitiveTypes = Union[str, int, float, bool]
 PrimitiveTypes = str
 
 
-TypeSpecType = Union[str, Dict, List]
+TypeSpecType = Union[str, dict, list]
 
 
 # class _BaseModel1(pydantic.BaseModel):
@@ -105,11 +102,11 @@ class InputSpec(_BaseModel):
     """Describes the component input specification"""
 
     name: str
-    type: Optional[TypeSpecType] = None
-    description: Optional[str] = None
-    default: Optional[PrimitiveTypes] = None
-    optional: Optional[bool] = False
-    annotations: Optional[Dict[str, Any]] = None
+    type: TypeSpecType | None = None
+    description: str | None = None
+    default: PrimitiveTypes | None = None
+    optional: bool | None = False
+    annotations: dict[str, Any] | None = None
 
 
 @dataclasses.dataclass
@@ -117,9 +114,9 @@ class OutputSpec(_BaseModel):
     """Describes the component output specification"""
 
     name: str
-    type: Optional[TypeSpecType] = None
-    description: Optional[str] = None
-    annotations: Optional[Dict[str, Any]] = None
+    type: TypeSpecType | None = None
+    description: str | None = None
+    annotations: dict[str, Any] | None = None
 
 
 @dataclasses.dataclass
@@ -179,7 +176,7 @@ CommandlineArgumentType = Union[
 class ConcatPlaceholder(_BaseModel):
     """Represents the command-line argument placeholder that will be replaced at run-time by the concatenated values of its items."""
 
-    concat: List[CommandlineArgumentType]
+    concat: list[CommandlineArgumentType]
 
 
 @dataclasses.dataclass
@@ -207,8 +204,8 @@ class IfPlaceholderStructure(_BaseModel):  # Non-standard attr names
     )
 
     condition: IfConditionArgumentType
-    then_value: List[CommandlineArgumentType]
-    else_value: Optional[List[CommandlineArgumentType]] = None
+    then_value: list[CommandlineArgumentType]
+    else_value: list[CommandlineArgumentType] | None = None
 
 
 @dataclasses.dataclass
@@ -231,9 +228,9 @@ class ContainerSpec(_BaseModel):
     """Describes the container component implementation."""
 
     image: str
-    command: Optional[List[CommandlineArgumentType]] = None
-    args: Optional[List[CommandlineArgumentType]] = None
-    env: Optional[Mapping[str, str]] = None
+    command: list[CommandlineArgumentType] | None = None
+    args: list[CommandlineArgumentType] | None = None
+    env: Mapping[str, str] | None = None
 
 
 @dataclasses.dataclass
@@ -248,20 +245,20 @@ ImplementationType = Union[ContainerImplementation, "GraphImplementation"]
 
 @dataclasses.dataclass
 class MetadataSpec(_BaseModel):
-    annotations: Optional[Dict[str, str]] = None
-    labels: Optional[Dict[str, str]] = None
+    annotations: dict[str, str] | None = None
+    labels: dict[str, str] | None = None
 
 
 @dataclasses.dataclass
 class ComponentSpec(_BaseModel):
     """Component specification. Describes the metadata (name, description, annotations and labels), the interface (inputs and outputs) and the implementation of the component."""
 
-    name: Optional[str] = None  # ? Move to metadata?
-    description: Optional[str] = None  # ? Move to metadata?
-    metadata: Optional[MetadataSpec] = None
-    inputs: Optional[List[InputSpec]] = None
-    outputs: Optional[List[OutputSpec]] = None
-    implementation: Optional[ImplementationType] = None
+    name: str | None = None  # ? Move to metadata?
+    description: str | None = None  # ? Move to metadata?
+    metadata: MetadataSpec | None = None
+    inputs: list[InputSpec] | None = None
+    outputs: list[OutputSpec] | None = None
+    implementation: ImplementationType | None = None
 
     def __post_init__(self):
         # _component_spec_post_init(self)
@@ -272,12 +269,12 @@ class ComponentSpec(_BaseModel):
 class ComponentReference(_BaseModel):
     """Component reference. Contains information that can be used to locate and load a component by name, digest or URL"""
 
-    name: Optional[str] = None
-    digest: Optional[str] = None
-    tag: Optional[str] = None
-    url: Optional[str] = None
-    spec: Optional[ComponentSpec] = None
-    text: Optional[str] = None
+    name: str | None = None
+    digest: str | None = None
+    tag: str | None = None
+    url: str | None = None
+    spec: ComponentSpec | None = None
+    text: str | None = None
 
     def __post_init__(self) -> None:
         if not any([self.name, self.digest, self.url, self.spec, self.text]):
@@ -289,7 +286,7 @@ class GraphInputReference(_BaseModel):
     """References the input of the graph (the scope is a single graph)."""
 
     input_name: str
-    type: Optional[TypeSpecType] = (
+    type: TypeSpecType | None = (
         None  # Can be used to override the reference data type
     )
 
@@ -348,7 +345,7 @@ class RetryStrategySpec(_BaseModel):
 @dataclasses.dataclass
 class CachingStrategySpec(_BaseModel):
 
-    max_cache_staleness: Optional[str] = (
+    max_cache_staleness: str | None = (
         None  # RFC3339 compliant duration: P30DT1H22M3S
     )
 
@@ -356,8 +353,8 @@ class CachingStrategySpec(_BaseModel):
 @dataclasses.dataclass
 class ExecutionOptionsSpec(_BaseModel):
 
-    retry_strategy: Optional[RetryStrategySpec] = None
-    caching_strategy: Optional[CachingStrategySpec] = None
+    retry_strategy: RetryStrategySpec | None = None
+    caching_strategy: CachingStrategySpec | None = None
 
 
 @dataclasses.dataclass
@@ -365,10 +362,10 @@ class TaskSpec(_BaseModel):
     """Task specification. Task is a "configured" component - a component supplied with arguments and other applied configuration changes."""
 
     component_ref: ComponentReference
-    arguments: Optional[Mapping[str, ArgumentType]] = None
-    is_enabled: Optional[ArgumentType] = None
-    execution_options: Optional[ExecutionOptionsSpec] = None
-    annotations: Optional[Dict[str, Any]] = None
+    arguments: Mapping[str, ArgumentType] | None = None
+    is_enabled: ArgumentType | None = None
+    execution_options: ExecutionOptionsSpec | None = None
+    annotations: dict[str, Any] | None = None
 
 
 @dataclasses.dataclass
@@ -376,7 +373,7 @@ class GraphSpec(_BaseModel):
     """Describes the graph component implementation. It represents a graph of component tasks connected to the upstream sources of data using the argument specifications. It also describes the sources of graph output values."""
 
     tasks: Mapping[str, TaskSpec]
-    output_values: Optional[Mapping[str, ArgumentType]] = None
+    output_values: Mapping[str, ArgumentType] | None = None
 
     def __post_init__(self):
         # _graph_spec_post_init(self)

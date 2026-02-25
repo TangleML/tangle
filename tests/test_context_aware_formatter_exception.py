@@ -5,11 +5,11 @@ This test shows that the ContextAwareFormatter properly handles exception loggin
 including full tracebacks.
 """
 
+import io
 import logging
 import logging.config
-import io
-import sys
 import os
+import sys
 
 # Add the parent directory to the path so we can import the module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

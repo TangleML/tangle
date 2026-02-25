@@ -7,19 +7,18 @@ import logging
 import os
 import pathlib
 import typing
-from typing import Any, Optional
-
-from kubernetes import client as k8s_client_lib
-from kubernetes import watch as k8s_watch_lib
+from typing import Any
 
 from cloud_pipelines.orchestration.launchers import naming_utils
 from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_provider_interfaces,
 )
 from cloud_pipelines.orchestration.storage_providers import local_storage
+from kubernetes import client as k8s_client_lib
+from kubernetes import watch as k8s_watch_lib
+
 from .. import component_structures as structures
-from . import container_component_utils
-from . import interfaces
+from . import container_component_utils, interfaces
 
 if typing.TYPE_CHECKING:
     from google.cloud import storage
@@ -417,7 +416,7 @@ class _KubernetesPodLauncher(
         output_uris: dict[str, str],
         log_uri: str,
         annotations: dict[str, Any] | None = None,
-    ) -> "LaunchedKubernetesContainer":
+    ) -> LaunchedKubernetesContainer:
         namespace = self._choose_namespace(annotations=annotations)
 
         pod = self._prepare_kubernetes_pod(
@@ -466,7 +465,7 @@ class _KubernetesPodLauncher(
 
     def get_refreshed_launched_container_from_dict(
         self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesContainer":
+    ) -> LaunchedKubernetesContainer:
         launched_container = LaunchedKubernetesContainer.from_dict(
             launched_container_dict, launcher=self
         )
@@ -474,7 +473,7 @@ class _KubernetesPodLauncher(
 
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesContainer":
+    ) -> LaunchedKubernetesContainer:
         launched_container = LaunchedKubernetesContainer.from_dict(
             launched_container_dict, launcher=self
         )
@@ -582,7 +581,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
-        gcs_client: "storage.Client | None" = None,
+        gcs_client: storage.Client | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
@@ -693,7 +692,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             return interfaces.ContainerStatus.ERROR
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         main_container_terminated_state = self._get_main_container_terminated_state()
         if main_container_terminated_state is None:
             return None
@@ -782,7 +781,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             launcher=launcher,
         )
 
-    def get_refreshed(self) -> "LaunchedKubernetesContainer":
+    def get_refreshed(self) -> LaunchedKubernetesContainer:
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
         pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
@@ -891,7 +890,7 @@ class _KubernetesJobLauncher(
         output_uris: dict[str, str],
         log_uri: str,
         annotations: dict[str, Any] | None = None,
-    ) -> "LaunchedKubernetesJob":
+    ) -> LaunchedKubernetesJob:
         namespace = self._choose_namespace(annotations=annotations)
 
         pod = self._prepare_kubernetes_pod(
@@ -1020,7 +1019,7 @@ class _KubernetesJobLauncher(
 
     def get_refreshed_launched_container_from_dict(
         self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesJob":
+    ) -> LaunchedKubernetesJob:
         launched_container = LaunchedKubernetesJob.from_dict(
             launched_container_dict, launcher=self
         )
@@ -1028,7 +1027,7 @@ class _KubernetesJobLauncher(
 
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
-    ) -> "LaunchedKubernetesJob":
+    ) -> LaunchedKubernetesJob:
         launched_container = LaunchedKubernetesJob.from_dict(
             launched_container_dict, launcher=self
         )
@@ -1091,7 +1090,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         return interfaces.ContainerStatus.RUNNING
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         if not self.has_ended:
             return None
         # Shortcut for succeeded jobs
@@ -1210,7 +1209,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             launcher=launcher,
         )
 
-    def get_refreshed(self) -> "LaunchedKubernetesJob":
+    def get_refreshed(self) -> LaunchedKubernetesJob:
         launcher = self._get_launcher()
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
         job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
@@ -1407,7 +1406,7 @@ def _kubernetes_serialize(obj) -> dict[str, Any]:
     return shallow_client.sanitize_for_serialization(obj)
 
 
-def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: typing.Type[_T]) -> _T:
+def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: type[_T]) -> _T:
     shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
     return shallow_client._ApiClient__deserialize(obj_dict, cls)
 

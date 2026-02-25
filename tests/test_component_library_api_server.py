@@ -1,11 +1,9 @@
-from sqlalchemy import orm
-import yaml
 import pytest
+import yaml
+from sqlalchemy import orm
 
-from cloud_pipelines_backend import component_structures
 from cloud_pipelines_backend import component_library_api_server as components_api
-from cloud_pipelines_backend import database_ops
-from cloud_pipelines_backend import errors
+from cloud_pipelines_backend import component_structures, database_ops, errors
 
 
 def _make_component_spec(name: str):
@@ -94,14 +92,13 @@ def test_published_component_service():
             deprecated=True,
         )
         assert published_component_2.deprecated == True
-    with session_factory() as session:
-        with pytest.raises(errors.ItemNotFoundError):
-            published_component_service.update(
-                session=session,
-                digest=published_component.digest,
-                user_name="XXX",
-                deprecated=True,
-            )
+    with session_factory() as session, pytest.raises(errors.ItemNotFoundError):
+        published_component_service.update(
+            session=session,
+            digest=published_component.digest,
+            user_name="XXX",
+            deprecated=True,
+        )
 
     # Test listing deprecated components
     with session_factory() as session:
@@ -241,14 +238,13 @@ def test_component_library_service():
         name=library_name_7,
         root_folder=library_folder_7,
     )
-    with pytest.raises(errors.PermissionError):
-        with session_factory() as session:
-            component_library_service.replace(
-                session=session,
-                id=library_2.id,
-                library=library_request_7,
-                user_name="XXX",
-            )
+    with pytest.raises(errors.PermissionError), session_factory() as session:
+        component_library_service.replace(
+            session=session,
+            id=library_2.id,
+            library=library_request_7,
+            user_name="XXX",
+        )
 
     with session_factory() as session:
         library_7 = component_library_service.replace(
@@ -277,14 +273,13 @@ def test_component_library_service():
         name=library_name_9,
         root_folder=library_folder_7,
     )
-    with pytest.raises(errors.PermissionError):
-        with session_factory() as session:
-            component_library_service.replace(
-                session=session,
-                id=user_library_id,
-                library=library_request_9,
-                user_name="XXX",
-            )
+    with pytest.raises(errors.PermissionError), session_factory() as session:
+        component_library_service.replace(
+            session=session,
+            id=user_library_id,
+            library=library_request_9,
+            user_name="XXX",
+        )
     with session_factory() as session:
         library_9 = component_library_service.replace(
             session=session,

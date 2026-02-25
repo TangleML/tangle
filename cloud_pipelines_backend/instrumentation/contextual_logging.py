@@ -23,7 +23,7 @@ Usage:
 
 import contextvars
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import Any
 
 # Single context variable to store all metadata as a dictionary
 _context_metadata: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
@@ -57,7 +57,7 @@ def delete_context_metadata(key: str) -> None:
     _context_metadata.set(metadata)
 
 
-def get_context_metadata(key: str) -> Optional[Any]:
+def get_context_metadata(key: str) -> Any | None:
     """Get a metadata value from the current context.
 
     Args:

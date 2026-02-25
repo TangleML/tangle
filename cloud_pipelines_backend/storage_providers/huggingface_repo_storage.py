@@ -2,12 +2,10 @@ import copy
 import dataclasses
 import logging
 import pathlib
-from typing import Optional
 
 import huggingface_hub
-from huggingface_hub import hf_api
-
 from cloud_pipelines.orchestration.storage_providers import interfaces
+from huggingface_hub import hf_api
 
 _LOGGER = logging.getLogger(name=__name__)
 
@@ -72,7 +70,7 @@ HuggingFaceRepoUri._register_subclass("huggingface_repo_storage")
 
 
 class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
-    def __init__(self, client: Optional[huggingface_hub.HfApi] = None) -> None:
+    def __init__(self, client: huggingface_hub.HfApi | None = None) -> None:
         self._client = client or huggingface_hub.HfApi()
 
     def make_uri(self, uri: str) -> interfaces.UriAccessor:
@@ -142,7 +140,7 @@ class HuggingFaceRepoStorageProvider(interfaces.StorageProvider):
     def calculate_data_hash(self, *, data: bytes) -> dict[str, str]:
         import hashlib
 
-        header = f"blob {len(data)}\0".encode("utf-8")
+        header = f"blob {len(data)}\0".encode()
         hasher = hashlib.sha1(header)
         hasher.update(data)
         return {"GitBlobHash": hasher.hexdigest()}

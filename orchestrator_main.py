@@ -1,13 +1,13 @@
 import logging
-import pathlib
 import os
+import pathlib
 
 import sqlalchemy
+from cloud_pipelines.orchestration.storage_providers import local_storage
 from sqlalchemy import orm
 
 from cloud_pipelines_backend import orchestrator_sql
 from cloud_pipelines_backend.launchers import kubernetes_launchers
-from cloud_pipelines.orchestration.storage_providers import local_storage
 
 
 def main():
@@ -46,8 +46,8 @@ def main():
     artifact_store_root_dir = (pathlib.Path.cwd() / "tmp" / "artifacts").as_posix()
     log_store_root_dir = (pathlib.Path.cwd() / "tmp" / "logs").as_posix()
 
-    from kubernetes import config as k8s_config_lib
     from kubernetes import client as k8s_client_lib
+    from kubernetes import config as k8s_config_lib
 
     try:
         k8s_config_lib.load_incluster_config()

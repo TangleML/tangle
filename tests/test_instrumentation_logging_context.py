@@ -1,6 +1,7 @@
 """Tests for the logging_context module in instrumentation."""
 
 import pytest
+
 from cloud_pipelines_backend.instrumentation import contextual_logging
 from cloud_pipelines_backend.instrumentation.api_tracing import generate_request_id
 
@@ -106,10 +107,9 @@ class TestLoggingContextManager:
         """Test that context manager restores metadata even when exception occurs."""
         test_id = "exception_test"
 
-        with pytest.raises(ValueError):
-            with contextual_logging.logging_context(request_id=test_id):
-                assert contextual_logging.get_context_metadata("request_id") == test_id
-                raise ValueError("Test exception")
+        with pytest.raises(ValueError), contextual_logging.logging_context(request_id=test_id):
+            assert contextual_logging.get_context_metadata("request_id") == test_id
+            raise ValueError("Test exception")
 
         # Metadata should be cleared even after exception
         assert contextual_logging.get_context_metadata("request_id") is None
