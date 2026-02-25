@@ -2,7 +2,9 @@
 
 import pytest
 
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import configuration
+from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
+    configuration,
+)
 
 
 class TestExporterProtocol:
@@ -33,6 +35,7 @@ class TestResolve:
         monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "http://localhost:4317")
         monkeypatch.delenv("TANGLE_OTEL_EXPORTER_PROTOCOL", raising=False)
         monkeypatch.delenv("TANGLE_ENV", raising=False)
+        monkeypatch.delenv("TANGLE_SERVICE_VERSION", raising=False)
 
         result = configuration.resolve()
 
@@ -40,6 +43,7 @@ class TestResolve:
         assert result.endpoint == "http://localhost:4317"
         assert result.protocol == configuration.ExporterProtocol.GRPC
         assert result.service_name == "tangle-unknown"
+        assert result.service_version == "unknown"
 
     def test_uses_custom_service_name(self, monkeypatch):
         monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "http://localhost:4317")
@@ -94,6 +98,29 @@ class TestResolve:
 
         assert result.endpoint == "https://collector.example.com:4317"
 
+    def test_uses_custom_service_version(self, monkeypatch):
+        monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "http://localhost:4317")
+
+        result = configuration.resolve(service_version="abc123")
+
+        assert result.service_version == "abc123"
+
+    def test_service_version_from_env(self, monkeypatch):
+        monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "http://localhost:4317")
+        monkeypatch.setenv("TANGLE_SERVICE_VERSION", "def456")
+
+        result = configuration.resolve()
+
+        assert result.service_version == "def456"
+
+    def test_service_version_defaults_to_unknown(self, monkeypatch):
+        monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "http://localhost:4317")
+        monkeypatch.delenv("TANGLE_SERVICE_VERSION", raising=False)
+
+        result = configuration.resolve()
+
+        assert result.service_version == "unknown"
+
     def test_config_is_frozen(self, monkeypatch):
         monkeypatch.setenv("TANGLE_OTEL_EXPORTER_ENDPOINT", "http://localhost:4317")
 
@@ -108,4 +135,6 @@ class TestResolve:
         result = configuration.resolve()
 
         with pytest.raises(TypeError):
-            configuration.OtelConfig(result.endpoint, result.protocol, result.service_name)
+            configuration.OtelConfig(
+                result.endpoint, result.protocol, result.service_name
+            )
