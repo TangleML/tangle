@@ -55,7 +55,7 @@ def generate_unique_id() -> str:
     nanoseconds = time.time_ns()
     milliseconds = nanoseconds // 1_000_000
 
-    return ("%012x" % milliseconds) + random_bytes.hex()
+    return f"{milliseconds:012x}" + random_bytes.hex()
 
 
 id_column = orm.mapped_column(

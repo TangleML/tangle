@@ -1,20 +1,16 @@
-from collections import abc
 import contextlib
 import dataclasses
 import typing
-import typing_extensions
+from collections import abc
 
 import fastapi
 import sqlalchemy
-from sqlalchemy import orm
 import starlette.types
+import typing_extensions
+from sqlalchemy import orm
 
-
-from . import api_server_sql
-from . import backend_types_sql
+from . import api_server_sql, backend_types_sql, database_ops, errors
 from . import component_library_api_server as components_api
-from . import database_ops
-from . import errors
 from .instrumentation import contextual_logging
 
 if typing.TYPE_CHECKING:
@@ -137,7 +133,7 @@ def _setup_routes_internal(
     def user_has_admin_permission(
         user_details: typing.Annotated[UserDetails, get_user_details_dependency],
     ):
-        return user_details.permissions.get("admin") == True
+        return user_details.permissions.get("admin")
 
     user_has_admin_permission_dependency = fastapi.Depends(user_has_admin_permission)
 
@@ -401,7 +397,7 @@ def _setup_routes_internal(
         permissions = list(
             permission
             for permission, is_granted in (user_details.permissions or {}).items()
-            if is_granted == True
+            if is_granted
         )
         return GetUserResponse(
             id=user_details.name,

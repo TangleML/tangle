@@ -3,11 +3,12 @@ import traceback
 
 import fastapi
 
-from cloud_pipelines_backend import api_router
-from cloud_pipelines_backend import database_ops
-from cloud_pipelines_backend.instrumentation import api_tracing
-from cloud_pipelines_backend.instrumentation import contextual_logging
-from cloud_pipelines_backend.instrumentation import otel_tracing
+from cloud_pipelines_backend import api_router, database_ops
+from cloud_pipelines_backend.instrumentation import (
+    api_tracing,
+    contextual_logging,
+    otel_tracing,
+)
 
 app = fastapi.FastAPI(
     title="Cloud Pipelines API",

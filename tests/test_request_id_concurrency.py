@@ -1,6 +1,7 @@
 """Test that request_id works correctly with concurrent requests."""
 
 import asyncio
+
 import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse

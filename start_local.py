@@ -37,6 +37,7 @@ logs_root_uri = logs_dir_path.as_posix()
 
 # region: Launcher configuration
 import docker
+
 from cloud_pipelines_backend.launchers import local_docker_launchers
 
 docker_client = docker.DockerClient.from_env(timeout=5)
@@ -53,7 +54,6 @@ sleep_seconds_between_queue_sweeps: float = 1.0
 # endregion
 
 # region: Authentication configuration
-import fastapi
 
 ADMIN_USER_NAME = "admin"
 default_component_library_owner_username = ADMIN_USER_NAME
@@ -78,6 +78,7 @@ def get_user_details(request: fastapi.Request):
 
 # region: Logging configuration
 import logging.config
+
 from cloud_pipelines_backend.instrumentation import structured_logging
 
 LOGGING_CONFIG = {
@@ -195,13 +196,16 @@ def run_orchestrator(
     orchestrator.run_loop()
 
 
-run_configured_orchestrator = lambda: run_orchestrator(
-    db_engine=db_engine,
-    storage_provider=storage_provider,
-    data_root_uri=artifacts_root_uri,
-    logs_root_uri=logs_root_uri,
-    sleep_seconds_between_queue_sweeps=sleep_seconds_between_queue_sweeps,
-)
+def run_configured_orchestrator():
+    run_orchestrator(
+        db_engine=db_engine,
+        storage_provider=storage_provider,
+        data_root_uri=artifacts_root_uri,
+        logs_root_uri=logs_root_uri,
+        sleep_seconds_between_queue_sweeps=sleep_seconds_between_queue_sweeps,
+    )
+
+
 # endregion
 
 
@@ -213,11 +217,12 @@ import traceback
 import fastapi
 from fastapi import staticfiles
 
-from cloud_pipelines_backend import api_router
-from cloud_pipelines_backend import database_ops
-from cloud_pipelines_backend.instrumentation import api_tracing
-from cloud_pipelines_backend.instrumentation import contextual_logging
-from cloud_pipelines_backend.instrumentation import otel_tracing
+from cloud_pipelines_backend import api_router, database_ops
+from cloud_pipelines_backend.instrumentation import (
+    api_tracing,
+    contextual_logging,
+    otel_tracing,
+)
 
 
 @contextlib.asynccontextmanager

@@ -4,16 +4,15 @@ import datetime
 import logging
 import pathlib
 import typing
-from typing import Any, Optional
+from typing import Any
 
 import huggingface_hub
 
 from cloud_pipelines.orchestration.launchers import naming_utils
-from ..storage_providers import huggingface_repo_storage
-from .. import component_structures as structures
-from . import container_component_utils
-from . import interfaces
 
+from .. import component_structures as structures
+from ..storage_providers import huggingface_repo_storage
+from . import container_component_utils, interfaces
 
 _logger = logging.getLogger(__name__)
 
@@ -30,11 +29,11 @@ class HuggingFaceJobsContainerLauncher(
     def __init__(
         self,
         *,
-        client: Optional[huggingface_hub.HfApi] = None,
-        namespace: Optional[str] = None,
-        hf_token: Optional[str] = None,
-        hf_job_token: Optional[str] = None,
-        job_timeout: Optional[int | float | str] = None,
+        client: huggingface_hub.HfApi | None = None,
+        namespace: str | None = None,
+        hf_token: str | None = None,
+        hf_job_token: str | None = None,
+        job_timeout: int | float | str | None = None,
     ):
         # The HF Jobs that we launch need token to write the output artifacts and logs
         hf_token = hf_token or huggingface_hub.get_token()
@@ -354,15 +353,16 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
             return interfaces.ContainerStatus.RUNNING
         elif status_str == huggingface_hub.JobStage.COMPLETED:
             return interfaces.ContainerStatus.SUCCEEDED
-        elif status_str == huggingface_hub.JobStage.ERROR:
-            return interfaces.ContainerStatus.FAILED
-        elif status_str == huggingface_hub.JobStage.CANCELED:
+        elif (
+            status_str == huggingface_hub.JobStage.ERROR
+            or status_str == huggingface_hub.JobStage.CANCELED
+        ):
             return interfaces.ContainerStatus.FAILED
         else:  # "DELETED"
             return interfaces.ContainerStatus.ERROR
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         # HF Jobs do not provide exit code
         if not self.has_ended:
             return None

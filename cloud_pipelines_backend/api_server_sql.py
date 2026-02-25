@@ -4,12 +4,13 @@ import datetime
 import json
 import logging
 import typing
-from typing import Any, Optional
+from typing import Any
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
         interfaces as storage_provider_interfaces,
     )
+
     from .launchers import interfaces as launcher_interfaces
 
 
@@ -26,8 +27,8 @@ def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
 
 
-from . import component_structures as structures
 from . import backend_types_sql as bts
+from . import component_structures as structures
 from . import errors
 from .errors import ItemNotFoundError
 
@@ -77,9 +78,9 @@ class PipelineRunsApiService_Sql:
         session: orm.Session,
         root_task: structures.TaskSpec,
         # Component library to avoid repeating component specs inside task specs
-        components: Optional[list[structures.ComponentReference]] = None,
+        components: list[structures.ComponentReference] | None = None,
         # Arbitrary metadata. Can be used to specify user.
-        annotations: Optional[dict[str, Any]] = None,
+        annotations: dict[str, Any] | None = None,
         created_by: str | None = None,
     ) -> PipelineRunResponse:
         # TODO: Validate the pipeline spec
@@ -89,7 +90,6 @@ class PipelineRunsApiService_Sql:
         pipeline_name = root_task.component_ref.spec.name
 
         with session.begin():
-
             root_execution_node = _recursively_create_all_executions_and_artifacts_root(
                 session=session,
                 root_task_spec=root_task,
@@ -201,7 +201,7 @@ class PipelineRunsApiService_Sql:
                 if value:
                     where_clauses.append(bts.PipelineRun.created_by == value)
                 else:
-                    where_clauses.append(bts.PipelineRun.created_by == None)
+                    where_clauses.append(bts.PipelineRun.created_by.is_(None))
             else:
                 raise NotImplementedError(f"Unsupported filter {filter}.")
         pipeline_runs = list(
@@ -275,7 +275,7 @@ class PipelineRunsApiService_Sql:
                 bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
                 == root_execution_id
             )
-            .where(bts.ExecutionNode.container_execution_status != None)
+            .where(bts.ExecutionNode.container_execution_status.isnot(None))
             .group_by(
                 bts.ExecutionNode.container_execution_status,
             )
@@ -386,7 +386,7 @@ def _calculate_hash(s: str) -> str:
 
 def _split_type_spec(
     type_spec: structures.TypeSpecType | None,
-) -> typing.Tuple[str | None, dict[str, Any] | None]:
+) -> tuple[str | None, dict[str, Any] | None]:
     if type_spec is None:
         return None, None
     if isinstance(type_spec, str):
@@ -520,7 +520,6 @@ class GetContainerExecutionLogResponse:
 
 
 class ExecutionNodesApiService_Sql:
-
     def get(self, session: orm.Session, id: bts.IdType) -> GetExecutionInfoResponse:
         execution_node = session.get(bts.ExecutionNode, id)
         if execution_node is None:
@@ -631,7 +630,7 @@ class ExecutionNodesApiService_Sql:
                 ExecutionNode_Descendant.id
                 == bts.ExecutionToAncestorExecutionLink.execution_id,
             )
-            .where(ExecutionNode_Descendant.container_execution_status != None)
+            .where(ExecutionNode_Descendant.container_execution_status.isnot(None))
             .group_by(
                 ExecutionNode_Child.id,
                 ExecutionNode_Descendant.container_execution_status,
@@ -644,7 +643,7 @@ class ExecutionNodesApiService_Sql:
                 sql.func.count().label("count"),
             )
             .where(ExecutionNode_Child.parent_execution_id == id)
-            .where(ExecutionNode_Child.container_execution_status != None)
+            .where(ExecutionNode_Child.container_execution_status.isnot(None))
             .group_by(
                 ExecutionNode_Child.id,
                 ExecutionNode_Child.container_execution_status,
@@ -790,7 +789,7 @@ class ExecutionNodesApiService_Sql:
                     log_uri=container_execution.log_uri,
                     storage_provider=storage_provider,
                 )
-            except:
+            except Exception:
                 # Do not raise exception if the execution is in SYSTEM_ERROR state
                 # We want to return the system error exception.
                 if (
@@ -801,11 +800,11 @@ class ExecutionNodesApiService_Sql:
         elif container_execution.status == bts.ContainerExecutionStatus.RUNNING:
             if not container_launcher:
                 raise ApiServiceError(
-                    f"Reading log of an unfinished container requires `container_launcher`."
+                    "Reading log of an unfinished container requires `container_launcher`."
                 )
             if not container_execution.launcher_data:
                 raise ApiServiceError(
-                    f"Execution does not have container launcher data."
+                    "Execution does not have container launcher data."
                 )
 
             launched_container = (
@@ -833,11 +832,11 @@ class ExecutionNodesApiService_Sql:
         container_execution = execution.container_execution
         if not container_execution:
             raise ApiServiceError(
-                f"Execution does not have container execution information."
+                "Execution does not have container execution information."
             )
         if not container_execution.launcher_data:
             raise ApiServiceError(
-                f"Execution does not have container launcher information."
+                "Execution does not have container launcher information."
             )
         if container_execution.status == bts.ContainerExecutionStatus.RUNNING:
             launched_container = (
@@ -882,7 +881,7 @@ def _read_container_execution_log_from_uri(
 
     if "://" not in log_uri:
         # Consider the URL to be an absolute local path (`/path` or `C:\path` or `C:/path`)
-        with open(log_uri, "r") as reader:
+        with open(log_uri) as reader:
             return reader.read()
     elif log_uri.startswith("gs://"):
         # TODO: Switch to using storage providers.
@@ -966,7 +965,6 @@ class GetArtifactSignedUrlResponse:
 
 
 class ArtifactNodesApiService_Sql:
-
     def get(self, session: orm.Session, id: bts.IdType) -> GetArtifactInfoResponse:
         artifact_node = session.get(bts.ArtifactNode, id)
         if artifact_node is None:
@@ -990,14 +988,14 @@ class ArtifactNodesApiService_Sql:
         if not artifact_data.uri:
             raise ValueError(f"Artifact node with {id=} does not have artifact URI.")
         if artifact_data.is_dir:
-            raise ValueError(f"Cannot generate signer URL for a directory artifact.")
+            raise ValueError("Cannot generate signer URL for a directory artifact.")
         if not artifact_data.uri.startswith("gs://"):
             raise ValueError(
                 f"The get_signed_artifact_url method only supports Google Cloud Storage URIs, but got {artifact_data.uri=}."
             )
 
-        from google.cloud import storage
         from google import auth
+        from google.cloud import storage
 
         # Avoiding error: "you need a private key to sign credentials."
         # "the credentials you are currently using <class 'google.auth.compute_engine.credentials.Credentials'> just contains a token.
@@ -1040,7 +1038,6 @@ class ListSecretsResponse:
 
 
 class SecretsApiService:
-
     def create_secret(
         self,
         *,
@@ -1053,7 +1050,7 @@ class SecretsApiService:
     ) -> SecretInfoResponse:
         secret_name = secret_name.strip()
         if not secret_name:
-            raise ApiServiceError(f"Secret name must not be empty.")
+            raise ApiServiceError("Secret name must not be empty.")
         return self._create_or_update_secret(
             session=session,
             user_id=user_id,
@@ -1166,9 +1163,7 @@ class SecretsApiService:
 # No. Decided to first do topological sort and then 1-stage generation.
 
 
-_ArtifactNodeOrDynamicDataType = typing.Union[
-    bts.ArtifactNode, structures.DynamicDataArgument
-]
+_ArtifactNodeOrDynamicDataType = bts.ArtifactNode | structures.DynamicDataArgument
 
 
 def _recursively_create_all_executions_and_artifacts_root(
@@ -1262,7 +1257,6 @@ def _recursively_create_all_executions_and_artifacts(
 
     # FIX: Handle ExecutionNode.constant_arguments
     # We do not touch root_task_spec.arguments. We use graph_input_artifact_nodes instead
-    constant_input_artifacts: dict[str, bts.ArtifactData] = {}
     input_artifact_nodes = dict(input_artifact_nodes)
     for input_spec in root_component_spec.inputs or []:
         input_artifact_node = input_artifact_nodes.get(input_spec.name)
@@ -1490,13 +1484,11 @@ def _toposort_tasks(
                     dependencies[argument.task_output.task_id] = True
                     if argument.task_output.task_id not in tasks:
                         raise TypeError(
-                            'Argument "{}" references non-existing task.'.format(
-                                argument
-                            )
+                            f'Argument "{argument}" references non-existing task.'
                         )
 
     # Topologically sorting tasks to detect cycles
-    task_dependents = {k: {} for k in task_dependencies.keys()}
+    task_dependents = {k: {} for k in task_dependencies}
     for task_id, dependencies in task_dependencies.items():
         for dependency in dependencies:
             task_dependents[dependency][task_id] = True
@@ -1515,7 +1507,7 @@ def _toposort_tasks(
                 task_number_of_remaining_dependencies[dependent_task] -= 1
                 process_task(dependent_task)
 
-    for task_id in task_dependencies.keys():
+    for task_id in task_dependencies:
         process_task(task_id)
     if len(sorted_tasks) != len(task_dependencies):
         tasks_with_unsatisfied_dependencies = {
@@ -1526,9 +1518,7 @@ def _toposort_tasks(
             key=lambda task_id: tasks_with_unsatisfied_dependencies[task_id],
         )
         raise ValueError(
-            'Task "{}" has cyclical dependency.'.format(
-                task_with_minimal_number_of_unsatisfied_dependencies
-            )
+            f'Task "{task_with_minimal_number_of_unsatisfied_dependencies}" has cyclical dependency.'
         )
 
     return sorted_tasks

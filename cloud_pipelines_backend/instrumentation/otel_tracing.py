@@ -5,10 +5,10 @@ This module sets up distributed tracing with OTLP exporter for sending traces
 to an OpenTelemetry collector endpoint.
 """
 
-import fastapi
 import logging
 import os
 
+import fastapi
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.grpc import (
     trace_exporter as otel_grpc_trace_exporter,
@@ -79,7 +79,7 @@ def setup_api_tracing(app: fastapi.FastAPI) -> None:
         # https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/fastapi/fastapi.html
         otel_fastapi.FastAPIInstrumentor.instrument_app(app)
 
-        _logger.info(f"OpenTelemetry tracing configured successfully.")
+        _logger.info("OpenTelemetry tracing configured successfully.")
 
     except Exception as e:
         _logger.exception(f"Failed to configure OpenTelemetry tracing: {e}")

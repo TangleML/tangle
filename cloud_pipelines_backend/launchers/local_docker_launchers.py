@@ -3,18 +3,17 @@ import datetime
 import logging
 import pathlib
 import typing
-from typing import Any, Optional
+from typing import Any
 
 import docker
-import docker.types
 import docker.models.containers
+import docker.types
 
 from cloud_pipelines.orchestration.launchers import naming_utils
 from cloud_pipelines.orchestration.storage_providers import local_storage
-from .. import component_structures as structures
-from . import container_component_utils
-from . import interfaces
 
+from .. import component_structures as structures
+from . import container_component_utils, interfaces
 
 _logger = logging.getLogger(__name__)
 
@@ -66,7 +65,7 @@ class DockerContainerLauncher(
 ):
     """Launcher that uses Docker installed locally"""
 
-    def __init__(self, client: Optional[docker.DockerClient] = None):
+    def __init__(self, client: docker.DockerClient | None = None):
         try:
             self._docker_client = client or docker.from_env(timeout=5)
         except Exception as ex:
@@ -87,8 +86,6 @@ class DockerContainerLauncher(
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedDockerContainer":
         container_spec = component_spec.implementation.container
-        input_names = list(input_arguments.keys())
-        output_names = list(output_uris.keys())
 
         # TODO: Validate the output URIs. Don't forget about (`C:\*` and `C:/*` paths)
 
@@ -281,7 +278,7 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
             return interfaces.ContainerStatus.ERROR
 
     @property
-    def exit_code(self) -> Optional[int]:
+    def exit_code(self) -> int | None:
         if not self.has_ended:
             return None
         return self._container.attrs["State"]["ExitCode"]
@@ -370,6 +367,7 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
             output_uris=output_uris,
             log_uri=log_uri,
         )
+
 
 def _parse_docker_time(date_string: str) -> datetime.datetime:
     # Workaround for Python <3.11 failing to parse timestamps that include nanoseconds:
