@@ -1,6 +1,6 @@
 import dataclasses
 import typing
-from typing import List, Mapping, Sequence, Union
+from collections.abc import Mapping, Sequence
 
 from .. import component_structures as structures
 
@@ -38,7 +38,7 @@ def resolve_container_command_line(
     input_paths = dict()
     inputs_consumed_by_value = {}
 
-    def expand_command_part(arg) -> Union[str, List[str], None]:
+    def expand_command_part(arg) -> str | list[str] | None:
         if arg is None:
             return None
         if isinstance(arg, (str, int, float, bool)):
@@ -74,9 +74,7 @@ def resolve_container_command_line(
             if arg.output_name in output_paths:
                 if output_paths[output_name] != output_filename:
                     raise ValueError(
-                        "Conflicting output files specified for port {}: {} and {}".format(
-                            output_name, output_paths[output_name], output_filename
-                        )
+                        f"Conflicting output files specified for port {output_name}: {output_paths[output_name]} and {output_filename}"
                     )
             else:
                 output_paths[output_name] = output_filename
@@ -107,7 +105,7 @@ def resolve_container_command_line(
             argument_is_present = input_name in provided_input_names
             return str(argument_is_present)
         else:
-            raise TypeError("Unrecognized argument type: {}".format(arg))
+            raise TypeError(f"Unrecognized argument type: {arg}")
 
     def expand_argument_list(argument_list):
         expanded_list = []

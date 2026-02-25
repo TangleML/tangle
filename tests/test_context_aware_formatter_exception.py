@@ -5,11 +5,11 @@ This test shows that the ContextAwareFormatter properly handles exception loggin
 including full tracebacks.
 """
 
+import io
 import logging
 import logging.config
-import io
-import sys
 import os
+import sys
 
 # Add the parent directory to the path so we can import the module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -68,7 +68,7 @@ def test_logger_exception_with_context_aware_formatter():
 
     try:
         # Simulate an error
-        result = 1 / 0
+        _ = 1 / 0
     except ZeroDivisionError:
         test_logger.exception("An error occurred while dividing")
 
@@ -111,20 +111,20 @@ def test_logger_exception_with_context_aware_formatter():
 
     # Verify context is included
     assert "execution_id=exec-12345" in output2, "execution_id should be in logs"
-    assert (
-        "container_execution_id=container-67890" in output2
-    ), "container_execution_id should be in logs"
+    assert "container_execution_id=container-67890" in output2, (
+        "container_execution_id should be in logs"
+    )
     assert "pipeline_run_id=run-abc123" in output2, "pipeline_run_id should be in logs"
 
     # Verify the traceback is still present with context
     assert "Traceback" in output2, "Traceback should be present even with context"
     assert "NameError" in output2, "Exception type should be in logs"
-    assert (
-        "inner_function" in output2
-    ), "Function names from traceback should be present"
-    assert (
-        "outer_function" in output2
-    ), "Function names from traceback should be present"
+    assert "inner_function" in output2, (
+        "Function names from traceback should be present"
+    )
+    assert "outer_function" in output2, (
+        "Function names from traceback should be present"
+    )
 
     # Clear buffer for next test
     log_buffer.truncate(0)
@@ -147,9 +147,9 @@ def test_logger_exception_with_context_aware_formatter():
 
     # Verify .error() does NOT include traceback
     assert "Traceback" not in output3, "logger.error() should NOT include traceback"
-    assert (
-        "ValueError" not in output3
-    ), "logger.error() should NOT include exception details"
+    assert "ValueError" not in output3, (
+        "logger.error() should NOT include exception details"
+    )
 
     # Clear buffer
     log_buffer.truncate(0)
@@ -167,9 +167,9 @@ def test_logger_exception_with_context_aware_formatter():
 
     # Verify .exception() DOES include traceback
     assert "Traceback" in output4, "logger.exception() SHOULD include traceback"
-    assert (
-        "ValueError" in output4
-    ), "logger.exception() SHOULD include exception details"
+    assert "ValueError" in output4, (
+        "logger.exception() SHOULD include exception details"
+    )
 
     print("\n" + "=" * 80)
     print("SUMMARY")

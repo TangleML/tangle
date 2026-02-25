@@ -4,7 +4,6 @@ import abc
 import dataclasses
 import datetime
 import enum
-
 import typing
 from typing import Any
 
@@ -71,8 +70,7 @@ class ContainerStatus(str, enum.Enum):
     ERROR = "ERROR"
 
 
-class LaunchedContainer(abc.ABC):
-
+class LaunchedContainer(abc.ABC):  # noqa: B024
     # @classmethod
     # def get(cls: typing.Type[_TLaunchedContainer]) -> _TLaunchedContainer:
     #     raise NotImplementedError()

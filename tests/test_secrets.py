@@ -1,11 +1,9 @@
-from typing import Callable
+from collections.abc import Callable
 from unittest import mock
 
 from sqlalchemy import orm
 
-from cloud_pipelines_backend import api_server_sql
-from cloud_pipelines_backend import component_structures
-from cloud_pipelines_backend import database_ops
+from cloud_pipelines_backend import api_server_sql, component_structures, database_ops
 from cloud_pipelines_backend.launchers import interfaces as launcher_interfaces
 
 

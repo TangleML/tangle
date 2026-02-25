@@ -1,26 +1,25 @@
 import copy
-import json
 import datetime
+import json
 import logging
 import time
 import traceback
 import typing
 from typing import Any
 
-
 import sqlalchemy as sql
 from sqlalchemy import orm
 
+from cloud_pipelines.orchestration.launchers import naming_utils
 from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_provider_interfaces,
 )
-from cloud_pipelines.orchestration.launchers import naming_utils
 
 from . import backend_types_sql as bts
 from . import component_structures as structures
+from .instrumentation import contextual_logging
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
-from .instrumentation import contextual_logging
 
 _logger = logging.getLogger(__name__)
 
@@ -64,7 +63,7 @@ class OrchestratorService_Sql:
             try:
                 self.process_each_queue_once()
                 time.sleep(self._sleep_seconds_between_queue_sweeps)
-            except:
+            except Exception:
                 _logger.exception("Error while calling `process_each_queue_once`")
 
     def process_each_queue_once(self):
@@ -76,12 +75,13 @@ class OrchestratorService_Sql:
             try:
                 with self._session_factory() as session:
                     queue_handler(session=session)
-            except:
+            except Exception:
                 _logger.exception(f"Error while executing {queue_handler=}")
 
     def internal_process_queued_executions_queue(self, session: orm.Session):
         query = (
-            sql.select(bts.ExecutionNode).where(
+            sql.select(bts.ExecutionNode)
+            .where(
                 bts.ExecutionNode.container_execution_status.in_(
                     (
                         bts.ContainerExecutionStatus.UNINITIALIZED,
@@ -125,7 +125,7 @@ class OrchestratorService_Sql:
         else:
             if not self._queued_executions_queue_idle:
                 self._queued_executions_queue_idle = True
-                _logger.debug(f"No queued executions found")
+                _logger.debug("No queued executions found")
             return False
 
     def internal_process_running_executions_queue(self, session: orm.Session):
@@ -201,7 +201,7 @@ class OrchestratorService_Sql:
             return True
         else:
             if not self._running_executions_queue_idle:
-                _logger.debug(f"No running container executions found")
+                _logger.debug("No running container executions found")
                 self._running_executions_queue_idle = True
             return False
 
@@ -656,7 +656,7 @@ class OrchestratorService_Sql:
                 # We should preserve the logs before terminating/deleting the container
                 try:
                     _retry(lambda: launched_container.upload_log())
-                except:
+                except Exception:
                     _logger.exception("Error uploading logs before termination.")
                 # Requesting container termination.
                 # Termination might not happen immediately (e.g. Kubernetes has grace period).
@@ -707,7 +707,7 @@ class OrchestratorService_Sql:
         execution_nodes = container_execution.execution_nodes
         if not execution_nodes:
             raise OrchestratorError(
-                f"Could not find ExecutionNode associated with ContainerExecution."
+                "Could not find ExecutionNode associated with ContainerExecution."
             )
         if len(execution_nodes) > 1:
             execution_node_ids = [execution.id for execution in execution_nodes]
@@ -752,15 +752,15 @@ class OrchestratorService_Sql:
                     # Those values may be useful for preservation, but not so important that we should fail a successfully completed container execution.
                     try:
                         data = uri_reader.download_as_bytes()
-                    except Exception as ex:
+                    except Exception:
                         _logger.exception(
-                            f"Error during preloading small artifact values."
+                            "Error during preloading small artifact values."
                         )
                         return None
                     try:
                         text = data.decode("utf-8")
                         return text
-                    except:
+                    except Exception:
                         pass
 
             output_artifact_uris: dict[str, str] = {
@@ -774,7 +774,9 @@ class OrchestratorService_Sql:
                 output_name
                 for output_name, uri in output_artifact_uris.items()
                 if not _retry(
-                    lambda: self._storage_provider.make_uri(uri).get_reader().exists()
+                    lambda uri=uri: (
+                        self._storage_provider.make_uri(uri).get_reader().exists()
+                    )
                 )
             ]
 
@@ -799,9 +801,9 @@ class OrchestratorService_Sql:
             else:
                 output_artifact_data_info_map = {
                     output_name: _retry(
-                        lambda: self._storage_provider.make_uri(uri)
-                        .get_reader()
-                        .get_info()
+                        lambda uri=uri: (
+                            self._storage_provider.make_uri(uri).get_reader().get_info()
+                        )
                     )
                     for output_name, uri in output_artifact_uris.items()
                 }
@@ -818,11 +820,13 @@ class OrchestratorService_Sql:
                         uri=output_artifact_uris[output_name],
                         # Preloading artifact value is it's small enough (e.g. <=255 bytes)
                         value=_retry(
-                            lambda: _maybe_get_small_artifact_value(
-                                uri_reader=self._storage_provider.make_uri(
-                                    output_artifact_uris[output_name]
-                                ).get_reader(),
-                                data_info=data_info,
+                            lambda output_name=output_name, data_info=data_info: (
+                                _maybe_get_small_artifact_value(
+                                    uri_reader=self._storage_provider.make_uri(
+                                        output_artifact_uris[output_name]
+                                    ).get_reader(),
+                                    data_info=data_info,
+                                )
                             )
                         ),
                         created_at=current_time,
@@ -932,7 +936,7 @@ def _mark_all_downstream_executions_as_skipped(
         )
 
 
-def _assert_type(value: typing.Any, typ: typing.Type[_T]) -> _T:
+def _assert_type(value: typing.Any, typ: type[_T]) -> _T:
     if not isinstance(value, typ):
         raise TypeError(f"Expected type {typ}, but got {type(value)}: {value}")
     return value
@@ -982,7 +986,7 @@ def _generate_random_id() -> str:
     nanoseconds = time.time_ns()
     milliseconds = nanoseconds // 1_000_000
 
-    return ("%012x" % milliseconds) + random_bytes.hex()
+    return f"{milliseconds:012x}" + random_bytes.hex()
 
 
 def _update_dict_recursive(d1: dict, d2: dict):
@@ -1003,7 +1007,7 @@ def _retry(
     for i in range(max_retries):
         try:
             return func()
-        except:
+        except Exception:
             _logger.exception(f"Exception calling {func}.")
             time.sleep(wait_seconds)
             if i == max_retries - 1:
@@ -1054,11 +1058,11 @@ def _maybe_get_small_artifact_value(
         # Those values may be useful for preservation, but not so important that we should fail a successfully completed container execution.
         try:
             data = uri_reader.download_as_bytes()
-        except Exception as ex:
-            _logger.exception(f"Error during preloading small artifact values.")
+        except Exception:
+            _logger.exception("Error during preloading small artifact values.")
             return None
         try:
             text = data.decode("utf-8")
             return text
-        except:
+        except Exception:
             pass

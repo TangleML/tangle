@@ -42,6 +42,13 @@ select = [
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
 ]
+ignore = [
+    "E501",  # line too long (let the formatter handle what it can)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"start_local.py" = ["E402"]  # imports not at top (by design, uses region blocks)
+"cloud_pipelines_backend/api_server_sql.py" = ["E402"]  # imports after early class/function definitions
 
 [tool.ruff.lint.isort]
 known-first-party = ["cloud_pipelines", "cloud_pipelines_backend"]

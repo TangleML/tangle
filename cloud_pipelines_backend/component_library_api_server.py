@@ -4,13 +4,12 @@ import datetime
 import hashlib
 from typing import Any
 
-import yaml
 import sqlalchemy as sql
+import yaml
 from sqlalchemy import orm
 
 from . import backend_types_sql as bts
-from . import errors
-from . import component_structures
+from . import component_structures, errors
 
 
 def calculate_digest_for_component_text(text: str) -> str:
@@ -192,7 +191,7 @@ class PublishedComponentService:
         if digest:
             query = query.filter(PublishedComponentRow.digest == digest)
         if not include_deprecated:
-            query = query.filter(PublishedComponentRow.deprecated == False)
+            query = query.filter(PublishedComponentRow.deprecated.is_(False))
         if name_substring:
             query = query.filter(
                 PublishedComponentRow.name.icontains(name_substring, autoescape=True)
@@ -243,7 +242,7 @@ class PublishedComponentService:
                     digest = component_ref.digest
             if not (digest and component_text):
                 raise ValueError(
-                    f"Component text is missing, cannot get component by digest (or digest is missing). Currently we cannot get component by URL for security reasons (you can get text from url yourself before publishing)."
+                    "Component text is missing, cannot get component by digest (or digest is missing). Currently we cannot get component by URL for security reasons (you can get text from url yourself before publishing)."
                 )
 
         component_spec = load_component_spec_from_text_and_validate(component_text)
@@ -372,7 +371,7 @@ class ComponentLibraryRow(bts._TableBase):
             user_name = id.partition(":")[2]
         else:
             raise ValueError(
-                f"make_empty_user_library only supports user component libraries."
+                "make_empty_user_library only supports user component libraries."
             )
 
         name = f"{user_name} components"
@@ -443,7 +442,7 @@ class ComponentLibraryService:
         # TODO: Implement filtering by user, URL
         # TODO: Implement visibility/access control
         query = sql.select(ComponentLibraryRow).filter(
-            ComponentLibraryRow.hide_from_search == False
+            ComponentLibraryRow.hide_from_search.is_(False)
         )
         if name_substring:
             query = query.filter(
@@ -520,14 +519,12 @@ class ComponentLibraryService:
         service = PublishedComponentService()
         session.rollback()
         component_count = 0
-        for (
-            component_ref
-        ) in ComponentLibraryService._recursively_iterate_over_all_component_refs_in_library_folder(
+        for component_ref in ComponentLibraryService._recursively_iterate_over_all_component_refs_in_library_folder(
             library.root_folder
         ):
             if not component_ref.text:
                 # TODO: Support publishing component from URL
-                raise ValueError(f"Currently every library component must have text.")
+                raise ValueError("Currently every library component must have text.")
             digest = calculate_digest_for_component_text(component_ref.text)
             if publish_components:
                 try:
@@ -669,8 +666,7 @@ class ComponentLibraryService:
             yield from ComponentLibraryService._recursively_iterate_over_all_component_refs_in_library_folder(
                 child_folder
             )
-        for component_ref in library_folder.components or []:
-            yield component_ref
+        yield from library_folder.components or []
 
 
 ### UserService
