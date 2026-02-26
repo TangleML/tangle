@@ -46,6 +46,18 @@ RESOURCES_ACCELERATORS_ANNOTATION_KEY = (
 # Multi-node constants
 _MULTI_NODE_MAX_NUMBER_OF_NODES = 16
 
+# dynamicData argument keys
+_MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY = "system/multi_node/number_of_nodes"
+_MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY = "system/multi_node/node_index"
+_MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY = "system/multi_node/node_0_address"
+_MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_addresses"
+
+# Environment variables for multi-node execution.
+_MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NUMBER_OF_NODES"
+_MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
+_MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_0_ADDRESS"
+_MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES"
+
 
 _T = typing.TypeVar("_T")
 
@@ -246,7 +258,22 @@ class _KubernetesContainerLauncherBase:
             input_argument = input_arguments[input_name]
             uri = input_argument.uri
             if not uri:
+                # Prohibiting consuming some kinds of dynamic data as file
+                if input_argument.dynamic_data:
+                    dynamic_data_kind, _ = (
+                        container_component_utils.parse_dynamic_data_argument(
+                            input_argument.dynamic_data
+                        )
+                    )
+                    if dynamic_data_kind in [_MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY]:
+                        raise interfaces.LauncherError(
+                            f"It's not possible to consume this dynamic data argument as a file: {input_name=}, {input_argument=}"
+                        )
                 if input_argument.value is None:
+                    if input_argument.dynamic_data:
+                        raise NotImplementedError(
+                            f"Consuming dynamic data as file is not implemented yet. {input_name=}, {input_argument=}"
+                        )
                     raise interfaces.LauncherError(
                         f"Artifact data has no value and no uri. This cannot happen. {input_name=}, {input_argument=}"
                     )
@@ -423,6 +450,32 @@ class _KubernetesPodLauncher(
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesContainer":
         namespace = self._choose_namespace(annotations=annotations)
+
+        # Resolving the dynamic data arguments
+        # Since pod-based launcher cannot launch multiple nodes, we could have chosen to fail when encountering multi-node arguments.
+        # However it's possible to provide sensible values for them.
+        known_dynamic_data_values = {
+            _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY: "1",
+            _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY: "0",
+            _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: "localhost",
+            _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: "localhost",
+        }
+        for input_name, input_argument in list(input_arguments.items()):
+            if input_argument.value is not None or input_argument.uri is not None:
+                continue
+            if not input_argument.dynamic_data:
+                continue
+            dynamic_data_kind, _ = (
+                container_component_utils.parse_dynamic_data_argument(
+                    input_argument.dynamic_data
+                )
+            )
+            dynamic_data_value = known_dynamic_data_values.get(dynamic_data_kind)
+            if dynamic_data_value is None:
+                raise interfaces.LauncherError(
+                    f"Dynamic data argument '{dynamic_data_kind}' is not supported by this launcher. {input_name=}, {input_argument=}"
+                )
+            input_argument.value = dynamic_data_value
 
         pod = self._prepare_kubernetes_pod(
             component_spec=component_spec,
@@ -949,6 +1002,35 @@ class _KubernetesJobLauncher(
             node_0_address = all_node_addresses[0]
             # We could join using comma or newline
             all_node_addresses_str = ",".join(all_node_addresses)
+        else:
+            node_0_address = "localhost"
+            all_node_addresses_str = node_0_address
+
+        # Resolving the dynamic data arguments
+        known_dynamic_data_values = {
+            _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY: str(num_nodes),
+            # Using Kubernetes' env variable substitution to inject the node index into the container since it's not known at the time of pod creation.
+            _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY: f"$({_MULTI_NODE_NODE_INDEX_ENV_VAR_NAME})",
+            _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: node_0_address,
+            _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: all_node_addresses_str,
+        }
+
+        for input_name, input_argument in list(input_arguments.items()):
+            if input_argument.value is not None or input_argument.uri is not None:
+                continue
+            if not input_argument.dynamic_data:
+                continue
+            dynamic_data_kind, dynamic_data_params = (
+                container_component_utils.parse_dynamic_data_argument(
+                    input_argument.dynamic_data
+                )
+            )
+            dynamic_data_value = known_dynamic_data_values.get(dynamic_data_kind)
+            if dynamic_data_value is None:
+                raise interfaces.LauncherError(
+                    f"Dynamic data argument '{dynamic_data_kind}' is not supported by this launcher. {input_name=}, {input_argument=}"
+                )
+            input_argument.value = dynamic_data_value
 
         pod = self._prepare_kubernetes_pod(
             component_spec=component_spec,
@@ -977,22 +1059,20 @@ class _KubernetesJobLauncher(
         if enable_multi_node:
             # Temporary implementation of implicitly passing multi-node information to the component code.
             # After testing, this implementation will be replaced by more explicit way to consume multi-node information (dynamicData arguments passed to component inputs).
-            MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME = (
-                "_TANGLE_MULTI_NODE_NUMBER_OF_NODES"
-            )
-            MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 
             main_container_spec = pod.spec.containers[0]
             main_container_spec.env = main_container_spec.env or []
             main_container_spec.env.append(
                 k8s_client_lib.V1EnvVar(
-                    name=MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME,
+                    name=_MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME,
                     value=str(num_nodes),
                 )
             )
-            main_container_spec.env.append(
+            # We need to insert this env variable at the start on the list since subsequent variables can depend on it.
+            main_container_spec.env.insert(
+                0,
                 k8s_client_lib.V1EnvVar(
-                    name=MULTI_NODE_NODE_INDEX_ENV_VAR_NAME,
+                    name=_MULTI_NODE_NODE_INDEX_ENV_VAR_NAME,
                     # We cannot use "$(JOB_COMPLETION_INDEX)" in env variables since it's added after all other env variables.
                     # value="$(JOB_COMPLETION_INDEX)",
                     # So we just recreate it by reading the pod annotation/label that Kubernetes sets on pods of indexed jobs.
@@ -1001,7 +1081,7 @@ class _KubernetesJobLauncher(
                             field_path="metadata.annotations['batch.kubernetes.io/job-completion-index']"
                         )
                     ),
-                )
+                ),
             )
             # Handling cross-pod communication.
             # Creating headless Kubernetes Service to give all pods in the job a stable DNS name to communicate with each other.
@@ -1052,12 +1132,6 @@ class _KubernetesJobLauncher(
             #     for idx in range(num_nodes)
             # ]
 
-            _MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME = (
-                "_TANGLE_MULTI_NODE_NODE_0_ADDRESS"
-            )
-            _MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME = (
-                "_TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES"
-            )
             main_container_spec.env.append(
                 k8s_client_lib.V1EnvVar(
                     name=_MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME,
