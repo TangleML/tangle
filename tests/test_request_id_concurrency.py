@@ -1,6 +1,8 @@
 """Test that request_id works correctly with concurrent requests."""
 
 import asyncio
+import threading
+
 import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
@@ -229,8 +231,6 @@ def test_request_id_with_context_manager_is_thread_safe():
 
         # After context exits, should be cleared in this context
         # (though in threads, contexts are separate anyway)
-
-    import threading
 
     # Create threads that will process with different request_ids
     threads = [

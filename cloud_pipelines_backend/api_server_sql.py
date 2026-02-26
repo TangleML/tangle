@@ -1,16 +1,25 @@
 import base64
 import dataclasses
 import datetime
+import hashlib
 import json
 import logging
 import typing
 from typing import Any, Optional
+
+import sqlalchemy as sql
+from sqlalchemy import orm
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
         interfaces as storage_provider_interfaces,
     )
     from .launchers import interfaces as launcher_interfaces
+
+from . import backend_types_sql as bts
+from . import component_structures as structures
+from . import errors
+from .errors import ItemNotFoundError
 
 
 _logger = logging.getLogger(__name__)
@@ -24,12 +33,6 @@ class ApiServiceError(RuntimeError):
 
 def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
-
-
-from . import component_structures as structures
-from . import backend_types_sql as bts
-from . import errors
-from .errors import ItemNotFoundError
 
 
 # ==== PipelineJobService
@@ -63,10 +66,6 @@ class GetPipelineRunResponse(PipelineRunResponse):
 class ListPipelineJobsResponse:
     pipeline_runs: list[PipelineRunResponse]
     next_page_token: str | None = None
-
-
-import sqlalchemy as sql
-from sqlalchemy import orm
 
 
 class PipelineRunsApiService_Sql:
@@ -379,8 +378,6 @@ def _parse_filter(filter: str) -> dict[str, str]:
 # TODO: Use _storage_provider.calculate_hash(path)
 # Hashing of constant arguments should the use same algorithm as caching of the output artifacts.
 def _calculate_hash(s: str) -> str:
-    import hashlib
-
     return "md5=" + hashlib.md5(s.encode("utf-8")).hexdigest()
 
 

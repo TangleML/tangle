@@ -1,7 +1,9 @@
 import copy
-import json
 import datetime
+import hashlib
+import json
 import logging
+import os
 import time
 import traceback
 import typing
@@ -967,8 +969,6 @@ def _assert_not_none(value: _T | None) -> _T:
 
 
 def _calculate_hash(s: str) -> str:
-    import hashlib
-
     return "md5=" + hashlib.md5(s.encode("utf-8")).hexdigest()
 
 
@@ -1000,9 +1000,6 @@ def _get_current_time() -> datetime.datetime:
 
 
 def _generate_random_id() -> str:
-    import os
-    import time
-
     random_bytes = os.urandom(4)
     nanoseconds = time.time_ns()
     milliseconds = nanoseconds // 1_000_000
