@@ -42,6 +42,9 @@ RESOURCES_ACCELERATORS_ANNOTATION_KEY = (
     "cloud-pipelines.net/launchers/generic/resources.accelerators"
 )
 
+# Multi-node constants
+_MULTI_NODE_MAX_NUMBER_OF_NODES = 16
+
 
 _T = typing.TypeVar("_T")
 
@@ -921,9 +924,9 @@ class _KubernetesJobLauncher(
         )
         enable_multi_node = num_nodes_annotation_str is not None
         num_nodes = int(num_nodes_annotation_str) if num_nodes_annotation_str else 1
-        if not (0 < num_nodes <= 16):
+        if not (0 < num_nodes <= _MULTI_NODE_MAX_NUMBER_OF_NODES):
             raise interfaces.LauncherError(
-                f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and 16, but got {num_nodes}."
+                f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and {_MULTI_NODE_MAX_NUMBER_OF_NODES}, but got {num_nodes}."
             )
 
         if enable_multi_node:
