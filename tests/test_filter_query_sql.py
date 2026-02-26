@@ -1,3 +1,4 @@
+import datetime
 import json
 
 import pydantic
@@ -479,38 +480,108 @@ class TestTimeRangePredicate:
             )
 
 
-class TestPageToken:
-    def test_decode_none(self):
-        token = filter_query_sql.PageToken.decode(None)
-        assert token.offset == 0
-        assert token.filter is None
-        assert token.filter_query is None
+class TestCursorEncodeDecode:
+    def test_encode_cursor_roundtrip(self):
+        naive_dt = datetime.datetime(2024, 2, 1, 9, 0, 0)
+        run_id = "018d8fff0000aaaabbbb"
+        cursor = filter_query_sql.encode_cursor(naive_dt, run_id)
+        decoded = filter_query_sql.decode_cursor(cursor)
+        assert decoded is not None
+        assert decoded == (naive_dt, run_id)
 
-    def test_encode_decode_roundtrip(self):
-        original = filter_query_sql.PageToken(
-            offset=20,
-            filter="created_by:alice",
-            filter_query='{"and": [{"key_exists": {"key": "team"}}]}',
-        )
-        encoded = original.encode()
-        decoded = filter_query_sql.PageToken.decode(encoded)
-        assert decoded.offset == 20
-        assert decoded.filter == "created_by:alice"
-        assert decoded.filter_query == '{"and": [{"key_exists": {"key": "team"}}]}'
+    def test_encode_cursor_stamps_utc(self):
+        naive_dt = datetime.datetime(2024, 2, 1, 9, 0, 0)
+        cursor = filter_query_sql.encode_cursor(naive_dt, "abc123")
+        assert "+00:00" in cursor
 
-    def test_decode_with_filter_query(self):
-        fq_json = '{"or": [{"value_equals": {"key": "env", "value": "prod"}}]}'
-        original = filter_query_sql.PageToken(offset=10, filter_query=fq_json)
-        decoded = filter_query_sql.PageToken.decode(original.encode())
-        assert decoded.filter_query == fq_json
-        assert decoded.filter is None
-        assert decoded.offset == 10
+    def test_encode_cursor_already_aware(self):
+        aware_dt = datetime.datetime(2024, 2, 1, 9, 0, 0, tzinfo=datetime.timezone.utc)
+        cursor = filter_query_sql.encode_cursor(aware_dt, "abc123")
+        assert "+00:00" in cursor
+        decoded = filter_query_sql.decode_cursor(cursor)
+        assert decoded is not None
+        assert decoded == (datetime.datetime(2024, 2, 1, 9, 0, 0), "abc123")
 
-    def test_decode_empty_string(self):
-        token = filter_query_sql.PageToken.decode("")
-        assert token.offset == 0
-        assert token.filter is None
-        assert token.filter_query is None
+    def test_decode_cursor_none(self):
+        assert filter_query_sql.decode_cursor(None) is None
+
+    def test_decode_cursor_empty_string(self):
+        assert filter_query_sql.decode_cursor("") is None
+
+    def test_decode_cursor_no_tilde_raises(self):
+        """Token without ~ raises InvalidPageTokenError."""
+        with pytest.raises(
+            errors.InvalidPageTokenError, match="Unrecognized page_token"
+        ):
+            filter_query_sql.decode_cursor("not-a-cursor")
+
+    def test_decode_cursor_tilde_separated(self):
+        cursor = "2024-02-01T09:00:00+00:00~018d8fff0000"
+        result = filter_query_sql.decode_cursor(cursor)
+        assert result is not None
+        created_at, run_id = result
+        assert created_at == datetime.datetime(2024, 2, 1, 9, 0, 0)
+        assert created_at.tzinfo is None
+        assert run_id == "018d8fff0000"
+
+    def test_decode_cursor_naive_fallback(self):
+        """Cursor without timezone parses correctly as naive."""
+        cursor = "2024-02-01T09:00:00~abc123"
+        result = filter_query_sql.decode_cursor(cursor)
+        assert result is not None
+        created_at, run_id = result
+        assert created_at == datetime.datetime(2024, 2, 1, 9, 0, 0)
+        assert created_at.tzinfo is None
+        assert run_id == "abc123"
+
+
+class _FakeRow:
+    """Minimal stand-in for bts.PipelineRun with only the fields cursor logic needs."""
+
+    def __init__(self, *, created_at: datetime.datetime, id: str):
+        self.created_at = created_at
+        self.id = id
+
+
+class TestMaybeNextPageToken:
+    def test_returns_none_when_fewer_than_page_size(self):
+        rows = [_FakeRow(created_at=datetime.datetime(2024, 1, 1), id="a")]
+        assert filter_query_sql.maybe_next_page_token(rows=rows, page_size=10) is None
+
+    def test_returns_none_when_empty(self):
+        assert filter_query_sql.maybe_next_page_token(rows=[], page_size=10) is None
+
+    def test_returns_cursor_when_full_page(self):
+        rows = [
+            _FakeRow(
+                created_at=datetime.datetime(2024, 1, 1, 12 - i, 0, 0), id=f"id-{i}"
+            )
+            for i in range(10)
+        ]
+        token = filter_query_sql.maybe_next_page_token(rows=rows, page_size=10)
+        assert token is not None
+        assert "~" in token
+        decoded = filter_query_sql.decode_cursor(token)
+        assert decoded is not None
+        assert decoded == (rows[-1].created_at, rows[-1].id)
+
+    def test_returns_cursor_at_page_boundary(self):
+        """Even with more rows than page_size, cursor points to the page_size-th row."""
+        rows = [
+            _FakeRow(created_at=datetime.datetime(2024, 1, 1), id=f"id-{i}")
+            for i in range(15)
+        ]
+        token = filter_query_sql.maybe_next_page_token(rows=rows, page_size=10)
+        assert token is not None
+        decoded = filter_query_sql.decode_cursor(token)
+        assert decoded == (rows[9].created_at, rows[9].id)
+
+    def test_returns_none_at_exact_boundary_minus_one(self):
+        rows = [
+            _FakeRow(created_at=datetime.datetime(2024, 1, 1), id=f"id-{i}")
+            for i in range(9)
+        ]
+        assert filter_query_sql.maybe_next_page_token(rows=rows, page_size=10) is None
 
 
 class TestConvertLegacyFilterToFilterQuery:
@@ -558,18 +629,13 @@ class TestConvertLegacyFilterToFilterQuery:
 
 class TestBuildListFilters:
     def test_no_filters(self):
-        clauses, offset, next_token = filter_query_sql.build_list_filters(
+        clauses = filter_query_sql.build_list_filters(
             filter_value=None,
             filter_query_value=None,
-            page_token_value=None,
+            cursor_value=None,
             current_user=None,
-            page_size=10,
         )
         assert clauses == []
-        assert offset == 0
-        assert next_token.offset == 10
-        assert next_token.filter is None
-        assert next_token.filter_query is None
 
     def test_mutual_exclusivity_raises(self):
         with pytest.raises(
@@ -578,99 +644,117 @@ class TestBuildListFilters:
             filter_query_sql.build_list_filters(
                 filter_value="created_by:alice",
                 filter_query_value='{"and": [{"key_exists": {"key": "team"}}]}',
-                page_token_value=None,
+                cursor_value=None,
                 current_user=None,
-                page_size=10,
             )
 
     def test_legacy_filter_produces_annotation_clause(self):
-        clauses, offset, next_token = filter_query_sql.build_list_filters(
+        clauses = filter_query_sql.build_list_filters(
             filter_value="created_by:alice",
             filter_query_value=None,
-            page_token_value=None,
+            cursor_value=None,
             current_user=None,
-            page_size=10,
         )
         assert len(clauses) == 1
-        compiled = _compile(clauses[0])
-        assert "EXISTS" in compiled.upper()
-        assert "pipeline_run_annotation" in compiled
-        assert offset == 0
-        assert next_token.filter is None
-        assert next_token.filter_query is not None
+        assert _compile(clauses[0]) == (
+            "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id "
+            "FROM pipeline_run_annotation, pipeline_run "
+            "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+            "AND pipeline_run_annotation.\"key\" = 'system/pipeline_run.created_by' "
+            "AND pipeline_run_annotation.value = 'alice')"
+        )
 
     def test_filter_query_produces_clauses(self):
         fq = '{"and": [{"key_exists": {"key": "team"}}]}'
-        clauses, offset, next_token = filter_query_sql.build_list_filters(
+        clauses = filter_query_sql.build_list_filters(
             filter_value=None,
             filter_query_value=fq,
-            page_token_value=None,
+            cursor_value=None,
             current_user=None,
-            page_size=10,
         )
         assert len(clauses) == 1
-        compiled = _compile(clauses[0])
-        assert "EXISTS" in compiled.upper()
-        assert next_token.filter_query == fq
-
-    def test_page_token_with_legacy_filter_converts(self):
-        token = filter_query_sql.PageToken(
-            offset=20,
-            filter="created_by:alice",
+        assert _compile(clauses[0]) == (
+            "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id "
+            "FROM pipeline_run_annotation, pipeline_run "
+            "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+            "AND pipeline_run_annotation.\"key\" = 'team')"
         )
-        clauses, offset, next_token = filter_query_sql.build_list_filters(
+
+    def test_cursor_where_clause_generated(self):
+        cursor = filter_query_sql.encode_cursor(
+            datetime.datetime(2024, 2, 1, 9, 0, 0), "018d8fff"
+        )
+        clauses = filter_query_sql.build_list_filters(
             filter_value=None,
             filter_query_value=None,
-            page_token_value=token.encode(),
+            cursor_value=cursor,
             current_user=None,
-            page_size=10,
         )
-        assert offset == 20
         assert len(clauses) == 1
-        compiled = _compile(clauses[0])
-        assert "EXISTS" in compiled.upper()
-        assert next_token.offset == 30
-        assert next_token.filter is None
-        assert next_token.filter_query is not None
+        assert _compile(clauses[0]) == (
+            "(pipeline_run.created_at, pipeline_run.id) "
+            "< ('2024-02-01 09:00:00.000000', '018d8fff')"
+        )
 
-    def test_page_token_restores_filter_query(self):
-        fq = '{"and": [{"key_exists": {"key": "env"}}]}'
-        token = filter_query_sql.PageToken(offset=10, filter_query=fq)
-        clauses, offset, next_token = filter_query_sql.build_list_filters(
+    def test_cursor_where_clause_not_generated_page1(self):
+        clauses = filter_query_sql.build_list_filters(
             filter_value=None,
             filter_query_value=None,
-            page_token_value=token.encode(),
+            cursor_value=None,
             current_user=None,
-            page_size=5,
         )
-        assert offset == 10
-        assert len(clauses) == 1
-        assert next_token.offset == 15
-        assert next_token.filter_query == fq
+        assert clauses == []
 
-    def test_page_size_reflected_in_next_token(self):
-        _, _, next_token = filter_query_sql.build_list_filters(
+    def test_cursor_with_filter_query(self):
+        fq = '{"and": [{"key_exists": {"key": "team"}}]}'
+        cursor = filter_query_sql.encode_cursor(
+            datetime.datetime(2024, 2, 1, 9, 0, 0), "018d8fff"
+        )
+        clauses = filter_query_sql.build_list_filters(
             filter_value=None,
-            filter_query_value=None,
-            page_token_value=None,
+            filter_query_value=fq,
+            cursor_value=cursor,
             current_user=None,
-            page_size=25,
         )
-        assert next_token.offset == 25
+        assert len(clauses) == 2
+        assert _compile(clauses[0]) == (
+            "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id "
+            "FROM pipeline_run_annotation, pipeline_run "
+            "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+            "AND pipeline_run_annotation.\"key\" = 'team')"
+        )
+        assert _compile(clauses[1]) == (
+            "(pipeline_run.created_at, pipeline_run.id) "
+            "< ('2024-02-01 09:00:00.000000', '018d8fff')"
+        )
 
-    def test_created_by_me_resolved_in_next_token(self):
-        clauses, offset, next_token = filter_query_sql.build_list_filters(
+    def test_invalid_cursor_raises(self):
+        """cursor_value without ~ raises InvalidPageTokenError."""
+        with pytest.raises(
+            errors.InvalidPageTokenError, match="Unrecognized page_token"
+        ):
+            filter_query_sql.build_list_filters(
+                filter_value=None,
+                filter_query_value=None,
+                cursor_value="not-a-cursor",
+                current_user=None,
+            )
+
+    def test_created_by_me_resolves(self):
+        clauses = filter_query_sql.build_list_filters(
             filter_value="created_by:me",
             filter_query_value=None,
-            page_token_value=None,
+            cursor_value=None,
             current_user="bob@example.com",
-            page_size=10,
         )
         assert len(clauses) == 1
-        assert next_token.filter is None
-        assert next_token.filter_query is not None
-        parsed_fq = json.loads(next_token.filter_query)
-        assert parsed_fq["and"][0]["value_equals"]["value"] == "me"
+        assert _compile(clauses[0]) == (
+            "EXISTS (SELECT pipeline_run_annotation.pipeline_run_id "
+            "FROM pipeline_run_annotation, pipeline_run "
+            "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id "
+            "AND pipeline_run_annotation.\"key\" = 'system/pipeline_run.created_by' "
+            "AND pipeline_run_annotation.value = 'bob@example.com')"
+        )
 
 
 class TestSystemKeyValidation:

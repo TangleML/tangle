@@ -13,6 +13,7 @@ IdType: typing.TypeAlias = str
 IX_EXECUTION_NODE_CACHE_KEY: Final[str] = (
     "ix_execution_node_container_execution_cache_key"
 )
+IX_PR_CREATED_AT_DESC_ID_DESC: Final[str] = "ix_pr_created_at_desc_id_desc"
 IX_ANNOTATION_RUN_ID_KEY_VALUE: Final[str] = (
     "ix_pipeline_run_annotation_run_id_key_value"
 )
@@ -166,6 +167,11 @@ class PipelineRun(_TableBase):
             "ix_pipeline_run_created_by_created_at_desc",
             created_by,
             created_at.desc(),
+        ),
+        sql.Index(
+            IX_PR_CREATED_AT_DESC_ID_DESC,
+            created_at.desc(),
+            id.desc(),
         ),
     )
 
