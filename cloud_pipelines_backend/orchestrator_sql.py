@@ -21,6 +21,7 @@ from . import component_structures as structures
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import contextual_logging
+from .instrumentation import metrics as app_metrics
 
 _logger = logging.getLogger(__name__)
 
@@ -1012,6 +1013,8 @@ def _retry(
 
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):
+    app_metrics.execution_system_errors.add(1)
+
     if execution.extra_data is None:
         execution.extra_data = {}
     execution.extra_data[
