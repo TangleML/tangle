@@ -108,19 +108,15 @@ class PipelineRunsApiService_Sql:
                 },
             )
             session.add(pipeline_run)
-            # Mirror created_by into the annotations table so it's searchable
-            # via filter_query like any other annotation.
-            if created_by is not None:
-                # Flush to populate pipeline_run.id (server-generated) before inserting the annotation FK.
-                # TODO: Use ORM relationship instead of explicit flush + manual FK assignment.
-                session.flush()
-                session.add(
-                    bts.PipelineRunAnnotation(
-                        pipeline_run_id=pipeline_run.id,
-                        key=filter_query_sql.SystemKey.CREATED_BY,
-                        value=created_by,
-                    )
-                )
+            # Flush to populate pipeline_run.id (server-generated) before inserting annotation FKs.
+            # TODO: Use ORM relationship instead of explicit flush + manual FK assignment.
+            session.flush()
+            _mirror_system_annotations(
+                session=session,
+                pipeline_run_id=pipeline_run.id,
+                created_by=created_by,
+                pipeline_name=pipeline_name,
+            )
             session.commit()
 
         session.refresh(pipeline_run)
@@ -1148,6 +1144,32 @@ class SecretsApiService:
 _ArtifactNodeOrDynamicDataType = typing.Union[
     bts.ArtifactNode, structures.DynamicDataArgument
 ]
+
+
+def _mirror_system_annotations(
+    *,
+    session: orm.Session,
+    pipeline_run_id: bts.IdType,
+    created_by: str | None,
+    pipeline_name: str | None,
+) -> None:
+    """Mirror pipeline run fields as system annotations for filter_query search."""
+    if created_by:
+        session.add(
+            bts.PipelineRunAnnotation(
+                pipeline_run_id=pipeline_run_id,
+                key=filter_query_sql.SystemKey.CREATED_BY,
+                value=created_by,
+            )
+        )
+    if pipeline_name:
+        session.add(
+            bts.PipelineRunAnnotation(
+                pipeline_run_id=pipeline_run_id,
+                key=filter_query_sql.SystemKey.NAME,
+                value=pipeline_name,
+            )
+        )
 
 
 def _recursively_create_all_executions_and_artifacts_root(

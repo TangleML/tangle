@@ -87,6 +87,38 @@ def migrate_db(db_engine: sqlalchemy.Engine):
             break
 
     backfill_created_by_annotations(db_engine)
+    backfill_pipeline_name_annotations(db_engine)
+
+
+def backfill_pipeline_name_annotations(db_engine: sqlalchemy.Engine):
+    """Copy pipeline_run.extra_data['pipeline_name'] into pipeline_run_annotation
+    so annotation-based search works for pipeline names.
+
+    Idempotent -- skips rows that already have the annotation.
+    """
+    with orm.Session(db_engine) as session:
+        pipeline_name_expr = bts.PipelineRun.extra_data["pipeline_name"].as_string()
+        stmt = sqlalchemy.insert(bts.PipelineRunAnnotation).from_select(
+            ["pipeline_run_id", "key", "value"],
+            sqlalchemy.select(
+                bts.PipelineRun.id,
+                sqlalchemy.literal(filter_query_sql.SystemKey.NAME),
+                pipeline_name_expr,
+            ).where(
+                pipeline_name_expr.isnot(None),
+                pipeline_name_expr != "",
+                # NOT EXISTS makes the backfill idempotent
+                ~sqlalchemy.exists(
+                    sqlalchemy.select(bts.PipelineRunAnnotation.pipeline_run_id).where(
+                        bts.PipelineRunAnnotation.pipeline_run_id == bts.PipelineRun.id,
+                        bts.PipelineRunAnnotation.key
+                        == filter_query_sql.SystemKey.NAME,
+                    )
+                ),
+            ),
+        )
+        session.execute(stmt)
+        session.commit()
 
 
 def backfill_created_by_annotations(db_engine: sqlalchemy.Engine):
@@ -104,6 +136,7 @@ def backfill_created_by_annotations(db_engine: sqlalchemy.Engine):
                 bts.PipelineRun.created_by,
             ).where(
                 bts.PipelineRun.created_by.isnot(None),
+                bts.PipelineRun.created_by != "",
                 # NOT EXISTS makes the backfill idempotent
                 ~sqlalchemy.exists(
                     sqlalchemy.select(bts.PipelineRunAnnotation.pipeline_run_id).where(
