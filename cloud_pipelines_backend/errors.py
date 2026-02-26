@@ -22,3 +22,7 @@ class MutuallyExclusiveFilterError(ApiValidationError):
 
 class InvalidAnnotationKeyError(ApiValidationError):
     pass
+
+
+class InvalidPageTokenError(ApiValidationError):
+    pass
