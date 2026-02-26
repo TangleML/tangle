@@ -18,6 +18,7 @@ from cloud_pipelines.orchestration.storage_providers import (
 )
 from cloud_pipelines.orchestration.storage_providers import local_storage
 from .. import component_structures as structures
+from . import common_annotations
 from . import container_component_utils
 from . import interfaces
 
@@ -916,6 +917,34 @@ class _KubernetesJobLauncher(
         assert pod.spec
         assert pod.spec.containers
 
+        # We have 2 options regarding job name:
+        # Option 1: We could use randomized job name generated via `metadata.generateName`.
+        #    Randomized job names are slightly harder to use:
+        #    * We cannot predict the pod names and their DNS addresses which are needed for cross-pod communication.
+        #      We can solve this problem by adding environment variables that are sourced from the job name pod label at runtime and use this environment variable to dynamically construct node addresses.
+        #      However this adds complexity and requires using environment variables for everything.
+        #    * Service requires a static selector which is usually a job-name label, which cannot be used when job name is randomized.
+        #      We can solve this problem by using another label for selector (such as container_execution_id), but this adds more complexity.
+        # Option 2 (chosen): We could use explicit job name specified via `metadata.name`.
+        #    There do not seem to be any downsides for specifying the job name explicitly.
+        #    I do not foresee a need to have multiple Jobs associated with a single container execution ID.
+        #    If such cases arise in the future, we can always add a random suffix or switch to option 1.
+
+        container_execution_id = (annotations or {}).get(
+            common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
+        )
+
+        resource_name_prefix = "tangle-ce-"
+        if container_execution_id:
+            explicit_resource_name = resource_name_prefix + container_execution_id
+        else:
+            _logger.warning(
+                f"Should not happen: Container execution ID annotation is required for multi-node execution, but it was not found."
+            )
+            import uuid
+
+            explicit_resource_name = resource_name_prefix + uuid.uuid4().hex[:8]
+
         MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
             "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
         )
@@ -963,7 +992,7 @@ class _KubernetesJobLauncher(
 
         job = k8s_client_lib.V1Job(
             metadata=k8s_client_lib.V1ObjectMeta(
-                generate_name=job_name_prefix,
+                name=explicit_job_name,
                 # TODO: In the future (once consumers have migrated to _choose_namespace)
                 # we should prohibit/ignore changing pod namespace in the pod post-processor.
                 namespace=pod.metadata.namespace,
