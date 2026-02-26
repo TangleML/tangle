@@ -1,4 +1,3 @@
-import base64
 import datetime
 import json
 import enum
@@ -38,39 +37,58 @@ SYSTEM_KEY_SUPPORTED_PREDICATES: dict[PipelineRunAnnotationSystemKey, set[type]]
 }
 
 # ---------------------------------------------------------------------------
-# Page-token helpers
+# Cursor encode / decode
 # ---------------------------------------------------------------------------
 
-_PAGE_TOKEN_OFFSET_KEY: Final[str] = "offset"
-_PAGE_TOKEN_FILTER_KEY: Final[str] = "filter"
-_PAGE_TOKEN_FILTER_QUERY_KEY: Final[str] = "filter_query"
+CURSOR_SEPARATOR: Final[str] = "~"
 
 
-def _encode_page_token(*, page_token_dict: dict[str, Any]) -> str:
-    return base64.b64encode(json.dumps(page_token_dict).encode("utf-8")).decode("utf-8")
+def encode_cursor(created_at: datetime.datetime, run_id: str) -> str:
+    """Encode the last row's position as a tilde-separated cursor string.
 
-
-def _decode_page_token(*, page_token: str | None) -> dict[str, Any]:
-    return json.loads(base64.b64decode(page_token)) if page_token else {}
-
-
-def _resolve_filter_value(
-    *,
-    filter: str | None,
-    filter_query: str | None,
-    page_token: str | None,
-) -> tuple[str | None, str | None, int]:
-    """Decode page_token and return the effective (filter_value, filter_query_value, offset).
-
-    If a page_token is present, its stored values take precedence over the
-    raw parameters (the token carries resolved values forward across pages).
+    The created_at from PipelineRun is naive UTC (no UtcDateTime decorator on
+    this column). We stamp it as UTC here so the cursor string is
+    timezone-explicit for readability and correctness.
+    decode_cursor() normalizes back to naive UTC for DB comparison.
     """
-    page_token_dict = _decode_page_token(page_token=page_token)
-    offset = page_token_dict.get(_PAGE_TOKEN_OFFSET_KEY, 0)
-    if page_token:
-        filter = page_token_dict.get(_PAGE_TOKEN_FILTER_KEY)
-        filter_query = page_token_dict.get(_PAGE_TOKEN_FILTER_QUERY_KEY)
-    return filter, filter_query, offset
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=datetime.timezone.utc)
+    return f"{created_at.isoformat()}{CURSOR_SEPARATOR}{run_id}"
+
+
+def decode_cursor(cursor: str | None) -> tuple[datetime.datetime, str] | None:
+    """Parse a tilde-separated cursor string into (created_at, run_id).
+
+    Returns None for empty/missing cursors. Raises ApiValidationError
+    for unrecognized formats (e.g. legacy base64 tokens).
+    """
+    if not cursor:
+        return None
+    if CURSOR_SEPARATOR not in cursor:
+        raise errors.ApiValidationError(
+            f"Unrecognized page_token format. "
+            f"Expected 'created_at~id' cursor. token={cursor[:20]}... (truncated)"
+        )
+    # maxsplit=1: split on first ~ only, so run_id can safely contain ~
+    created_at_str, run_id = cursor.split(CURSOR_SEPARATOR, 1)
+    created_at = datetime.datetime.fromisoformat(created_at_str)
+    # Normalize to naive UTC to match DB storage format (PipelineRun.created_at
+    # is plain DateTime, not UtcDateTime -- stores/returns naive datetimes).
+    if created_at.tzinfo is not None:
+        created_at = created_at.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return created_at, run_id
+
+
+def maybe_next_page_token(
+    *,
+    rows: list[bts.PipelineRun],
+    page_size: int,
+) -> str | None:
+    """Return a cursor token for the next page, or None if this is the last page."""
+    if len(rows) < page_size:
+        return None
+    last = rows[page_size - 1]
+    return encode_cursor(last.created_at, last.id)
 
 
 # ---------------------------------------------------------------------------
@@ -154,24 +172,14 @@ def build_list_filters(
     *,
     filter_value: str | None,
     filter_query_value: str | None,
-    page_token_value: str | None,
+    cursor_value: str | None,
     current_user: str | None,
-    page_size: int,
-) -> tuple[list[sql.ColumnElement], int, str]:
-    """Resolve pagination token, legacy filter, and filter_query into WHERE clauses.
-
-    Returns (where_clauses, offset, next_page_token_encoded).
-    """
+) -> list[sql.ColumnElement]:
+    """Build WHERE clauses from filters and cursor."""
     if filter_value and filter_query_value:
         raise errors.ApiValidationError(
             "Cannot use both 'filter' and 'filter_query'. Use one or the other."
         )
-
-    filter_value, filter_query_value, offset = _resolve_filter_value(
-        filter=filter_value,
-        filter_query=filter_query_value,
-        page_token=page_token_value,
-    )
 
     if filter_value:
         filter_query_value = _convert_legacy_filter_to_filter_query(
@@ -188,14 +196,18 @@ def build_list_filters(
             )
         )
 
-    next_page_token = _encode_page_token(
-        page_token_dict={
-            _PAGE_TOKEN_OFFSET_KEY: offset + page_size,
-            _PAGE_TOKEN_FILTER_QUERY_KEY: filter_query_value,
-        }
-    )
+    cursor = decode_cursor(cursor_value)
+    if cursor:
+        cursor_created_at, cursor_id = cursor
+        where_clauses.append(
+            sql.tuple_(bts.PipelineRun.created_at, bts.PipelineRun.id)
+            < sql.tuple_(
+                sql.literal(cursor_created_at),
+                sql.literal(cursor_id),
+            )
+        )
 
-    return where_clauses, offset, next_page_token
+    return where_clauses
 
 
 def filter_query_to_where_clause(
