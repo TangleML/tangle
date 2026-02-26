@@ -244,8 +244,17 @@ class OrchestratorService_Sql:
             session.commit()
             return
 
+        # We need to extract dynamic data arguments so that we can use them in cache key calculation.
+        # We read secrets and dynamic data from execution_node.extra_data rather than from task_spec.arguments,
+        # because some secrets might have been passed from upstream graph inputs.
+        dynamic_data_arguments: dict[str, dict[str, Any]] = (
+            execution.extra_data or {}
+        ).get(bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {})
+
         cache_key = _calculate_container_execution_cache_key(
-            container_spec=container_spec, input_artifact_data=input_artifact_data
+            container_spec=container_spec,
+            input_artifact_data=input_artifact_data,
+            dynamic_data_arguments=dynamic_data_arguments,
         )
 
         # Trying to reuse an older execution from cache.
@@ -462,11 +471,6 @@ class OrchestratorService_Sql:
         }
 
         # Handling secrets.
-        # We read secrets from execution_node.extra_data rather than from task_spec.arguments,
-        # because some secrets might have been passed from upstream graph inputs.
-        dynamic_data_arguments: dict[str, dict[str, Any]] = (
-            execution.extra_data or {}
-        ).get(bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {})
         secret_hash = "<DUMMY_HASH_FOR_SECRET>"
         for input_name, dynamic_data_argument in dynamic_data_arguments.items():
             if not isinstance(dynamic_data_argument, dict):
@@ -953,8 +957,9 @@ def _calculate_hash(s: str) -> str:
 def _calculate_container_execution_cache_key(
     container_spec: structures.ContainerSpec,
     input_artifact_data: dict[str, bts.ArtifactData],
+    dynamic_data_arguments: dict[str, dict[str, Any]] | None = None,
 ):
-    # Using ContainerSPec instead of the whole ComponentSpec.
+    # Using ContainerSpec instead of the whole ComponentSpec.
     input_hashes = {
         input_name: _assert_not_none(artifact_data).hash
         for input_name, artifact_data in (input_artifact_data or {}).items()
@@ -963,6 +968,8 @@ def _calculate_container_execution_cache_key(
         "container_spec": container_spec.to_json_dict(),
         "input_hashes": input_hashes,
     }
+    if dynamic_data_arguments:
+        cache_key_struct["dynamic_data_arguments"] = dynamic_data_arguments
     # Need to sort keys to ensure consistency
     cache_key_str = json.dumps(cache_key_struct, separators=(",", ":"), sort_keys=True)
     # We could use a different hash function, but there is no reason to.
