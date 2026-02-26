@@ -898,30 +898,6 @@ class _KubernetesJobLauncher(
     ) -> "LaunchedKubernetesJob":
         namespace = self._choose_namespace(annotations=annotations)
 
-        pod = self._prepare_kubernetes_pod(
-            component_spec=component_spec,
-            input_arguments=input_arguments,
-            output_uris=output_uris,
-            log_uri=log_uri,
-            annotations=annotations,
-            pod_name_prefix=self._pod_name_prefix,
-            pod_namespace=namespace,
-            pod_labels=self._pod_labels,
-            pod_annotations=self._pod_annotations,
-            pod_service_account=self._service_account_name,
-        )
-
-        # Applying the pod post-processor
-        if self._pod_postprocessor:
-            pod = self._pod_postprocessor(pod=pod, annotations=annotations)
-        assert pod.spec
-        assert pod.spec.containers
-
-        # Changing the namespace to the final outcome from the pod_postprocessor.
-        # TODO: In the future (once consumers have migrated to _choose_namespace)
-        # we should prohibit/ignore changing pod namespace in the pod post-processor.
-        namespace = pod.metadata.namespace
-
         # We have 2 options regarding job name:
         # Option 1: We could use randomized job name generated via `metadata.generateName`.
         #    Randomized job names are slightly harder to use:
@@ -950,6 +926,8 @@ class _KubernetesJobLauncher(
 
             explicit_resource_name = resource_name_prefix + uuid.uuid4().hex[:8]
 
+        explicit_job_name = explicit_resource_name
+
         MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
             "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
         )
@@ -962,6 +940,39 @@ class _KubernetesJobLauncher(
             raise interfaces.LauncherError(
                 f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and {_MULTI_NODE_MAX_NUMBER_OF_NODES}, but got {num_nodes}."
             )
+        explicit_service_name = explicit_resource_name
+        if enable_multi_node:
+            all_node_addresses = [
+                f"{explicit_job_name}-{idx}.{explicit_service_name}"
+                for idx in range(num_nodes)
+            ]
+            node_0_address = all_node_addresses[0]
+            # We could join using comma or newline
+            all_node_addresses_str = ",".join(all_node_addresses)
+
+        pod = self._prepare_kubernetes_pod(
+            component_spec=component_spec,
+            input_arguments=input_arguments,
+            output_uris=output_uris,
+            log_uri=log_uri,
+            annotations=annotations,
+            pod_name_prefix=self._pod_name_prefix,
+            pod_namespace=namespace,
+            pod_labels=self._pod_labels,
+            pod_annotations=self._pod_annotations,
+            pod_service_account=self._service_account_name,
+        )
+
+        # Applying the pod post-processor
+        if self._pod_postprocessor:
+            pod = self._pod_postprocessor(pod=pod, annotations=annotations)
+        assert pod.spec
+        assert pod.spec.containers
+
+        # Changing the namespace to the final outcome from the pod_postprocessor.
+        # TODO: In the future (once consumers have migrated to _choose_namespace)
+        # we should prohibit/ignore changing pod namespace in the pod post-processor.
+        namespace = pod.metadata.namespace
 
         if enable_multi_node:
             # Temporary implementation of implicitly passing multi-node information to the component code.
@@ -994,8 +1005,6 @@ class _KubernetesJobLauncher(
             )
             # Handling cross-pod communication.
             # Creating headless Kubernetes Service to give all pods in the job a stable DNS name to communicate with each other.
-            explicit_service_name = explicit_resource_name
-            explicit_job_name = explicit_resource_name
             service = k8s_client_lib.V1Service(
                 metadata=k8s_client_lib.V1ObjectMeta(
                     name=explicit_service_name,
@@ -1043,19 +1052,12 @@ class _KubernetesJobLauncher(
             #     for idx in range(num_nodes)
             # ]
 
-            all_node_addresses = [
-                f"{explicit_job_name}-{idx}.{explicit_service_name}"
-                for idx in range(num_nodes)
-            ]
-
             _MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME = (
                 "_TANGLE_MULTI_NODE_NODE_0_ADDRESS"
             )
             _MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME = (
                 "_TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES"
             )
-
-            node_0_address = all_node_addresses[0]
             main_container_spec.env.append(
                 k8s_client_lib.V1EnvVar(
                     name=_MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME,
@@ -1063,8 +1065,6 @@ class _KubernetesJobLauncher(
                 )
             )
 
-            # We could join using comma or newline
-            all_node_addresses_str = ",".join(all_node_addresses)
             main_container_spec.env.append(
                 k8s_client_lib.V1EnvVar(
                     name=_MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME,
