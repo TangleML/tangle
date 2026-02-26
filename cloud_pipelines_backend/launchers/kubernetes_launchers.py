@@ -917,6 +917,11 @@ class _KubernetesJobLauncher(
         assert pod.spec
         assert pod.spec.containers
 
+        # Changing the namespace to the final outcome from the pod_postprocessor.
+        # TODO: In the future (once consumers have migrated to _choose_namespace)
+        # we should prohibit/ignore changing pod namespace in the pod post-processor.
+        namespace = pod.metadata.namespace
+
         # We have 2 options regarding job name:
         # Option 1: We could use randomized job name generated via `metadata.generateName`.
         #    Randomized job names are slightly harder to use:
@@ -987,15 +992,90 @@ class _KubernetesJobLauncher(
                     ),
                 )
             )
+            # Handling cross-pod communication.
+            # Creating headless Kubernetes Service to give all pods in the job a stable DNS name to communicate with each other.
+            explicit_service_name = explicit_resource_name
+            explicit_job_name = explicit_resource_name
+            service = k8s_client_lib.V1Service(
+                metadata=k8s_client_lib.V1ObjectMeta(
+                    name=explicit_service_name,
+                    namespace=namespace,
+                ),
+                spec=k8s_client_lib.V1ServiceSpec(
+                    # "Headless" service.
+                    cluster_ip="None",
+                    selector={
+                        "job-name": explicit_job_name,
+                    },
+                ),
+            )
+            core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
+            try:
+                _: k8s_client_lib.V1Service = core_api_client.create_namespaced_service(
+                    namespace=namespace,
+                    body=service,
+                    _request_timeout=self._request_timeout,
+                )
+            except Exception as ex:
 
-        job_name_prefix = "job-" + pod.metadata.generate_name
+                raise interfaces.LauncherError(
+                    f"Failed to create Kubernetes Service {explicit_service_name}: {_kubernetes_serialize(service)}"
+                ) from ex
+            # Setting Pod's spec.subdomain to exact name of teh service.
+            # This requires the service name to be known.
+            pod.spec.subdomain = explicit_service_name
+
+            # Node addresses:
+            #
+            # Code to handle auto-generated job names Option 1):
+            # main_container_spec.env.append(
+            #     k8s_client_lib.V1EnvVar(
+            #         name="__JOB_NAME",
+            #         value_from=k8s_client_lib.V1EnvVarSource(
+            #             field_ref=k8s_client_lib.V1ObjectFieldSelector(
+            #                 field_path="metadata.labels['batch.kubernetes.io/job-name']"
+            #             )
+            #         ),
+            #     )
+            # )
+            # all_node_addresses = [
+            #     # f"$(__JOB_NAME)-{idx}.{explicit_service_name}"
+            #     for idx in range(num_nodes)
+            # ]
+
+            all_node_addresses = [
+                f"{explicit_job_name}-{idx}.{explicit_service_name}"
+                for idx in range(num_nodes)
+            ]
+
+            _MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME = (
+                "_TANGLE_MULTI_NODE_NODE_0_ADDRESS"
+            )
+            _MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME = (
+                "_TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES"
+            )
+
+            node_0_address = all_node_addresses[0]
+            main_container_spec.env.append(
+                k8s_client_lib.V1EnvVar(
+                    name=_MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME,
+                    value=node_0_address,
+                )
+            )
+
+            # We could join using comma or newline
+            all_node_addresses_str = ",".join(all_node_addresses)
+            main_container_spec.env.append(
+                k8s_client_lib.V1EnvVar(
+                    name=_MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME,
+                    value=all_node_addresses_str,
+                )
+            )
 
         job = k8s_client_lib.V1Job(
             metadata=k8s_client_lib.V1ObjectMeta(
                 name=explicit_job_name,
-                # TODO: In the future (once consumers have migrated to _choose_namespace)
-                # we should prohibit/ignore changing pod namespace in the pod post-processor.
-                namespace=pod.metadata.namespace,
+                namespace=namespace,
                 # annotations=self._pod_annotations,
                 # labels=self._pod_labels,
             ),
