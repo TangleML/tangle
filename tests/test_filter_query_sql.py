@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import sqlalchemy as sql
 from sqlalchemy.dialects import sqlite as sqlite_dialect
@@ -161,59 +163,46 @@ class TestPageToken:
         assert token.filter_query is None
 
 
-class TestBuildFilterWhereClauses:
-    def test_no_filter(self):
-        clauses, next_filter = filter_query_sql._build_filter_where_clauses(
-            filter_value=None,
-            current_user=None,
-        )
-        assert clauses == []
-        assert next_filter is None
-
+class TestConvertLegacyFilterToFilterQuery:
     def test_created_by_literal(self):
-        clauses, next_filter = filter_query_sql._build_filter_where_clauses(
+        result = filter_query_sql._convert_legacy_filter_to_filter_query(
             filter_value="created_by:alice",
-            current_user=None,
         )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:alice"
+        parsed = json.loads(result)
+        assert parsed == {
+            "and": [
+                {
+                    "value_equals": {
+                        "key": "system/pipeline_run.created_by",
+                        "value": "alice",
+                    }
+                }
+            ]
+        }
 
-    def test_created_by_me_resolves(self):
-        clauses, next_filter = filter_query_sql._build_filter_where_clauses(
+    def test_created_by_me_not_resolved(self):
+        result = filter_query_sql._convert_legacy_filter_to_filter_query(
             filter_value="created_by:me",
-            current_user="alice@example.com",
         )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:alice@example.com"
+        parsed = json.loads(result)
+        assert parsed["and"][0]["value_equals"]["value"] == "me"
 
-    def test_created_by_me_no_current_user(self):
-        clauses, next_filter = filter_query_sql._build_filter_where_clauses(
-            filter_value="created_by:me",
-            current_user=None,
-        )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:"
-
-    def test_created_by_empty_value(self):
-        clauses, next_filter = filter_query_sql._build_filter_where_clauses(
-            filter_value="created_by:",
-            current_user=None,
-        )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:"
+    def test_created_by_empty_raises(self):
+        with pytest.raises(errors.ApiValidationError, match="non-empty value"):
+            filter_query_sql._convert_legacy_filter_to_filter_query(
+                filter_value="created_by:",
+            )
 
     def test_unsupported_key_raises(self):
         with pytest.raises(NotImplementedError, match="Unsupported filter"):
-            filter_query_sql._build_filter_where_clauses(
+            filter_query_sql._convert_legacy_filter_to_filter_query(
                 filter_value="unknown_key:value",
-                current_user=None,
             )
 
     def test_text_search_raises(self):
         with pytest.raises(NotImplementedError, match="Text search"):
-            filter_query_sql._build_filter_where_clauses(
+            filter_query_sql._convert_legacy_filter_to_filter_query(
                 filter_value="some_text_without_colon",
-                current_user=None,
             )
 
 
@@ -244,7 +233,7 @@ class TestBuildListFilters:
                 page_size=10,
             )
 
-    def test_legacy_filter_produces_clauses(self):
+    def test_legacy_filter_produces_annotation_clause(self):
         clauses, offset, next_token = filter_query_sql.build_list_filters(
             filter_value="created_by:alice",
             filter_query_value=None,
@@ -253,8 +242,12 @@ class TestBuildListFilters:
             page_size=10,
         )
         assert len(clauses) == 1
+        compiled = _compile(clauses[0])
+        assert "EXISTS" in compiled.upper()
+        assert "pipeline_run_annotation" in compiled
         assert offset == 0
-        assert next_token.filter == "created_by:alice"
+        assert next_token.filter is None
+        assert next_token.filter_query is not None
 
     def test_filter_query_produces_clauses(self):
         fq = '{"and": [{"key_exists": {"key": "team"}}]}'
@@ -270,7 +263,7 @@ class TestBuildListFilters:
         assert "EXISTS" in compiled.upper()
         assert next_token.filter_query == fq
 
-    def test_page_token_restores_offset_and_filters(self):
+    def test_page_token_with_legacy_filter_converts(self):
         token = filter_query_sql.PageToken(
             offset=20,
             filter="created_by:alice",
@@ -284,8 +277,11 @@ class TestBuildListFilters:
         )
         assert offset == 20
         assert len(clauses) == 1
+        compiled = _compile(clauses[0])
+        assert "EXISTS" in compiled.upper()
         assert next_token.offset == 30
-        assert next_token.filter == "created_by:alice"
+        assert next_token.filter is None
+        assert next_token.filter_query is not None
 
     def test_page_token_restores_filter_query(self):
         fq = '{"and": [{"key_exists": {"key": "env"}}]}'
@@ -321,7 +317,10 @@ class TestBuildListFilters:
             page_size=10,
         )
         assert len(clauses) == 1
-        assert next_token.filter == "created_by:bob@example.com"
+        assert next_token.filter is None
+        assert next_token.filter_query is not None
+        parsed_fq = json.loads(next_token.filter_query)
+        assert parsed_fq["and"][0]["value_equals"]["value"] == "me"
 
 
 class TestSystemKeyValidation:

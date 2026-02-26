@@ -159,27 +159,13 @@ class TestPipelineRunServiceList:
         assert len(result.pipeline_runs) == 1
         assert result.pipeline_runs[0].created_by == "user1"
 
-    def test_list_filter_created_by_empty(self, session_factory, service):
-        _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by=None,
-        )
-        _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-
+    def test_list_filter_created_by_empty_raises(self, session_factory, service):
         with session_factory() as session:
-            result = service.list(
-                session=session,
-                filter="created_by:",
-            )
-        assert len(result.pipeline_runs) == 1
-        assert result.pipeline_runs[0].created_by is None
+            with pytest.raises(errors.ApiValidationError, match="non-empty value"):
+                service.list(
+                    session=session,
+                    filter="created_by:",
+                )
 
     def test_list_pagination(self, session_factory, service):
         for i in range(12):
