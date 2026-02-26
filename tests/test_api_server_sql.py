@@ -1,3 +1,4 @@
+import datetime
 import json
 
 import pytest
@@ -885,7 +886,74 @@ class TestFilterQueryIntegration:
             )
         assert len(result.pipeline_runs) == 0
 
-    def test_time_range_raises_not_implemented(self, session_factory, service):
+    def _create_run_at(self, *, session_factory, service, created_at, **kwargs):
+        """Create a run and override its created_at timestamp."""
+        run = _create_run(
+            session_factory, service, root_task=_make_task_spec(), **kwargs
+        )
+        with session_factory() as session:
+            session.execute(
+                sqlalchemy.update(bts.PipelineRun)
+                .where(bts.PipelineRun.id == run.id)
+                .values(created_at=created_at)
+            )
+            session.commit()
+        return run
+
+    def _utc(self, *, year, month, day, hour=0, minute=0, second=0):
+        return datetime.datetime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            tzinfo=datetime.timezone.utc,
+        )
+
+    def test_list_filter_query_time_range(self, session_factory, service):
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1),
+        )
+        feb = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=2, day=1),
+        )
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=3, day=1),
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-01-15T00:00:00Z",
+                            "end_time": "2024-02-15T00:00:00Z",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == feb.id
+
+    def test_list_filter_query_time_range_start_boundary(
+        self, session_factory, service
+    ):
+        run = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1),
+        )
         fq = json.dumps(
             {
                 "and": [
@@ -899,11 +967,292 @@ class TestFilterQueryIntegration:
             }
         )
         with session_factory() as session:
-            with pytest.raises(NotImplementedError, match="TimeRangePredicate"):
-                service.list(
-                    session=session,
-                    filter_query=fq,
-                )
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == run.id
+
+    def test_list_filter_query_time_range_end_boundary(self, session_factory, service):
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=2, day=1),
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-01-01T00:00:00Z",
+                            "end_time": "2024-02-01T00:00:00Z",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 0
+
+    def test_list_filter_query_time_range_start_only(self, session_factory, service):
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1),
+        )
+        mar = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=3, day=1),
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-02-01T00:00:00Z",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == mar.id
+
+    def test_list_filter_query_time_range_not(self, session_factory, service):
+        jan = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1),
+        )
+        feb = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=2, day=1),
+        )
+        mar = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=3, day=1),
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "not": {
+                            "time_range": {
+                                "key": "system/pipeline_run.date.created_at",
+                                "start_time": "2024-01-15T00:00:00Z",
+                                "end_time": "2024-02-15T00:00:00Z",
+                            }
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        result_ids = {r.id for r in result.pipeline_runs}
+        assert feb.id not in result_ids
+        assert jan.id in result_ids
+        assert mar.id in result_ids
+
+    def test_list_filter_query_time_range_after_annotation(
+        self, session_factory, service
+    ):
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1),
+            created_by="alice",
+        )
+        feb = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=2, day=1),
+            created_by="alice",
+        )
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=3, day=1),
+            created_by="bob",
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "value_equals": {
+                            "key": "system/pipeline_run.created_by",
+                            "value": "alice",
+                        }
+                    },
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-01-15T00:00:00Z",
+                            "end_time": "2024-03-01T00:00:00Z",
+                        }
+                    },
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == feb.id
+
+    def test_list_filter_query_time_range_with_annotation(
+        self, session_factory, service
+    ):
+        jan = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=jan.id,
+            key="team",
+            value="ml-ops",
+        )
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=2, day=1),
+            created_by="test-user",
+        )
+        mar = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=3, day=1),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=mar.id,
+            key="team",
+            value="ml-ops",
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {"value_equals": {"key": "team", "value": "ml-ops"}},
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-02-01T00:00:00Z",
+                        }
+                    },
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == mar.id
+
+    def test_list_filter_query_time_range_before_annotation(
+        self, session_factory, service
+    ):
+        jan = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=jan.id,
+            key="team",
+            value="ml-ops",
+        )
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=2, day=1),
+            created_by="test-user",
+        )
+        mar = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=3, day=1),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=mar.id,
+            key="team",
+            value="ml-ops",
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-02-01T00:00:00Z",
+                        }
+                    },
+                    {"value_equals": {"key": "team", "value": "ml-ops"}},
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == mar.id
+
+    def test_list_filter_query_time_range_offset_timezone(
+        self, session_factory, service
+    ):
+        self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1, hour=2, minute=0),
+        )
+        run_b = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1, hour=2, minute=30),
+        )
+        run_c = self._create_run_at(
+            session_factory=session_factory,
+            service=service,
+            created_at=self._utc(year=2024, month=1, day=1, hour=6, minute=0),
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-01-01T08:00:00+05:30",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq)
+        assert len(result.pipeline_runs) == 2
+        returned_ids = {r.id for r in result.pipeline_runs}
+        assert returned_ids == {run_b.id, run_c.id}
 
     def test_pagination_preserves_filter_query(self, session_factory, service):
         for _ in range(12):

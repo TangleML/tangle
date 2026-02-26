@@ -1,5 +1,6 @@
 import json
 
+import pydantic
 import pytest
 import sqlalchemy as sql
 from sqlalchemy.dialects import sqlite as sqlite_dialect
@@ -11,13 +12,14 @@ from cloud_pipelines_backend import filter_query_sql
 
 
 def _compile(clause: sql.ColumnElement) -> str:
-    """Compile a SQLAlchemy clause to a string for assertion."""
-    return str(
+    """Compile a SQLAlchemy clause to a normalized string for assertion."""
+    raw = str(
         clause.compile(
             dialect=sqlite_dialect.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
+    return " ".join(raw.split())
 
 
 class TestLeafPredicates:
@@ -117,16 +119,364 @@ class TestLogicalPredicates:
         assert compiled.upper().count("EXISTS") == 3
 
 
-class TestUnsupportedPredicate:
-    def test_time_range_raises_not_implemented(self):
+class TestTimeRangePredicate:
+    _KEY = filter_query_sql.SystemKey.CREATED_AT
+
+    _EXISTS_VALUE_EQUALS_TEAM = (
+        "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id"
+        " FROM pipeline_run_annotation, pipeline_run"
+        " WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id"
+        " AND pipeline_run_annotation.\"key\" = 'team'"
+        " AND pipeline_run_annotation.value = 'ml-ops'))"
+    )
+    _EXISTS_KEY_EXISTS_ENV = (
+        "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id"
+        " FROM pipeline_run_annotation, pipeline_run"
+        " WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id"
+        " AND pipeline_run_annotation.\"key\" = 'env'))"
+    )
+    _EXISTS_KEY_EXISTS_DEPRECATED = (
+        "(EXISTS (SELECT pipeline_run_annotation.pipeline_run_id"
+        " FROM pipeline_run_annotation, pipeline_run"
+        " WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id"
+        " AND pipeline_run_annotation.\"key\" = 'deprecated'))"
+    )
+
+    def test_time_range_with_start_and_end(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-15T10:30:00Z",
+                            "end_time": "2024-02-15T23:59:59.999Z",
+                        }
+                    }
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "pipeline_run.created_at >= '2024-01-15 10:30:00.000000'"
+            " AND pipeline_run.created_at < '2024-02-15 23:59:59.999000'"
+        )
+
+    def test_time_range_start_only(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-06-01T00:00:00+00:00",
+                        }
+                    }
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == "pipeline_run.created_at >= '2024-06-01 00:00:00.000000'"
+
+    def test_time_range_with_milliseconds(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T12:00:00.500Z",
+                            "end_time": "2024-01-02T12:00:00.999Z",
+                        }
+                    }
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "pipeline_run.created_at >= '2024-01-01 12:00:00.500000'"
+            " AND pipeline_run.created_at < '2024-01-02 12:00:00.999000'"
+        )
+
+    def test_time_range_with_offset_timezone(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T08:00:00+05:30",
+                        }
+                    }
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == ("pipeline_run.created_at >= '2024-01-01 02:30:00.000000'")
+
+    def test_time_range_not(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "not": {
+                            "time_range": {
+                                "key": self._KEY,
+                                "start_time": "2024-01-15T00:00:00Z",
+                                "end_time": "2024-02-15T00:00:00Z",
+                            }
+                        }
+                    }
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "NOT (pipeline_run.created_at >= '2024-01-15 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-02-15 00:00:00.000000')"
+        )
+
+    def test_time_range_combined_with_annotation(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T00:00:00Z",
+                            "end_time": "2024-02-01T00:00:00Z",
+                        }
+                    },
+                    {"value_equals": {"key": "team", "value": "ml-ops"}},
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "pipeline_run.created_at >= '2024-01-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-02-01 00:00:00.000000'"
+            f" AND {self._EXISTS_VALUE_EQUALS_TEAM}"
+        )
+
+    def test_time_range_not_first_in_list(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {"value_equals": {"key": "team", "value": "ml-ops"}},
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T00:00:00Z",
+                            "end_time": "2024-02-01T00:00:00Z",
+                        }
+                    },
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            f"{self._EXISTS_VALUE_EQUALS_TEAM}"
+            " AND pipeline_run.created_at >= '2024-01-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-02-01 00:00:00.000000'"
+        )
+
+    def test_time_range_last_in_list(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {"key_exists": {"key": "env"}},
+                    {"value_equals": {"key": "team", "value": "ml-ops"}},
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T00:00:00Z",
+                            "end_time": "2024-06-01T00:00:00Z",
+                        }
+                    },
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            f"{self._EXISTS_KEY_EXISTS_ENV}"
+            f" AND {self._EXISTS_VALUE_EQUALS_TEAM}"
+            " AND pipeline_run.created_at >= '2024-01-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-06-01 00:00:00.000000'"
+        )
+
+    def test_time_range_nested_in_or(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "or": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T00:00:00Z",
+                            "end_time": "2024-02-01T00:00:00Z",
+                        }
+                    },
+                    {"value_equals": {"key": "team", "value": "ml-ops"}},
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "pipeline_run.created_at >= '2024-01-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-02-01 00:00:00.000000'"
+            f" OR {self._EXISTS_VALUE_EQUALS_TEAM}"
+        )
+
+    def test_time_range_deeply_nested(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "or": [
+                            {
+                                "and": [
+                                    {
+                                        "time_range": {
+                                            "key": self._KEY,
+                                            "start_time": "2024-01-01T00:00:00Z",
+                                            "end_time": "2024-02-01T00:00:00Z",
+                                        }
+                                    },
+                                    {
+                                        "value_equals": {
+                                            "key": "team",
+                                            "value": "ml-ops",
+                                        }
+                                    },
+                                ]
+                            },
+                            {"key_exists": {"key": "deprecated"}},
+                        ]
+                    }
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "pipeline_run.created_at >= '2024-01-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-02-01 00:00:00.000000'"
+            f" AND {self._EXISTS_VALUE_EQUALS_TEAM}"
+            f" OR {self._EXISTS_KEY_EXISTS_DEPRECATED}"
+        )
+
+    def test_multiple_time_ranges_in_and(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T00:00:00Z",
+                            "end_time": "2024-06-01T00:00:00Z",
+                        }
+                    },
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-03-01T00:00:00Z",
+                            "end_time": "2024-04-01T00:00:00Z",
+                        }
+                    },
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "pipeline_run.created_at >= '2024-01-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-06-01 00:00:00.000000'"
+            " AND pipeline_run.created_at >= '2024-03-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-04-01 00:00:00.000000'"
+        )
+
+    def test_multiple_time_ranges_in_or(self):
+        fq = filter_query_models.FilterQuery.model_validate(
+            {
+                "or": [
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-01-01T00:00:00Z",
+                            "end_time": "2024-02-01T00:00:00Z",
+                        }
+                    },
+                    {
+                        "time_range": {
+                            "key": self._KEY,
+                            "start_time": "2024-03-01T00:00:00Z",
+                            "end_time": "2024-04-01T00:00:00Z",
+                        }
+                    },
+                ]
+            },
+        )
+        compiled = _compile(
+            filter_query_sql.filter_query_to_where_clause(filter_query=fq)
+        )
+        assert compiled == (
+            "pipeline_run.created_at >= '2024-01-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-02-01 00:00:00.000000'"
+            " OR pipeline_run.created_at >= '2024-03-01 00:00:00.000000'"
+            " AND pipeline_run.created_at < '2024-04-01 00:00:00.000000'"
+        )
+
+    def test_time_range_invalid_key_rejected(self):
         predicate = filter_query_models.TimeRangePredicate(
             time_range=filter_query_models.TimeRange(
-                key="system/pipeline_run.date.created_at",
+                key="custom/my_date",
                 start_time="2024-01-01T00:00:00Z",
             )
         )
-        with pytest.raises(NotImplementedError, match="TimeRangePredicate"):
+        with pytest.raises(errors.InvalidAnnotationKeyError, match="only supports key"):
             filter_query_sql._predicate_to_clause(predicate=predicate)
+
+    def test_time_range_system_key_registered(self):
+        supported = filter_query_sql.SYSTEM_KEY_SUPPORTED_PREDICATES
+        assert filter_query_sql.SystemKey.CREATED_AT in supported
+        assert (
+            filter_query_models.TimeRangePredicate
+            in supported[filter_query_sql.SystemKey.CREATED_AT]
+        )
+
+    def test_time_range_naive_datetime_rejected(self):
+        with pytest.raises(pydantic.ValidationError):
+            filter_query_models.FilterQuery.model_validate(
+                {
+                    "and": [
+                        {
+                            "time_range": {
+                                "key": self._KEY,
+                                "start_time": "2024-01-01T00:00:00",
+                            }
+                        }
+                    ]
+                },
+            )
 
 
 class TestPageToken:
