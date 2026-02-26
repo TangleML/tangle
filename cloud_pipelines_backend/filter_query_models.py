@@ -99,8 +99,12 @@ class ValueEqualsPredicate(KeyPredicateBase):
         return self.value_equals.key
 
 
-class TimeRangePredicate(_BaseModel):
+class TimeRangePredicate(KeyPredicateBase):
     time_range: TimeRange
+
+    @property
+    def key(self) -> str:
+        return self.time_range.key
 
 
 LeafPredicate = (
