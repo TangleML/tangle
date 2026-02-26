@@ -2,7 +2,9 @@
 
 from unittest import mock
 
+from opentelemetry import metrics as otel_metrics
 from opentelemetry import trace
+from opentelemetry.sdk import metrics as otel_sdk_metrics
 from opentelemetry.sdk import trace as otel_sdk_trace
 
 from cloud_pipelines_backend.instrumentation.opentelemetry import providers
@@ -13,6 +15,7 @@ class TestProvidersSetup:
 
     def test_noop_when_no_exporters_configured(self, monkeypatch):
         monkeypatch.delenv("TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT", raising=False)
+        monkeypatch.delenv("TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT", raising=False)
 
         providers.setup()
 
@@ -68,4 +71,31 @@ class TestProvidersSetup:
 
         assert not isinstance(
             trace.get_tracer_provider(), otel_sdk_trace.TracerProvider
+        )
+
+    def test_configures_meter_provider(self, monkeypatch):
+        monkeypatch.setenv(
+            "TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT", "http://localhost:4317"
+        )
+        monkeypatch.delenv("TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT", raising=False)
+
+        providers.setup()
+
+        assert isinstance(
+            otel_metrics.get_meter_provider(), otel_sdk_metrics.MeterProvider
+        )
+
+    def test_configures_both_providers(self, monkeypatch):
+        monkeypatch.setenv(
+            "TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT", "http://localhost:4317"
+        )
+        monkeypatch.setenv(
+            "TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT", "http://localhost:4317"
+        )
+
+        providers.setup()
+
+        assert isinstance(trace.get_tracer_provider(), otel_sdk_trace.TracerProvider)
+        assert isinstance(
+            otel_metrics.get_meter_provider(), otel_sdk_metrics.MeterProvider
         )

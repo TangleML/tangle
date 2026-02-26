@@ -1,79 +1,79 @@
-"""Tests for the OpenTelemetry tracing module."""
+"""Tests for the OpenTelemetry metrics module."""
 
 from unittest import mock
 
-from opentelemetry import trace
-from opentelemetry.sdk import trace as otel_sdk_trace
+from opentelemetry import metrics as otel_metrics
+from opentelemetry.sdk import metrics as otel_sdk_metrics
 
 from cloud_pipelines_backend.instrumentation.opentelemetry._internal import config
-from cloud_pipelines_backend.instrumentation.opentelemetry import tracing
+from cloud_pipelines_backend.instrumentation.opentelemetry import metrics
 
 
-class TestTracingSetup:
-    """Tests for tracing.setup()."""
+class TestMetricsSetup:
+    """Tests for metrics.setup()."""
 
-    def test_sets_global_tracer_provider_with_grpc(self):
-        tracing.setup(
+    def test_sets_global_meter_provider_with_grpc(self):
+        metrics.setup(
             endpoint="http://localhost:4317",
             protocol=config.ExporterProtocol.GRPC,
             service_name="test-service",
         )
 
-        provider = trace.get_tracer_provider()
-        assert isinstance(provider, otel_sdk_trace.TracerProvider)
+        provider = otel_metrics.get_meter_provider()
+        assert isinstance(provider, otel_sdk_metrics.MeterProvider)
 
-    def test_sets_global_tracer_provider_with_http(self):
-        tracing.setup(
+    def test_sets_global_meter_provider_with_http(self):
+        metrics.setup(
             endpoint="http://localhost:4318",
             protocol=config.ExporterProtocol.HTTP,
             service_name="test-service",
         )
 
-        provider = trace.get_tracer_provider()
-        assert isinstance(provider, otel_sdk_trace.TracerProvider)
+        provider = otel_metrics.get_meter_provider()
+        assert isinstance(provider, otel_sdk_metrics.MeterProvider)
 
     def test_service_name_is_set_on_resource(self):
-        tracing.setup(
+        metrics.setup(
             endpoint="http://localhost:4317",
             protocol=config.ExporterProtocol.GRPC,
             service_name="my-service",
         )
 
-        provider = trace.get_tracer_provider()
-        assert provider.resource.attributes["service.name"] == "my-service"
+        provider = otel_metrics.get_meter_provider()
+        assert provider._sdk_config.resource.attributes["service.name"] == "my-service"
 
     def test_service_version_is_set_on_resource(self):
-        tracing.setup(
+        metrics.setup(
             endpoint="http://localhost:4317",
             protocol=config.ExporterProtocol.GRPC,
             service_name="my-service",
             service_version="abc123",
         )
 
-        provider = trace.get_tracer_provider()
-        assert provider.resource.attributes["service.version"] == "abc123"
+        provider = otel_metrics.get_meter_provider()
+        assert provider._sdk_config.resource.attributes["service.version"] == "abc123"
 
     def test_service_version_omitted_when_none(self):
-        tracing.setup(
+        metrics.setup(
             endpoint="http://localhost:4317",
             protocol=config.ExporterProtocol.GRPC,
             service_name="my-service",
         )
 
-        provider = trace.get_tracer_provider()
-        assert "service.version" not in provider.resource.attributes
+        provider = otel_metrics.get_meter_provider()
+        assert "service.version" not in provider._sdk_config.resource.attributes
 
     def test_catches_exporter_exception(self):
         with mock.patch(
-            "opentelemetry.exporter.otlp.proto.grpc.trace_exporter.OTLPSpanExporter",
+            "opentelemetry.exporter.otlp.proto.grpc.metric_exporter.OTLPMetricExporter",
             side_effect=RuntimeError("connection failed"),
         ):
-            tracing.setup(
+            metrics.setup(
                 endpoint="http://localhost:4317",
                 protocol=config.ExporterProtocol.GRPC,
                 service_name="test-service",
             )
 
         assert not isinstance(
-            trace.get_tracer_provider(), otel_sdk_trace.TracerProvider
+            otel_metrics.get_meter_provider(), otel_sdk_metrics.MeterProvider
         )

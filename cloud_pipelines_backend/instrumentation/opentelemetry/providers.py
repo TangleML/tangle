@@ -7,6 +7,7 @@ Provides entry points to configure OpenTelemetry providers.
 import logging
 
 from cloud_pipelines_backend.instrumentation.opentelemetry._internal import config
+from cloud_pipelines_backend.instrumentation.opentelemetry import metrics
 from cloud_pipelines_backend.instrumentation.opentelemetry import tracing
 
 _logger = logging.getLogger(__name__)
@@ -46,4 +47,13 @@ def setup(
             protocol=otel_config.trace_exporter.protocol,
             service_name=otel_config.service_name,
             service_version=otel_config.service_version,
+        )
+
+    if otel_config.metrics:
+        metrics.setup(
+            endpoint=otel_config.metrics.exporter.endpoint,
+            protocol=otel_config.metrics.exporter.protocol,
+            service_name=otel_config.service_name,
+            service_version=otel_config.service_version,
+            temporality=otel_config.metrics.temporality,
         )
