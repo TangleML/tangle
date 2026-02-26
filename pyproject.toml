@@ -27,6 +27,9 @@ huggingface = [
     "huggingface-hub[oauth]>=0.35.3",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests", "cloud_pipelines_backend"]
+addopts = "--import-mode=importlib"
 [tool.setuptools.packages.find]
 include = ["cloud_pipelines_backend*"]
 namespaces = true
