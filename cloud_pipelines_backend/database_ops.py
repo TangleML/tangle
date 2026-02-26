@@ -1,8 +1,14 @@
+import logging
+from typing import Any
+
 import sqlalchemy
 from sqlalchemy import orm
 
 from . import backend_types_sql as bts
+from . import component_structures as structures
 from . import filter_query_sql
+
+logger = logging.getLogger(__name__)
 
 
 def create_db_engine_and_migrate_db(
@@ -87,6 +93,7 @@ def migrate_db(db_engine: sqlalchemy.Engine):
             break
 
     backfill_created_by_annotations(db_engine=db_engine)
+    backfill_pipeline_name_annotations(db_engine=db_engine)
 
 
 def is_annotation_key_already_backfilled(
@@ -105,6 +112,27 @@ def is_annotation_key_already_backfilled(
                 )
             )
         ).scalar()
+
+
+def get_pipeline_name_from_task_spec(
+    *,
+    task_spec_dict: dict[str, Any],
+) -> str | None:
+    """Extract pipeline name from a task_spec dict via component_ref.spec.name.
+
+    Traversal path:
+        task_spec_dict -> TaskSpec -> component_ref -> spec -> name
+
+    Returns None if any step in the chain is missing or parsing fails.
+    """
+    try:
+        task_spec = structures.TaskSpec.from_json_dict(task_spec_dict)
+    except Exception:
+        return None
+    spec = task_spec.component_ref.spec
+    if spec is None:
+        return None
+    return spec.name or None
 
 
 def backfill_created_by_annotations(*, db_engine: sqlalchemy.Engine):
@@ -134,3 +162,142 @@ def backfill_created_by_annotations(*, db_engine: sqlalchemy.Engine):
         )
         session.execute(stmt)
         session.commit()
+
+
+def _backfill_pipeline_names_from_extra_data(*, db_engine: sqlalchemy.Engine):
+    """Phase 1: bulk SQL backfill from extra_data['pipeline_name'].
+
+    INSERT INTO pipeline_run_annotation
+    SELECT id, key, json_extract(extra_data, '$.pipeline_name')
+    FROM pipeline_run
+    WHERE json_extract(...) IS NOT NULL AND != ''
+
+    SQLAlchemy's JSON path extraction is NULL-safe: returns SQL NULL
+    when extra_data is NULL or the key is absent (no Python error).
+    """
+    with orm.Session(db_engine) as session:
+        pipeline_name_expr = bts.PipelineRun.extra_data["pipeline_name"].as_string()
+        stmt = sqlalchemy.insert(bts.PipelineRunAnnotation).from_select(
+            ["pipeline_run_id", "key", "value"],
+            sqlalchemy.select(
+                bts.PipelineRun.id,
+                sqlalchemy.literal(filter_query_sql.SystemKey.NAME),
+                pipeline_name_expr,
+            ).where(
+                pipeline_name_expr.isnot(None),
+                pipeline_name_expr != "",
+            ),
+        )
+        session.execute(stmt)
+        session.commit()
+
+
+def _backfill_pipeline_names_from_component_spec(*, db_engine: sqlalchemy.Engine):
+    """Phase 2: Python fallback for runs still missing a name annotation.
+
+    Find the "delta" -- runs that still have no name annotation
+    after Phase 1 -- using a LEFT JOIN anti-join pattern:
+
+        SELECT pr.id, pr.root_execution_id
+        FROM pipeline_run pr
+        LEFT JOIN pipeline_run_annotation ann
+            ON ann.pipeline_run_id = pr.id
+            AND ann.key = 'system/pipeline_run.name'
+        WHERE ann.pipeline_run_id IS NULL
+
+    How the LEFT JOIN works:
+
+        pipeline_run                pipeline_run_annotation
+        +----+------------------+   +--------+---------------------------+-------+
+        | id | root_exec_id     |   | run_id | key                       | value |
+        +----+------------------+   +--------+---------------------------+-------+
+        |  1 | exec_1           |   | 1      | system/pipeline_run.name  | foo   |
+        |  2 | exec_2           |   | 3      | system/pipeline_run.name  | bar   |
+        |  3 | exec_3           |   +--------+---------------------------+-------+
+        |  4 | exec_4           |
+        +----+------------------+
+
+        LEFT JOIN result (ON run_id = id AND key = 'system/pipeline_run.name'):
+        +----+------------------+------------+-----------+
+        | id | root_exec_id     | ann.run_id | ann.value |
+        +----+------------------+------------+-----------+
+        |  1 | exec_1           | 1          | foo       | <- matched
+        |  2 | exec_2           | NULL       | NULL      | <- no match
+        |  3 | exec_3           | 3          | bar       | <- matched
+        |  4 | exec_4           | NULL       | NULL      | <- no match
+        +----+------------------+------------+-----------+
+
+        + WHERE ann.pipeline_run_id IS NULL -> rows 2, 4 (the delta)
+
+    For each delta run, load execution_node.task_spec and extract
+    the name via:
+        task_spec_dict -> TaskSpec -> component_ref -> spec -> name
+    """
+    key = filter_query_sql.SystemKey.NAME
+    ann = bts.PipelineRunAnnotation
+    with orm.Session(db_engine) as session:
+        delta_query = (
+            sqlalchemy.select(
+                bts.PipelineRun.id,
+                bts.PipelineRun.root_execution_id,
+            )
+            .outerjoin(
+                ann,
+                sqlalchemy.and_(
+                    ann.pipeline_run_id == bts.PipelineRun.id,
+                    ann.key == key,
+                ),
+            )
+            .where(ann.pipeline_run_id.is_(None))
+        )
+        delta_rows = session.execute(delta_query).all()
+
+        for run_id, root_execution_id in delta_rows:
+            execution_node = session.get(bts.ExecutionNode, root_execution_id)
+            if execution_node is None:
+                logger.warning(
+                    f"Backfill pipeline run name: run {run_id} has no "
+                    f"execution node (root_execution_id={root_execution_id}), "
+                    "skipping. TODO: consider inserting 'UNKNOWN'?"
+                )
+                continue
+            name = get_pipeline_name_from_task_spec(
+                task_spec_dict=execution_node.task_spec
+            )
+            if name:
+                session.add(
+                    bts.PipelineRunAnnotation(
+                        pipeline_run_id=run_id, key=key, value=name
+                    )
+                )
+            else:
+                logger.warning(
+                    f"Backfill pipeline run name: run {run_id} has no "
+                    "resolvable pipeline name from task_spec "
+                    f"(root_execution_id={root_execution_id}), "
+                    "skipping. TODO: consider inserting 'UNKNOWN'?"
+                )
+        session.commit()
+
+
+def backfill_pipeline_name_annotations(*, db_engine: sqlalchemy.Engine):
+    """Backfill pipeline_run_annotation with pipeline names.
+
+    Skips entirely if any name annotation already exists (i.e. the
+    write-path is populating them, so the backfill has already run or is
+    no longer needed).
+
+    Phase 1 -- _backfill_pipeline_names_from_extra_data:
+        Bulk SQL insert from extra_data['pipeline_name'].
+
+    Phase 2 -- _backfill_pipeline_names_from_component_spec:
+        Python fallback for runs Phase 1 missed (extra_data is NULL or
+        missing the key). Resolves name via component_ref.spec.name.
+    """
+    if is_annotation_key_already_backfilled(
+        db_engine=db_engine, key=filter_query_sql.SystemKey.NAME
+    ):
+        return
+
+    _backfill_pipeline_names_from_extra_data(db_engine=db_engine)
+    _backfill_pipeline_names_from_component_spec(db_engine=db_engine)
