@@ -10,16 +10,24 @@ from . import errors
 from . import filter_query_models
 
 SYSTEM_KEY_PREFIX: Final[str] = "system/"
+_PIPELINE_RUN_KEY_PREFIX: Final[str] = f"{SYSTEM_KEY_PREFIX}pipeline_run."
 
 
 class PipelineRunAnnotationSystemKey(enum.StrEnum):
-    CREATED_BY = f"{SYSTEM_KEY_PREFIX}pipeline_run.created_by"
+    CREATED_BY = f"{_PIPELINE_RUN_KEY_PREFIX}created_by"
+    PIPELINE_NAME = f"{_PIPELINE_RUN_KEY_PREFIX}name"
 
 
 SYSTEM_KEY_SUPPORTED_PREDICATES: dict[PipelineRunAnnotationSystemKey, set[type]] = {
     PipelineRunAnnotationSystemKey.CREATED_BY: {
         filter_query_models.KeyExistsPredicate,
         filter_query_models.ValueEqualsPredicate,
+        filter_query_models.ValueInPredicate,
+    },
+    PipelineRunAnnotationSystemKey.PIPELINE_NAME: {
+        filter_query_models.KeyExistsPredicate,
+        filter_query_models.ValueEqualsPredicate,
+        filter_query_models.ValueContainsPredicate,
         filter_query_models.ValueInPredicate,
     },
 }
@@ -237,7 +245,12 @@ def _convert_legacy_filter_to_filter_query(
                     "Legacy filter 'created_by' requires a non-empty value."
                 )
             predicates.append(
-                {"value_equals": {"key": SystemKey.CREATED_BY, "value": value}}
+                {
+                    "value_equals": {
+                        "key": PipelineRunAnnotationSystemKey.CREATED_BY,
+                        "value": value,
+                    }
+                }
             )
         else:
             raise NotImplementedError(f"Unsupported filter {filter_value}.")
