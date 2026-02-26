@@ -510,10 +510,28 @@ class OrchestratorService_Sql:
                     execution_id=container_execution_uuid,
                     input_name=input_name,
                 ),
-                is_secret=(artifact_data.hash == secret_hash),
             )
             for input_name, artifact_data in input_artifact_data.items()
         }
+
+        # Adding dynamic data arguments to input arguments.
+        # This is needed so that the launcher can see them and resolve them.
+        for input_name, dynamic_data_argument in dynamic_data_arguments.items():
+            input_argument = input_arguments.get(input_name)
+            if not input_argument:
+                input_argument = launcher_interfaces.InputArgument(
+                    total_size=-1,
+                    is_dir=False,
+                    value=None,
+                    uri=None,
+                    staging_uri=generate_input_artifact_uri(
+                        root_dir=self._data_root_uri,
+                        execution_id=container_execution_uuid,
+                        input_name=input_name,
+                    ),
+                )
+                input_arguments[input_name] = input_argument
+            input_argument.dynamic_data = dynamic_data_argument
 
         # Handling annotations
 
