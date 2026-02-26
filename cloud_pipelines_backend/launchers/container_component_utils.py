@@ -131,3 +131,22 @@ def resolve_container_command_line(
         output_paths=output_paths,
         inputs_consumed_by_value=inputs_consumed_by_value,
     )
+
+
+def parse_dynamic_data_argument(
+    dynamic_data_argument: str | dict[str, typing.Any],
+) -> tuple[str, dict[str, typing.Any] | None]:
+    if isinstance(dynamic_data_argument, str):
+        return dynamic_data_argument, None
+    elif isinstance(dynamic_data_argument, dict):
+        keys = list(dynamic_data_argument.keys())
+        if len(keys) != 1:
+            raise ValueError(
+                f"Dynamic data argument dict must have exactly one key. Got keys: {keys}"
+            )
+        key = keys[0]
+        return key, dynamic_data_argument[key]
+    else:
+        raise TypeError(
+            f"Dynamic data argument must be either a string or a dict. Got: {dynamic_data_argument}"
+        )
