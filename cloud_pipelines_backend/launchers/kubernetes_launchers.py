@@ -53,10 +53,7 @@ _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY = "system/multi_node/node_0_address"
 _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_addresses"
 
 # Environment variables for multi-node execution.
-_MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NUMBER_OF_NODES"
 _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
-_MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_0_ADDRESS"
-_MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES"
 
 
 _T = typing.TypeVar("_T")
@@ -996,6 +993,9 @@ class _KubernetesJobLauncher(
         explicit_service_name = explicit_resource_name
         if enable_multi_node:
             all_node_addresses = [
+                # Option 1 (with auto-generated job names):
+                # f"$(__JOB_NAME)-{idx}.{explicit_service_name}"
+                # Option 2 (with explicit job names):
                 f"{explicit_job_name}-{idx}.{explicit_service_name}"
                 for idx in range(num_nodes)
             ]
@@ -1057,17 +1057,9 @@ class _KubernetesJobLauncher(
         namespace = pod.metadata.namespace
 
         if enable_multi_node:
-            # Temporary implementation of implicitly passing multi-node information to the component code.
-            # After testing, this implementation will be replaced by more explicit way to consume multi-node information (dynamicData arguments passed to component inputs).
-
             main_container_spec = pod.spec.containers[0]
             main_container_spec.env = main_container_spec.env or []
-            main_container_spec.env.append(
-                k8s_client_lib.V1EnvVar(
-                    name=_MULTI_NODE_NUMBER_OF_NODES_ENV_VAR_NAME,
-                    value=str(num_nodes),
-                )
-            )
+
             # We need to insert this env variable at the start on the list since subsequent variables can depend on it.
             main_container_spec.env.insert(
                 0,
@@ -1113,38 +1105,6 @@ class _KubernetesJobLauncher(
             # Setting Pod's spec.subdomain to exact name of teh service.
             # This requires the service name to be known.
             pod.spec.subdomain = explicit_service_name
-
-            # Node addresses:
-            #
-            # Code to handle auto-generated job names Option 1):
-            # main_container_spec.env.append(
-            #     k8s_client_lib.V1EnvVar(
-            #         name="__JOB_NAME",
-            #         value_from=k8s_client_lib.V1EnvVarSource(
-            #             field_ref=k8s_client_lib.V1ObjectFieldSelector(
-            #                 field_path="metadata.labels['batch.kubernetes.io/job-name']"
-            #             )
-            #         ),
-            #     )
-            # )
-            # all_node_addresses = [
-            #     # f"$(__JOB_NAME)-{idx}.{explicit_service_name}"
-            #     for idx in range(num_nodes)
-            # ]
-
-            main_container_spec.env.append(
-                k8s_client_lib.V1EnvVar(
-                    name=_MULTI_NODE_NODE_0_ADDRESS_ENV_VAR_NAME,
-                    value=node_0_address,
-                )
-            )
-
-            main_container_spec.env.append(
-                k8s_client_lib.V1EnvVar(
-                    name=_MULTI_NODE_ALL_NODE_ADDRESSES_ENV_VAR_NAME,
-                    value=all_node_addresses_str,
-                )
-            )
 
         job = k8s_client_lib.V1Job(
             metadata=k8s_client_lib.V1ObjectMeta(
