@@ -164,11 +164,12 @@ def build_list_filters(
         page_token.filter_query if page_token_value else filter_query_value
     )
 
-    where_clauses, resolved_filter = _build_filter_where_clauses(
-        filter_value=filter_value,
-        current_user=current_user,
-    )
+    if filter_value:
+        filter_query_value = _convert_legacy_filter_to_filter_query(
+            filter_value=filter_value,
+        )
 
+    where_clauses: list[sql.ColumnElement] = []
     if filter_query_value:
         parsed = filter_query_models.FilterQuery.model_validate_json(filter_query_value)
         where_clauses.append(
@@ -180,7 +181,7 @@ def build_list_filters(
 
     next_page_token = PageToken(
         offset=offset + page_size,
-        filter=resolved_filter,
+        filter=None,
         filter_query=filter_query_value,
     )
 
@@ -219,39 +220,31 @@ def _parse_filter(filter: str) -> dict[str, str]:
     return parsed_filter
 
 
-def _build_filter_where_clauses(
+def _convert_legacy_filter_to_filter_query(
     *,
-    filter_value: str | None,
-    current_user: str | None,
-) -> tuple[list[sql.ColumnElement], str | None]:
-    """Parse a filter string into SQLAlchemy WHERE clauses.
+    filter_value: str,
+) -> str:
+    """Convert a legacy ``filter`` string to an equivalent ``filter_query`` JSON string.
 
-    Returns (where_clauses, next_page_filter_value). The second value is the
-    filter string with shorthand values resolved (e.g. "created_by:me" becomes
-    "created_by:alice@example.com") so it can be embedded in the next page token.
+    Only ``created_by`` is supported. ``"me"`` is NOT resolved here — the
+    downstream ``_maybe_resolve_system_values`` handles that.
     """
-    where_clauses: list[sql.ColumnElement] = []
-    parsed_filter = _parse_filter(filter_value) if filter_value else {}
-    for key, value in parsed_filter.items():
+    parsed = _parse_filter(filter_value)
+    predicates: list[dict] = []
+    for key, value in parsed.items():
         if key == "_text":
             raise NotImplementedError("Text search is not implemented yet.")
         elif key == "created_by":
-            if value == "me":
-                if current_user is None:
-                    current_user = ""
-                value = current_user
-                # TODO: Maybe make this a bit more robust.
-                # We need to change the filter since it goes into the next_page_token.
-                filter_value = filter_value.replace(
-                    "created_by:me", f"created_by:{current_user}"
+            if not value:
+                raise errors.ApiValidationError(
+                    "Legacy filter 'created_by' requires a non-empty value."
                 )
-            if value:
-                where_clauses.append(bts.PipelineRun.created_by == value)
-            else:
-                where_clauses.append(bts.PipelineRun.created_by == None)
+            predicates.append(
+                {"value_equals": {"key": SystemKey.CREATED_BY, "value": value}}
+            )
         else:
             raise NotImplementedError(f"Unsupported filter {filter_value}.")
-    return where_clauses, filter_value
+    return json.dumps({"and": predicates})
 
 
 # ---------------------------------------------------------------------------
