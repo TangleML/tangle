@@ -181,26 +181,27 @@ class PipelineRunsApiService_Sql:
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
     ) -> ListPipelineJobsResponse:
-        where_clauses, offset, next_token = filter_query_sql.build_list_filters(
+        where_clauses = filter_query_sql.build_list_filters(
             filter_value=filter,
             filter_query_value=filter_query,
-            page_token_value=page_token,
+            cursor_value=page_token,
             current_user=current_user,
-            page_size=_DEFAULT_PAGE_SIZE,
         )
 
         pipeline_runs = list(
             session.scalars(
                 sql.select(bts.PipelineRun)
                 .where(*where_clauses)
-                .order_by(bts.PipelineRun.created_at.desc())
-                .offset(offset)
+                .order_by(
+                    bts.PipelineRun.created_at.desc(),
+                    bts.PipelineRun.id.desc(),
+                )
                 .limit(_DEFAULT_PAGE_SIZE)
             ).all()
         )
 
-        next_page_token = (
-            next_token.encode() if len(pipeline_runs) >= _DEFAULT_PAGE_SIZE else None
+        next_page_token = filter_query_sql.maybe_next_page_token(
+            rows=pipeline_runs, page_size=_DEFAULT_PAGE_SIZE
         )
 
         return ListPipelineJobsResponse(

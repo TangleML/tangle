@@ -182,6 +182,7 @@ class TestPipelineRunServiceList:
             )
         assert len(page1.pipeline_runs) == 10
         assert page1.next_page_token is not None
+        assert "~" in page1.next_page_token
 
         with session_factory() as session:
             page2 = service.list(
@@ -190,6 +191,69 @@ class TestPipelineRunServiceList:
             )
         assert len(page2.pipeline_runs) == 2
         assert page2.next_page_token is None
+
+    def test_list_cursor_pagination_order(self, session_factory, service):
+        for i in range(5):
+            _create_run(
+                session_factory,
+                service,
+                root_task=_make_task_spec(f"pipeline-{i}"),
+            )
+
+        with session_factory() as session:
+            result = service.list(session=session)
+        dates = [r.created_at for r in result.pipeline_runs]
+        assert dates == sorted(dates, reverse=True)
+
+    def test_list_cursor_pagination_no_overlap(self, session_factory, service):
+        for i in range(12):
+            _create_run(
+                session_factory,
+                service,
+                root_task=_make_task_spec(f"pipeline-{i}"),
+            )
+
+        with session_factory() as session:
+            page1 = service.list(session=session)
+        with session_factory() as session:
+            page2 = service.list(session=session, page_token=page1.next_page_token)
+        page1_ids = {r.id for r in page1.pipeline_runs}
+        page2_ids = {r.id for r in page2.pipeline_runs}
+        assert page1_ids.isdisjoint(page2_ids)
+
+    def test_list_cursor_pagination_stable_under_inserts(
+        self, session_factory, service
+    ):
+        for i in range(12):
+            _create_run(
+                session_factory,
+                service,
+                root_task=_make_task_spec(f"pipeline-{i}"),
+            )
+
+        with session_factory() as session:
+            page1 = service.list(session=session)
+        page1_ids = {r.id for r in page1.pipeline_runs}
+
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec("pipeline-new"),
+        )
+
+        with session_factory() as session:
+            page2 = service.list(session=session, page_token=page1.next_page_token)
+        page2_ids = {r.id for r in page2.pipeline_runs}
+        assert page1_ids.isdisjoint(page2_ids)
+        assert len(page2.pipeline_runs) == 2
+
+    def test_list_invalid_page_token_raises(self, session_factory, service):
+        """page_token without ~ raises InvalidPageTokenError (422)."""
+        with session_factory() as session:
+            with pytest.raises(
+                errors.InvalidPageTokenError, match="Unrecognized page_token"
+            ):
+                service.list(session=session, page_token="not-a-cursor")
 
     def test_list_filter_unsupported(self, session_factory, service):
         with session_factory() as session:
@@ -1254,7 +1318,7 @@ class TestFilterQueryIntegration:
         returned_ids = {r.id for r in result.pipeline_runs}
         assert returned_ids == {run_b.id, run_c.id}
 
-    def test_pagination_preserves_filter_query(self, session_factory, service):
+    def test_pagination_with_filter_query(self, session_factory, service):
         for _ in range(12):
             run = _create_run(
                 session_factory,
@@ -1278,14 +1342,13 @@ class TestFilterQueryIntegration:
             )
         assert len(page1.pipeline_runs) == 10
         assert page1.next_page_token is not None
-
-        decoded = filter_query_sql.PageToken.decode(page1.next_page_token)
-        assert decoded.filter_query == fq
+        assert "~" in page1.next_page_token
 
         with session_factory() as session:
             page2 = service.list(
                 session=session,
                 page_token=page1.next_page_token,
+                filter_query=fq,
             )
         assert len(page2.pipeline_runs) == 2
         assert page2.next_page_token is None
