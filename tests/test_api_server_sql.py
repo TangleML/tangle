@@ -297,6 +297,87 @@ class TestPipelineRunServiceList:
         assert len(result.pipeline_runs) == 1
         assert result.pipeline_runs[0].created_by == "alice@example.com"
 
+    def test_list_include_sql_default_none(self, session_factory, service):
+        _create_run(session_factory, service, root_task=_make_task_spec())
+
+        with session_factory() as session:
+            result = service.list(session=session)
+        assert result.sql is None
+
+    def test_list_include_sql_true(self, session_factory, service):
+        _create_run(session_factory, service, root_task=_make_task_spec())
+
+        with session_factory() as session:
+            result = service.list(session=session, include_sql=True)
+        expected = (
+            "SELECT pipeline_run.id, pipeline_run.root_execution_id,"
+            " pipeline_run.annotations, pipeline_run.created_by,"
+            " pipeline_run.created_at, pipeline_run.updated_at,"
+            " pipeline_run.parent_pipeline_id, pipeline_run.extra_data \n"
+            "FROM pipeline_run"
+            " ORDER BY pipeline_run.created_at DESC, pipeline_run.id DESC\n"
+            " LIMIT 10 OFFSET 0"
+        )
+        assert result.sql == expected
+
+    def test_list_include_sql_with_filter_query(self, session_factory, service):
+        run = _create_run(session_factory, service, root_task=_make_task_spec())
+        with session_factory() as session:
+            service.set_annotation(session=session, id=run.id, key="team", value="ml")
+
+        fq = json.dumps({"and": [{"key_exists": {"key": "team"}}]})
+        with session_factory() as session:
+            result = service.list(session=session, filter_query=fq, include_sql=True)
+        expected = (
+            "SELECT pipeline_run.id, pipeline_run.root_execution_id,"
+            " pipeline_run.annotations, pipeline_run.created_by,"
+            " pipeline_run.created_at, pipeline_run.updated_at,"
+            " pipeline_run.parent_pipeline_id, pipeline_run.extra_data \n"
+            "FROM pipeline_run \n"
+            "WHERE EXISTS (SELECT pipeline_run_annotation.pipeline_run_id \n"
+            "FROM pipeline_run_annotation \n"
+            "WHERE pipeline_run_annotation.pipeline_run_id = pipeline_run.id"
+            " AND pipeline_run_annotation.\"key\" = 'team')"
+            " ORDER BY pipeline_run.created_at DESC, pipeline_run.id DESC\n"
+            " LIMIT 10 OFFSET 0"
+        )
+        assert result.sql == expected
+
+    def test_list_include_sql_with_cursor(self, session_factory, service):
+        for i in range(12):
+            _create_run(
+                session_factory,
+                service,
+                root_task=_make_task_spec(f"pipeline-{i}"),
+            )
+
+        with session_factory() as session:
+            page1 = service.list(session=session)
+        assert page1.next_page_token is not None
+
+        with session_factory() as session:
+            page2 = service.list(
+                session=session,
+                page_token=page1.next_page_token,
+                include_sql=True,
+            )
+
+        cursor_dt_iso, cursor_id = page1.next_page_token.split("~")
+        cursor_dt = datetime.datetime.fromisoformat(cursor_dt_iso)
+        sql_dt = cursor_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+        expected = (
+            "SELECT pipeline_run.id, pipeline_run.root_execution_id,"
+            " pipeline_run.annotations, pipeline_run.created_by,"
+            " pipeline_run.created_at, pipeline_run.updated_at,"
+            " pipeline_run.parent_pipeline_id, pipeline_run.extra_data \n"
+            "FROM pipeline_run \n"
+            f"WHERE (pipeline_run.created_at, pipeline_run.id)"
+            f" < ('{sql_dt}', '{cursor_id}')"
+            " ORDER BY pipeline_run.created_at DESC, pipeline_run.id DESC\n"
+            " LIMIT 10 OFFSET 0"
+        )
+        assert page2.sql == expected
+
 
 class TestCreatePipelineRunResponse:
     def test_base_response(self, session_factory, service):
