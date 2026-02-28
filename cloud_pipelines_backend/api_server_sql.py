@@ -12,6 +12,7 @@ from sqlalchemy import orm
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import errors
+from . import filter_query_models
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -169,10 +170,20 @@ class PipelineRunsApiService_Sql:
         session: orm.Session,
         page_token: str | None = None,
         filter: str | None = None,
+        filter_query: str | None = None,
         current_user: str | None = None,
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
     ) -> ListPipelineJobsResponse:
+        if filter and filter_query:
+            raise errors.MutuallyExclusiveFilterError(
+                "Cannot use both 'filter' and 'filter_query'. Use one or the other."
+            )
+
+        if filter_query:
+            filter_query_models.FilterQuery.model_validate_json(filter_query)
+            raise NotImplementedError("filter_query is not yet implemented.")
+
         filter_value, offset = _resolve_filter_value(
             filter=filter,
             page_token=page_token,
