@@ -33,6 +33,7 @@ def _get_current_time() -> datetime.datetime:
 
 
 _DEFAULT_PAGE_SIZE: Final[int] = 10
+_SYSTEM_KEY_RESERVED_MSG = f"Annotation keys starting with {filter_query_sql.SYSTEM_KEY_PREFIX!r} are reserved for system use."
 
 
 # ==== PipelineJobService
@@ -107,6 +108,19 @@ class PipelineRunsApiService_Sql:
                 },
             )
             session.add(pipeline_run)
+            # Mirror created_by into the annotations table so it's searchable
+            # via filter_query like any other annotation.
+            if created_by is not None:
+                # Flush to populate pipeline_run.id (server-generated) before inserting the annotation FK.
+                # TODO: Use ORM relationship instead of explicit flush + manual FK assignment.
+                session.flush()
+                session.add(
+                    bts.PipelineRunAnnotation(
+                        pipeline_run_id=pipeline_run.id,
+                        key=filter_query_sql.SystemKey.CREATED_BY,
+                        value=created_by,
+                    )
+                )
             session.commit()
 
         session.refresh(pipeline_run)
@@ -297,6 +311,8 @@ class PipelineRunsApiService_Sql:
         user_name: str | None = None,
         skip_user_check: bool = False,
     ):
+        if key.startswith(filter_query_sql.SYSTEM_KEY_PREFIX):
+            raise errors.InvalidAnnotationKeyError(_SYSTEM_KEY_RESERVED_MSG)
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
@@ -319,6 +335,8 @@ class PipelineRunsApiService_Sql:
         user_name: str | None = None,
         skip_user_check: bool = False,
     ):
+        if key.startswith(filter_query_sql.SYSTEM_KEY_PREFIX):
+            raise errors.InvalidAnnotationKeyError(_SYSTEM_KEY_RESERVED_MSG)
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")

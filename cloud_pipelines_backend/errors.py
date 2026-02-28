@@ -18,3 +18,7 @@ class ApiValidationError(Exception):
 
 class MutuallyExclusiveFilterError(ApiValidationError):
     pass
+
+
+class InvalidAnnotationKeyError(ApiValidationError):
+    pass
