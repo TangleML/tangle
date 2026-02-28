@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import sqlalchemy
 from sqlalchemy import orm
@@ -6,6 +8,7 @@ from cloud_pipelines_backend import api_server_sql
 from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import errors
+from cloud_pipelines_backend import filter_query_sql
 
 
 class TestExecutionStatusSummary:
@@ -442,119 +445,8 @@ class TestPipelineRunAnnotationCrud:
         assert annotations == {}
 
 
-class TestResolveFilterValue:
-    def test_no_page_token_no_filter(self):
-        filter_value, offset = api_server_sql._resolve_filter_value(
-            filter=None, page_token=None
-        )
-        assert filter_value is None
-        assert offset == 0
-
-    def test_no_page_token_with_filter(self):
-        filter_value, offset = api_server_sql._resolve_filter_value(
-            filter="created_by:alice",
-            page_token=None,
-        )
-        assert filter_value == "created_by:alice"
-        assert offset == 0
-
-    def test_page_token_overrides_filter(self):
-        token = api_server_sql._encode_page_token(
-            {"offset": 20, "filter": "created_by:bob"}
-        )
-        filter_value, offset = api_server_sql._resolve_filter_value(
-            filter="created_by:alice",
-            page_token=token,
-        )
-        assert filter_value == "created_by:bob"
-        assert offset == 20
-
-    def test_page_token_without_filter_key(self):
-        token = api_server_sql._encode_page_token({"offset": 10})
-        filter_value, offset = api_server_sql._resolve_filter_value(
-            filter="created_by:alice",
-            page_token=token,
-        )
-        assert filter_value is None
-        assert offset == 10
-
-    def test_page_token_without_offset_key(self):
-        token = api_server_sql._encode_page_token({"filter": "created_by:bob"})
-        filter_value, offset = api_server_sql._resolve_filter_value(
-            filter=None,
-            page_token=token,
-        )
-        assert filter_value == "created_by:bob"
-        assert offset == 0
-
-
-class TestBuildFilterWhereClauses:
-    def test_no_filter(self):
-        clauses, next_filter = api_server_sql._build_filter_where_clauses(
-            filter_value=None,
-            current_user=None,
-        )
-        assert clauses == []
-        assert next_filter is None
-
-    def test_created_by_literal(self):
-        clauses, next_filter = api_server_sql._build_filter_where_clauses(
-            filter_value="created_by:alice",
-            current_user=None,
-        )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:alice"
-
-    def test_created_by_me_resolves(self):
-        clauses, next_filter = api_server_sql._build_filter_where_clauses(
-            filter_value="created_by:me",
-            current_user="alice@example.com",
-        )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:alice@example.com"
-
-    def test_created_by_me_no_current_user(self):
-        clauses, next_filter = api_server_sql._build_filter_where_clauses(
-            filter_value="created_by:me",
-            current_user=None,
-        )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:"
-
-    def test_created_by_empty_value(self):
-        clauses, next_filter = api_server_sql._build_filter_where_clauses(
-            filter_value="created_by:",
-            current_user=None,
-        )
-        assert len(clauses) == 1
-        assert next_filter == "created_by:"
-
-    def test_unsupported_key_raises(self):
-        with pytest.raises(NotImplementedError, match="Unsupported filter"):
-            api_server_sql._build_filter_where_clauses(
-                filter_value="unknown_key:value",
-                current_user=None,
-            )
-
-    def test_text_search_raises(self):
-        with pytest.raises(NotImplementedError, match="Text search"):
-            api_server_sql._build_filter_where_clauses(
-                filter_value="some_text_without_colon",
-                current_user=None,
-            )
-
-
 class TestFilterQueryApiWiring:
-    def test_filter_query_returns_not_implemented(self, session_factory, service):
-        valid_json = '{"and": [{"key_exists": {"key": "team"}}]}'
-        with session_factory() as session:
-            with pytest.raises(NotImplementedError, match="not yet implemented"):
-                service.list(
-                    session=session,
-                    filter_query=valid_json,
-                )
-
-    def test_filter_query_validates_before_501(self, session_factory, service):
+    def test_filter_query_validates_invalid_json(self, session_factory, service):
         from pydantic import ValidationError
 
         invalid_json = '{"bad_key": "not_valid"}'
@@ -575,3 +467,375 @@ class TestFilterQueryApiWiring:
                     filter="created_by:alice",
                     filter_query='{"and": [{"key_exists": {"key": "team"}}]}',
                 )
+
+
+class TestFilterQueryIntegration:
+    def _set_annotation(self, *, session_factory, service, run_id, key, value):
+        with session_factory() as session:
+            service.set_annotation(
+                session=session,
+                id=run_id,
+                key=key,
+                value=value,
+                user_name="test-user",
+            )
+
+    def test_annotation_key_exists(self, session_factory, service):
+        run1 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run2 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="team",
+            value="ml-ops",
+        )
+
+        fq = json.dumps({"and": [{"key_exists": {"key": "team"}}]})
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == run1.id
+
+    def test_annotation_value_equals(self, session_factory, service):
+        run1 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run2 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="team",
+            value="ml-ops",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run2.id,
+            key="team",
+            value="data-eng",
+        )
+
+        fq = json.dumps({"and": [{"value_equals": {"key": "team", "value": "ml-ops"}}]})
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == run1.id
+
+    def test_annotation_value_contains(self, session_factory, service):
+        run1 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run2 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="team",
+            value="ml-ops",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run2.id,
+            key="team",
+            value="data-eng",
+        )
+
+        fq = json.dumps(
+            {"and": [{"value_contains": {"key": "team", "value_substring": "ml"}}]}
+        )
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == run1.id
+
+    def test_annotation_value_in(self, session_factory, service):
+        run1 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run2 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run3 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="env",
+            value="prod",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run2.id,
+            key="env",
+            value="staging",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run3.id,
+            key="env",
+            value="dev",
+        )
+
+        fq = json.dumps(
+            {"and": [{"value_in": {"key": "env", "values": ["prod", "staging"]}}]}
+        )
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 2
+        result_ids = {r.id for r in result.pipeline_runs}
+        assert run1.id in result_ids
+        assert run2.id in result_ids
+
+    def test_and_multiple_annotations(self, session_factory, service):
+        run1 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run2 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="team",
+            value="ml-ops",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="env",
+            value="prod",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run2.id,
+            key="team",
+            value="ml-ops",
+        )
+
+        fq = json.dumps(
+            {
+                "and": [
+                    {"key_exists": {"key": "team"}},
+                    {"value_equals": {"key": "env", "value": "prod"}},
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == run1.id
+
+    def test_or_annotations(self, session_factory, service):
+        run1 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run2 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run3 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="team",
+            value="ml-ops",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run2.id,
+            key="project",
+            value="search",
+        )
+
+        fq = json.dumps(
+            {
+                "or": [
+                    {"key_exists": {"key": "team"}},
+                    {"key_exists": {"key": "project"}},
+                ]
+            }
+        )
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 2
+        result_ids = {r.id for r in result.pipeline_runs}
+        assert run1.id in result_ids
+        assert run2.id in result_ids
+
+    def test_not_annotation(self, session_factory, service):
+        run1 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        run2 = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="test-user",
+        )
+        self._set_annotation(
+            session_factory=session_factory,
+            service=service,
+            run_id=run1.id,
+            key="deprecated",
+            value="true",
+        )
+
+        fq = json.dumps({"and": [{"not": {"key_exists": {"key": "deprecated"}}}]})
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 1
+        assert result.pipeline_runs[0].id == run2.id
+
+    def test_no_match(self, session_factory, service):
+        _create_run(session_factory, service, root_task=_make_task_spec())
+
+        fq = json.dumps({"and": [{"key_exists": {"key": "nonexistent"}}]})
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(result.pipeline_runs) == 0
+
+    def test_time_range_raises_not_implemented(self, session_factory, service):
+        fq = json.dumps(
+            {
+                "and": [
+                    {
+                        "time_range": {
+                            "key": "system/pipeline_run.date.created_at",
+                            "start_time": "2024-01-01T00:00:00Z",
+                        }
+                    }
+                ]
+            }
+        )
+        with session_factory() as session:
+            with pytest.raises(NotImplementedError, match="TimeRangePredicate"):
+                service.list(
+                    session=session,
+                    filter_query=fq,
+                )
+
+    def test_pagination_preserves_filter_query(self, session_factory, service):
+        for _ in range(12):
+            run = _create_run(
+                session_factory,
+                service,
+                root_task=_make_task_spec(),
+                created_by="test-user",
+            )
+            self._set_annotation(
+                session_factory=session_factory,
+                service=service,
+                run_id=run.id,
+                key="team",
+                value="ml-ops",
+            )
+
+        fq = json.dumps({"and": [{"key_exists": {"key": "team"}}]})
+        with session_factory() as session:
+            page1 = service.list(
+                session=session,
+                filter_query=fq,
+            )
+        assert len(page1.pipeline_runs) == 10
+        assert page1.next_page_token is not None
+
+        decoded = filter_query_sql.PageToken.decode(page1.next_page_token)
+        assert decoded.filter_query == fq
+
+        with session_factory() as session:
+            page2 = service.list(
+                session=session,
+                page_token=page1.next_page_token,
+            )
+        assert len(page2.pipeline_runs) == 2
+        assert page2.next_page_token is None

@@ -75,5 +75,11 @@ def migrate_db(db_engine: sqlalchemy.Engine):
     # Or we need to avoid calling the Index constructor.
 
     for index in bts.ExecutionNode.__table__.indexes:
-        if index.name == "ix_execution_node_container_execution_cache_key":
+        if index.name == bts.IX_EXECUTION_NODE_CACHE_KEY:
             index.create(db_engine, checkfirst=True)
+            break
+
+    for index in bts.PipelineRunAnnotation.__table__.indexes:
+        if index.name == bts.IX_ANNOTATION_RUN_ID_KEY_VALUE:
+            index.create(db_engine, checkfirst=True)
+            break
