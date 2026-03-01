@@ -68,6 +68,7 @@ class GetPipelineRunResponse(PipelineRunResponse):
 class ListPipelineJobsResponse:
     pipeline_runs: list[PipelineRunResponse]
     next_page_token: str | None = None
+    sql: str | None = None
 
 
 class PipelineRunsApiService_Sql:
@@ -170,6 +171,36 @@ class PipelineRunsApiService_Sql:
             execution_node.extra_data["desired_state"] = "TERMINATED"
         session.commit()
 
+    @staticmethod
+    def _compile_sql_string(
+        stmt: sql.Select,
+        dialect: sql.engine.Dialect,
+    ) -> str:
+        """Compile a SQLAlchemy statement to a SQL string for debugging.
+
+        Uses ``literal_binds=True`` to inline bound parameters as literal
+        values, producing a self-contained query string::
+
+            SELECT ... WHERE key = 'environment' AND created_at < '2024-01-15' LIMIT 10
+
+        If a column type lacks a ``literal_processor`` (raises CompileError or
+        NotImplementedError), falls back to placeholder syntax with a params
+        comment::
+
+            SELECT ... WHERE key = :key_1 AND created_at < :created_at_1 LIMIT :param_1
+            -- params: {'key_1': 'environment', 'created_at_1': '2024-01-15', 'param_1': 10}
+        """
+        try:
+            compiled = stmt.compile(
+                dialect=dialect,
+                compile_kwargs={"literal_binds": True},
+            )
+            return str(compiled)
+        except (sql.exc.CompileError, NotImplementedError):
+            compiled = stmt.compile(dialect=dialect)
+            params_suffix = f"\n-- params: {compiled.params}" if compiled.params else ""
+            return str(compiled) + params_suffix
+
     # Note: This method must be last to not shadow the "list" type
     def list(
         self,
@@ -181,6 +212,7 @@ class PipelineRunsApiService_Sql:
         current_user: str | None = None,
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
+        include_sql: bool = False,
     ) -> ListPipelineJobsResponse:
         where_clauses = filter_query_sql.build_list_filters(
             filter_value=filter,
@@ -189,17 +221,21 @@ class PipelineRunsApiService_Sql:
             current_user=current_user,
         )
 
-        pipeline_runs = list(
-            session.scalars(
-                sql.select(bts.PipelineRun)
-                .where(*where_clauses)
-                .order_by(
-                    bts.PipelineRun.created_at.desc(),
-                    bts.PipelineRun.id.desc(),
-                )
-                .limit(_DEFAULT_PAGE_SIZE)
-            ).all()
+        stmt = (
+            sql.select(bts.PipelineRun)
+            .where(*where_clauses)
+            .order_by(
+                bts.PipelineRun.created_at.desc(),
+                bts.PipelineRun.id.desc(),
+            )
+            .limit(_DEFAULT_PAGE_SIZE)
         )
+
+        sql_string = None
+        if include_sql:
+            sql_string = self._compile_sql_string(stmt, session.bind.dialect)
+
+        pipeline_runs = list(session.scalars(stmt).all())
 
         next_page_token = filter_query_sql.maybe_next_page_token(
             rows=pipeline_runs, page_size=_DEFAULT_PAGE_SIZE
@@ -216,6 +252,7 @@ class PipelineRunsApiService_Sql:
                 for pipeline_run in pipeline_runs
             ],
             next_page_token=next_page_token,
+            sql=sql_string,
         )
 
     def _create_pipeline_run_response(
