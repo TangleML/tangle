@@ -414,3 +414,35 @@ class TestSystemKeyValidation:
             current_user="charlie@example.com",
         )
         assert resolved.value_equals.value == "charlie@example.com"
+
+    def test_check_predicate_allowed_name_key_exists(self):
+        pred = filter_query_models.KeyExistsPredicate(
+            key_exists=filter_query_models.KeyExists(
+                key=filter_query_sql.SystemKey.NAME
+            )
+        )
+        filter_query_sql._check_predicate_allowed(predicate=pred)
+
+    def test_check_predicate_allowed_name_value_equals(self):
+        pred = filter_query_models.ValueEqualsPredicate(
+            value_equals=filter_query_models.ValueEquals(
+                key=filter_query_sql.SystemKey.NAME, value="my-pipeline"
+            )
+        )
+        filter_query_sql._check_predicate_allowed(predicate=pred)
+
+    def test_check_predicate_allowed_name_value_contains(self):
+        pred = filter_query_models.ValueContainsPredicate(
+            value_contains=filter_query_models.ValueContains(
+                key=filter_query_sql.SystemKey.NAME, value_substring="nightly"
+            )
+        )
+        filter_query_sql._check_predicate_allowed(predicate=pred)
+
+    def test_check_predicate_allowed_name_value_in(self):
+        pred = filter_query_models.ValueInPredicate(
+            value_in=filter_query_models.ValueIn(
+                key=filter_query_sql.SystemKey.NAME, values=["a", "b"]
+            )
+        )
+        filter_query_sql._check_predicate_allowed(predicate=pred)

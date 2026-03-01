@@ -11,16 +11,24 @@ from . import errors
 from . import filter_query_models
 
 SYSTEM_KEY_PREFIX: Final[str] = "system/"
+_PIPELINE_RUN_KEY_PREFIX: Final[str] = f"{SYSTEM_KEY_PREFIX}pipeline_run."
 
 
 class SystemKey(enum.StrEnum):
-    CREATED_BY = f"{SYSTEM_KEY_PREFIX}pipeline_run.created_by"
+    CREATED_BY = f"{_PIPELINE_RUN_KEY_PREFIX}created_by"
+    NAME = f"{_PIPELINE_RUN_KEY_PREFIX}name"
 
 
 SYSTEM_KEY_SUPPORTED_PREDICATES: dict[SystemKey, set[type]] = {
     SystemKey.CREATED_BY: {
         filter_query_models.KeyExistsPredicate,
         filter_query_models.ValueEqualsPredicate,
+        filter_query_models.ValueInPredicate,
+    },
+    SystemKey.NAME: {
+        filter_query_models.KeyExistsPredicate,
+        filter_query_models.ValueEqualsPredicate,
+        filter_query_models.ValueContainsPredicate,
         filter_query_models.ValueInPredicate,
     },
 }
