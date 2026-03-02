@@ -42,6 +42,9 @@ RESOURCES_MEMORY_ANNOTATION_KEY = (
 RESOURCES_ACCELERATORS_ANNOTATION_KEY = (
     "cloud-pipelines.net/launchers/generic/resources.accelerators"
 )
+MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
+    "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
+)
 
 # Multi-node constants
 _MULTI_NODE_MAX_NUMBER_OF_NODES = 16
@@ -905,7 +908,7 @@ class _KubernetesJobLauncher(
     _KubernetesContainerLauncherBase,
     interfaces.ContainerTaskLauncher["LaunchedKubernetesJob"],
 ):
-    """Launcher that launches Kubernetes Jobs on a single-node Kubernetes (uses hostPath for data passing)"""
+    """Launcher that launches Kubernetes Jobs"""
 
     def __init__(
         self,
@@ -978,9 +981,6 @@ class _KubernetesJobLauncher(
 
         explicit_job_name = explicit_resource_name
 
-        MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
-            "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
-        )
         num_nodes_annotation_str = (annotations or {}).get(
             MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, 1
         )
@@ -1496,6 +1496,106 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         _logger.info(f"Terminated job {self._job_name} in namespace {self._namespace}")
 
 
+class _KubernetesPodOrJobLauncher(
+    interfaces.ContainerTaskLauncher[interfaces.LaunchedContainer],
+):
+    """Launcher that launches Kubernetes Pods or Jobs"""
+
+    def __init__(
+        self,
+        *,
+        api_client: k8s_client_lib.ApiClient,
+        namespace: str = "default",
+        service_account_name: str | None = None,
+        request_timeout: int | tuple[int, int] = 10,
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        pod_postprocessor: PodPostProcessor | None = None,
+        _storage_provider: storage_provider_interfaces.StorageProvider,
+        _create_volume_and_volume_mount: typing.Callable[
+            [str, str, str, bool],
+            tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
+        ],
+    ):
+        self._pod_launcher = _KubernetesPodLauncher(
+            api_client=api_client,
+            namespace=namespace,
+            service_account_name=service_account_name,
+            request_timeout=request_timeout,
+            pod_name_prefix="task-",
+            pod_labels=pod_labels,
+            pod_annotations=pod_annotations,
+            pod_postprocessor=pod_postprocessor,
+            _storage_provider=_storage_provider,
+            _create_volume_and_volume_mount=_create_volume_and_volume_mount,
+        )
+        self._job_launcher = _KubernetesJobLauncher(
+            api_client=api_client,
+            namespace=namespace,
+            service_account_name=service_account_name,
+            request_timeout=request_timeout,
+            pod_labels=pod_labels,
+            pod_annotations=pod_annotations,
+            pod_postprocessor=pod_postprocessor,
+            _storage_provider=_storage_provider,
+            _create_volume_and_volume_mount=_create_volume_and_volume_mount,
+        )
+        # This might help cross-cluster launchers identify this launcher via teh server address.
+        self._api_client = api_client
+        self._storage_provider = _storage_provider
+
+    def launch_container_task(
+        self,
+        *,
+        component_spec: structures.ComponentSpec,
+        # Input arguments may be updated with new downloaded values and new URIs of uploaded values.
+        input_arguments: dict[str, interfaces.InputArgument],
+        output_uris: dict[str, str],
+        log_uri: str,
+        annotations: dict[str, Any] | None = None,
+    ) -> "LaunchedKubernetesContainer | LaunchedKubernetesJob":
+        if annotations and MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY in annotations:
+            return self._job_launcher.launch_container_task(
+                component_spec=component_spec,
+                input_arguments=input_arguments,
+                output_uris=output_uris,
+                log_uri=log_uri,
+                annotations=annotations,
+            )
+        else:
+            return self._pod_launcher.launch_container_task(
+                component_spec=component_spec,
+                input_arguments=input_arguments,
+                output_uris=output_uris,
+                log_uri=log_uri,
+                annotations=annotations,
+            )
+
+    def get_refreshed_launched_container_from_dict(
+        self, launched_container_dict: dict
+    ) -> "LaunchedKubernetesContainer | LaunchedKubernetesJob":
+        launched_container = self.deserialize_launched_container_from_dict(
+            launched_container_dict
+        )
+        return launched_container.get_refreshed()
+
+    def deserialize_launched_container_from_dict(
+        self, launched_container_dict: dict
+    ) -> "LaunchedKubernetesContainer | LaunchedKubernetesJob":
+        if LaunchedKubernetesJob.SERIALIZATION_ROOT_KEY in launched_container_dict:
+            return LaunchedKubernetesJob.from_dict(
+                launched_container_dict, launcher=self._job_launcher
+            )
+        elif "kubernetes" in launched_container_dict:
+            return LaunchedKubernetesContainer.from_dict(
+                launched_container_dict, launcher=self._pod_launcher
+            )
+        else:
+            raise interfaces.LauncherError(
+                f"Unexpected launched_container_dict: Top-level keys: {list(launched_container_dict.keys())}"
+            )
+
+
 class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
     _KubernetesJobLauncher
 ):
@@ -1507,6 +1607,33 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         # job_name_prefix: str = "task-",
+        pod_labels: dict[str, str] | None = None,
+        pod_annotations: dict[str, str] | None = None,
+        pod_postprocessor: PodPostProcessor | None = None,
+    ):
+        super().__init__(
+            namespace=namespace,
+            service_account_name=service_account_name,
+            api_client=api_client,
+            request_timeout=request_timeout,
+            pod_labels=pod_labels,
+            pod_annotations=pod_annotations,
+            pod_postprocessor=pod_postprocessor,
+            _storage_provider=local_storage.LocalStorageProvider(),
+            _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
+        )
+
+
+class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
+    _KubernetesPodOrJobLauncher
+):
+    def __init__(
+        self,
+        *,
+        api_client: k8s_client_lib.ApiClient,
+        namespace: str = "default",
+        service_account_name: str | None = None,
+        request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
