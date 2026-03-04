@@ -586,6 +586,11 @@ class OrchestratorService_Sql:
                     bts.ContainerExecutionStatus.SYSTEM_ERROR
                 )
                 record_system_error_exception(execution=execution, exception=ex)
+                if execution.extra_data is None:
+                    execution.extra_data = {}
+                execution.extra_data[
+                    bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+                ] = str(ex)
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution
                 )

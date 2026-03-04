@@ -501,6 +501,11 @@ class _KubernetesPodLauncher(
                 body=pod,
                 _request_timeout=self._request_timeout,
             )
+        except k8s_client_lib.ApiException as ex:
+            k8s_message = _extract_kubernetes_error_message(ex)
+            raise interfaces.LauncherError(
+                k8s_message or f"Failed to create pod: Kubernetes API error ({ex.status} {ex.reason})"
+            ) from ex
         except Exception as ex:
             raise interfaces.LauncherError(
                 f"Failed to create pod: {_kubernetes_serialize(pod)}"
@@ -1138,6 +1143,11 @@ class _KubernetesJobLauncher(
                 body=job,
                 _request_timeout=self._request_timeout,
             )
+        except k8s_client_lib.ApiException as ex:
+            k8s_message = _extract_kubernetes_error_message(ex)
+            raise interfaces.LauncherError(
+                k8s_message or f"Failed to create Kubernetes Job: Kubernetes API error ({ex.status} {ex.reason})"
+            ) from ex
         except Exception as ex:
             raise interfaces.LauncherError(
                 f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}"
@@ -1680,6 +1690,20 @@ def windows_path_to_docker_path(path: str) -> str:
 def _kubernetes_serialize(obj) -> dict[str, Any]:
     shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
     return shallow_client.sanitize_for_serialization(obj)
+
+
+def _extract_kubernetes_error_message(ex: k8s_client_lib.ApiException) -> str | None:
+    """Extract the human-readable message from a Kubernetes ApiException body.
+
+    The Kubernetes API returns structured JSON error bodies with a top-level
+    'message' field that contains the admission webhook rejection reason —
+    far more actionable than a raw pod/job spec dump.
+    """
+    try:
+        body = json.loads(ex.body)
+        return body.get("message") or None
+    except Exception:
+        return None
 
 
 def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: typing.Type[_T]) -> _T:
