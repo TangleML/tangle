@@ -679,8 +679,14 @@ class ExecutionNodesApiService_Sql:
             raise ItemNotFoundError(f"Execution with {id=} does not exist.")
         container_execution = execution.container_execution
         if not container_execution:
-            raise RuntimeError(
-                f"Execution with {id=} does not have container execution information."
+            status = execution.container_execution_status
+            if not status or status not in bts.CONTAINER_STATUSES_WITH_MISSING_EXECUTION_EXPECTED:
+                raise RuntimeError(
+                    f"Execution with {id=} has status {status} "
+                    f"but is missing its container execution record."
+                )
+            raise errors.ItemNotFoundError(
+                f"Execution with {id=} has status {status.value} and does not have container execution information. This is expected for this status."
             )
         return GetContainerExecutionStateResponse(
             status=container_execution.status,
@@ -756,16 +762,19 @@ class ExecutionNodesApiService_Sql:
             system_error_exception_full or orchestration_error_message
         )
         if not container_execution:
-            if (
-                execution.container_execution_status
-                == bts.ContainerExecutionStatus.SYSTEM_ERROR
-            ):
+            status = execution.container_execution_status
+            if not status or status not in bts.CONTAINER_STATUSES_WITH_MISSING_EXECUTION_EXPECTED:
+                raise RuntimeError(
+                    f"Execution with {id=} has status {status} "
+                    f"but is missing its container execution record."
+                )
+            if status == bts.ContainerExecutionStatus.SYSTEM_ERROR:
                 return GetContainerExecutionLogResponse(
                     system_error_exception_full=system_error_exception_full,
                     orchestration_error_message=orchestration_error_message,
                 )
-            raise RuntimeError(
-                f"Execution with {id=} does not have container execution information."
+            raise errors.ItemNotFoundError(
+                f"Execution with {id=} has status {status.value} and does not have a container execution log. This is expected for this status."
             )
         log_text: str | None = None
         if container_execution.status in (

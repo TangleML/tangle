@@ -42,6 +42,20 @@ CONTAINER_STATUSES_ENDED = {
     ContainerExecutionStatus.SKIPPED,
 }
 
+# Statuses where the ContainerExecution record may not exist yet (or ever).
+# These represent expected states before the orchestrator creates and launches
+# a container — e.g. waiting for inputs, sitting in queue, or terminated before
+# launch (cancelled/skipped/system error before container creation).
+CONTAINER_STATUSES_WITH_MISSING_EXECUTION_EXPECTED = {
+    ContainerExecutionStatus.INVALID,
+    ContainerExecutionStatus.UNINITIALIZED,
+    ContainerExecutionStatus.QUEUED,
+    ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+    ContainerExecutionStatus.SYSTEM_ERROR,
+    ContainerExecutionStatus.CANCELLED,
+    ContainerExecutionStatus.SKIPPED,
+}
+
 
 def generate_unique_id() -> str:
     """Generates a 10-byte (20 hex chars) unique ID.session.add
