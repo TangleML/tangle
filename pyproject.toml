@@ -19,13 +19,39 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "black>=26.1.0",
+    "mypy>=1.15",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.25.2",
+    "ruff>=0.11",
 ]
 huggingface = [
     "huggingface-hub[oauth]>=0.35.3",
 ]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cloud_pipelines", "cloud_pipelines_backend"]
+
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
 
 [tool.setuptools.packages.find]
 include = ["cloud_pipelines_backend*"]
