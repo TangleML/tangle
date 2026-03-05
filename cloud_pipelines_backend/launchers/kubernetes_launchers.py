@@ -39,6 +39,9 @@ RESOURCES_CPU_ANNOTATION_KEY = "cloud-pipelines.net/launchers/generic/resources.
 RESOURCES_MEMORY_ANNOTATION_KEY = (
     "cloud-pipelines.net/launchers/generic/resources.memory"
 )
+RESOURCES_SHARED_MEMORY_ANNOTATION_KEY = (
+    "cloud-pipelines.net/launchers/generic/resources.shared_memory"
+)
 RESOURCES_ACCELERATORS_ANNOTATION_KEY = (
     "cloud-pipelines.net/launchers/generic/resources.accelerators"
 )
@@ -366,6 +369,24 @@ class _KubernetesContainerLauncherBase:
             if memory_resource_request:
                 resources.requests["memory"] = memory_resource_request
                 resources.limits["memory"] = memory_resource_request
+        shared_memory_size = annotations.get(RESOURCES_SHARED_MEMORY_ANNOTATION_KEY)
+        if shared_memory_size:
+            volume_name = "shared-memory"
+            volume = k8s_client_lib.V1Volume(
+                name=volume_name,
+                empty_dir=k8s_client_lib.V1EmptyDirVolumeSource(
+                    medium="Memory",
+                    size_limit=(
+                        shared_memory_size if shared_memory_size != "Infinity" else None
+                    ),
+                ),
+            )
+            volume_mount = k8s_client_lib.V1VolumeMount(
+                name=volume_name,
+                mount_path="/dev/shm",
+            )
+            volume_map[volume.name] = volume
+            volume_mounts.append(volume_mount)
 
         pod_spec = k8s_client_lib.V1PodSpec(
             init_containers=[],
