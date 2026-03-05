@@ -17,12 +17,19 @@ from opentelemetry.sdk import resources as otel_resources
 from opentelemetry.sdk import trace as otel_trace
 from opentelemetry.sdk.trace import export as otel_trace_export
 
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import configuration
+from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
+    configuration,
+)
 
 _logger = logging.getLogger(__name__)
 
 
-def setup(endpoint: str, protocol: str, service_name: str) -> None:
+def setup(
+    endpoint: str,
+    protocol: str,
+    service_name: str,
+    service_version: str | None = None,
+) -> None:
     """
     Configure the global OpenTelemetry tracer provider.
 
@@ -30,11 +37,13 @@ def setup(endpoint: str, protocol: str, service_name: str) -> None:
         endpoint: The OTLP collector endpoint URL.
         protocol: The exporter protocol ("grpc" or "http").
         service_name: The service name reported to the collector.
+        service_version: The service version (e.g. git revision) reported to the collector.
     """
     try:
         _logger.info(
             f"Configuring OpenTelemetry tracing, endpoint={endpoint}, "
-            f"protocol={protocol}, service_name={service_name}"
+            f"protocol={protocol}, service_name={service_name}, "
+            f"service_version={service_version}"
         )
 
         if protocol == configuration.ExporterProtocol.GRPC:
@@ -42,9 +51,10 @@ def setup(endpoint: str, protocol: str, service_name: str) -> None:
         else:
             otel_exporter = otel_http_trace_exporter.OTLPSpanExporter(endpoint=endpoint)
 
-        resource = otel_resources.Resource(
-            attributes={otel_resources.SERVICE_NAME: service_name}
-        )
+        attributes = {otel_resources.SERVICE_NAME: service_name}
+        if service_version:
+            attributes[otel_resources.SERVICE_VERSION] = service_version
+        resource = otel_resources.Resource.create(attributes)
         tracer_provider = otel_trace.TracerProvider(resource=resource)
         span_processor = otel_trace_export.BatchSpanProcessor(otel_exporter)
         tracer_provider.add_span_processor(span_processor)
