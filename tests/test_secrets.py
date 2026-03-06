@@ -129,4 +129,4 @@ def test_running_pipeline_with_secrets():
         secret_argument = input_arguments.get(secret_input_name)
         assert secret_argument
         assert secret_argument.value == secret_value
-        assert secret_argument.is_secret
+        assert secret_argument.dynamic_data == {"secret": {"name": secret_name}}
