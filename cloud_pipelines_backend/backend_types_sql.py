@@ -2,7 +2,7 @@ import dataclasses
 import datetime
 import enum
 import typing
-from typing import Any
+from typing import Any, Final
 
 import sqlalchemy as sql
 from sqlalchemy import orm
@@ -294,6 +294,9 @@ class ExecutionToAncestorExecutionLink(_TableBase):
 # So we need to jump through extra hoops to make the relationship many-to-many again.
 class ExecutionNode(_TableBase):
     __tablename__ = "execution_node"
+    _IX_EXECUTION_NODE_CACHE_KEY: Final[str] = (
+        "ix_execution_node_container_execution_cache_key"
+    )
     id: orm.Mapped[IdType] = orm.mapped_column(
         primary_key=True, init=False, insert_default=generate_unique_id
     )
@@ -491,6 +494,9 @@ class ContainerExecution(_TableBase):
 
 class PipelineRunAnnotation(_TableBase):
     __tablename__ = "pipeline_run_annotation"
+    _IX_ANNOTATION_RUN_ID_KEY_VALUE: Final[str] = (
+        "ix_pipeline_run_annotation_pipeline_run_id_key_value"
+    )
     pipeline_run_id: orm.Mapped[IdType] = orm.mapped_column(
         sql.ForeignKey(PipelineRun.id),
         primary_key=True,
@@ -499,6 +505,15 @@ class PipelineRunAnnotation(_TableBase):
     pipeline_run: orm.Mapped[PipelineRun] = orm.relationship(repr=False, init=False)
     key: orm.Mapped[str] = orm.mapped_column(default=None, primary_key=True)
     value: orm.Mapped[str | None] = orm.mapped_column(default=None)
+
+    __table_args__ = (
+        sql.Index(
+            _IX_ANNOTATION_RUN_ID_KEY_VALUE,
+            "pipeline_run_id",
+            "key",
+            "value",
+        ),
+    )
 
 
 class Secret(_TableBase):
