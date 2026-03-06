@@ -1,6 +1,8 @@
 import sqlalchemy
+from sqlalchemy import orm
 
 from . import backend_types_sql as bts
+from . import filter_query_sql
 
 
 def create_db_engine_and_migrate_db(
@@ -83,3 +85,60 @@ def migrate_db(db_engine: sqlalchemy.Engine):
         if index.name == bts.PipelineRunAnnotation._IX_ANNOTATION_RUN_ID_KEY_VALUE:
             index.create(db_engine, checkfirst=True)
             break
+
+    _backfill_pipeline_run_created_by_annotations(db_engine=db_engine)
+
+
+def _is_pipeline_run_annotation_key_already_backfilled(
+    *,
+    session: orm.Session,
+    key: str,
+) -> bool:
+    """Return True if at least one annotation with the given key exists."""
+    return session.query(
+        sqlalchemy.exists(
+            sqlalchemy.select(sqlalchemy.literal(1))
+            .select_from(bts.PipelineRunAnnotation)
+            .where(
+                bts.PipelineRunAnnotation.key == key,
+            )
+        )
+    ).scalar()
+
+
+def _backfill_pipeline_run_created_by_annotations(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> None:
+    """Copy pipeline_run.created_by into pipeline_run_annotation so
+    annotation-based search works for created_by.
+
+    The check and insert run in a single session/transaction to avoid
+    TOCTOU races between concurrent startup processes.
+
+    Skips entirely if any created_by annotation key already exists (i.e. the
+    write-path is populating them, so the backfill has already run or is
+    no longer needed).
+    """
+    with orm.Session(db_engine) as session:
+        if _is_pipeline_run_annotation_key_already_backfilled(
+            session=session,
+            key=filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY,
+        ):
+            return
+
+        stmt = sqlalchemy.insert(bts.PipelineRunAnnotation).from_select(
+            ["pipeline_run_id", "key", "value"],
+            sqlalchemy.select(
+                bts.PipelineRun.id,
+                sqlalchemy.literal(
+                    filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY
+                ),
+                bts.PipelineRun.created_by,
+            ).where(
+                bts.PipelineRun.created_by.isnot(None),
+                bts.PipelineRun.created_by != "",
+            ),
+        )
+        session.execute(stmt)
+        session.commit()
