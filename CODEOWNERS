@@ -1,1 +1,5 @@
 * @Ark-kun
+
+/cloud_pipelines_backend/instrumentation/  @morgan-wowk
+/examples/observability/  @morgan-wowk
+/tests/instrumentation/  @morgan-wowk
