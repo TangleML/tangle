@@ -9,6 +9,7 @@ import pathlib
 import typing
 from typing import Any, Optional
 
+import kubernetes.client.exceptions
 from kubernetes import client as k8s_client_lib
 from kubernetes import watch as k8s_watch_lib
 
@@ -1422,26 +1423,34 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         new_launched_container._debug_pods = pod_map
         return new_launched_container
 
-    def _get_log_by_pod_key(self, pod_name: str) -> str:
+    def _get_log_by_pod_key(self, pod_name: str) -> str | None:
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-        log = core_api_client.read_namespaced_pod_log(
-            name=pod_name,
-            namespace=self._namespace,
-            container=_MAIN_CONTAINER_NAME,
-            timestamps=True,
-            _request_timeout=launcher._request_timeout,
-        )
-        return log
+        try:
+            log = core_api_client.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=self._namespace,
+                container=_MAIN_CONTAINER_NAME,
+                timestamps=True,
+                _request_timeout=launcher._request_timeout,
+            )
+            return log
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.reason == "Bad Request":
+                # Kubernetes client raises kubernetes.client.exceptions.ApiException when Pod is still in PodInitializing phase
+                # See https://github.com/TangleML/tangle/issues/139
+                return None
+            raise
 
     def _get_all_logs(self) -> dict[str, str]:
-        logs = {
-            pod_key: self._get_log_by_pod_key(pod.metadata.name)
-            for pod_key, pod in self._debug_pods.items()
-        }
+        logs = {}
+        for pod_key, pod in self._debug_pods.items():
+            log = self._get_log_by_pod_key(pod.metadata.name)
+            if log:
+                logs[pod_key] = log
         return logs
 
-    def _merge_logs(self, logs: dict[str, str]) -> str:
+    def _merge_logs(self, logs: dict[str, str | None]) -> str:
         if not logs:
             return ""
         # If there is only one log, return it as is.
@@ -1449,6 +1458,8 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             return list(logs.values())[0]
         all_log_lines: list[str] = []
         for pod_key, log in logs.items():
+            if not log:
+                continue
             for line in log.splitlines():
                 timestamp, _, line = line.partition(" ")
                 all_log_lines.append(f"{timestamp} {pod_key} {line}")
