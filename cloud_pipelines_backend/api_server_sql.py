@@ -499,12 +499,21 @@ class GetExecutionArtifactsResponse:
 
 
 @dataclasses.dataclass
+class ExecutionNodeReference:
+    execution_node_id: bts.IdType
+    pipeline_run_id: bts.IdType | None
+
+
+@dataclasses.dataclass
 class GetContainerExecutionStateResponse:
     status: bts.ContainerExecutionStatus
     exit_code: int | None = None
     started_at: datetime.datetime | None = None
     ended_at: datetime.datetime | None = None
     debug_info: dict | None = None
+    execution_nodes_linked_to_same_container_execution: (
+        list[ExecutionNodeReference] | None
+    ) = None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -667,8 +676,13 @@ class ExecutionNodesApiService_Sql:
         )
 
     def get_container_execution_state(
-        self, session: orm.Session, id: bts.IdType
+        self,
+        *,
+        session: orm.Session,
+        id: bts.IdType,
+        include_execution_nodes_linked_to_same_container_execution: bool | None = None,
     ) -> GetContainerExecutionStateResponse:
+        # ! The `id` here is ExecutionNode ID, not ContainerExecution ID.
         execution = session.get(bts.ExecutionNode, id)
         if not execution:
             raise errors.ItemNotFoundError(f"Execution with {id=} does not exist.")
@@ -677,12 +691,56 @@ class ExecutionNodesApiService_Sql:
             raise RuntimeError(
                 f"Execution with {id=} does not have container execution information."
             )
+
+        if include_execution_nodes_linked_to_same_container_execution:
+            Root_ExecutionNode = orm.aliased(
+                bts.ExecutionNode, name="root_execution_node"
+            )
+            execution_nodes_and_pipeline_runs_query = (
+                sql.select(
+                    bts.ExecutionNode.id,
+                    bts.PipelineRun.id,
+                )
+                .select_from(bts.ExecutionNode)
+                .where(
+                    bts.ExecutionNode.container_execution_id == container_execution.id
+                )
+                .join(
+                    bts.ExecutionToAncestorExecutionLink,
+                    bts.ExecutionToAncestorExecutionLink.execution_id
+                    == bts.ExecutionNode.id,
+                )
+                .join(
+                    Root_ExecutionNode,
+                    Root_ExecutionNode.id
+                    == bts.ExecutionToAncestorExecutionLink.ancestor_execution_id,
+                )
+                .join(
+                    bts.PipelineRun,
+                    bts.PipelineRun.root_execution_id == Root_ExecutionNode.id,
+                )
+                .order_by(bts.ExecutionNode.id)
+            )
+            execution_nodes_and_pipeline_runs = session.execute(
+                execution_nodes_and_pipeline_runs_query
+            ).tuples()
+            linked_execution_nodes = [
+                ExecutionNodeReference(
+                    execution_node_id=execution_node_id,
+                    pipeline_run_id=pipeline_run_id,
+                )
+                for execution_node_id, pipeline_run_id in execution_nodes_and_pipeline_runs
+            ]
+        else:
+            linked_execution_nodes = None
+
         return GetContainerExecutionStateResponse(
             status=container_execution.status,
             exit_code=container_execution.exit_code,
             started_at=container_execution.started_at,
             ended_at=container_execution.ended_at,
             debug_info=container_execution.launcher_data,
+            execution_nodes_linked_to_same_container_execution=linked_execution_nodes,
         )
 
     def get_artifacts(

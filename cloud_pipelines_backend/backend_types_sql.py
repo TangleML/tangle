@@ -376,7 +376,7 @@ class ExecutionNode(_TableBase):
     # container_execution_details__last_processed_time: datetime.datetime | None = None
     # container_execution_details__cache_key: str | None = None
     container_execution_id: orm.Mapped[IdType | None] = orm.mapped_column(
-        sql.ForeignKey("container_execution.id"), default=None, init=False
+        sql.ForeignKey("container_execution.id"), default=None, init=False, index=True
     )
     container_execution: orm.Mapped["ContainerExecution"] = orm.relationship(
         default=None, repr=False, back_populates="execution_nodes"
