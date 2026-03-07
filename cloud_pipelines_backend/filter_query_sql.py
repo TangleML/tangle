@@ -14,7 +14,15 @@ SYSTEM_KEY_PREFIX: Final[str] = "system/"
 _PIPELINE_RUN_KEY_PREFIX: Final[str] = f"{SYSTEM_KEY_PREFIX}pipeline_run."
 
 
-class PipelineRunAnnotationSystemKey(enum.StrEnum):
+class PipelineRunAnnotationSystemKey(str, enum.Enum):
+    # Python <3.11 compat (no enum.StrEnum). Without these overrides:
+    #   __str__:  str(MEMBER) returns 'ClassName.MEMBER' instead of the value,
+    #             breaking sqlalchemy.literal(str(key)) in backfill queries.
+    #   __hash__: hash(MEMBER) != hash("value"), breaking dict lookups like
+    #             annotations[MEMBER] when the dict has plain string keys.
+    __hash__ = str.__hash__
+    __str__ = str.__str__
+
     CREATED_BY = f"{_PIPELINE_RUN_KEY_PREFIX}created_by"
     PIPELINE_NAME = f"{_PIPELINE_RUN_KEY_PREFIX}name"
     CREATED_AT = f"{_PIPELINE_RUN_KEY_PREFIX}date.created_at"
