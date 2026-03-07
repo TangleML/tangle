@@ -49,6 +49,10 @@ RESOURCES_ACCELERATORS_ANNOTATION_KEY = (
 MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
     "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
 )
+SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
+    "tangleml.com/launchers/kubernetes/security_context.capability.IPC_LOCK"
+)
+
 
 # Multi-node constants
 _MULTI_NODE_MAX_NUMBER_OF_NODES = 16
@@ -388,6 +392,26 @@ class _KubernetesContainerLauncherBase:
             )
             volume_map[volume.name] = volume
             volume_mounts.append(volume_mount)
+
+        # Optionally adding the IPC_LOCK capability that may be needed for InfiniBand.
+        # ContainerSpec.securityContext.capabilities.add=["IPC_LOCK"]
+        enable_capability_ipc_lock: str = annotations.get(
+            SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY, "false"
+        )
+        if enable_capability_ipc_lock.lower() == "true":
+            main_container_spec.security_context = (
+                main_container_spec.security_context
+                or k8s_client_lib.V1SecurityContext()
+            )
+            main_container_spec.security_context.capabilities = (
+                main_container_spec.security_context.capabilities
+                or k8s_client_lib.V1Capabilities()
+            )
+            main_container_spec.security_context.capabilities.add = (
+                main_container_spec.security_context.capabilities.add or []
+            )
+            if not "IPC_LOCK" in main_container_spec.security_context.capabilities.add:
+                main_container_spec.security_context.capabilities.add.append("IPC_LOCK")
 
         pod_spec = k8s_client_lib.V1PodSpec(
             init_containers=[],
