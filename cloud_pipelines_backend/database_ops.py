@@ -90,6 +90,11 @@ def migrate_db(db_engine: sqlalchemy.Engine):
             index.create(db_engine, checkfirst=True)
             break
 
+    for index in bts.PipelineRun.__table__.indexes:
+        if index.name == bts.PipelineRun._IX_PR_CREATED_AT_DESC_ID_DESC:
+            index.create(db_engine, checkfirst=True)
+            break
+
     _backfill_pipeline_run_created_by_annotations(db_engine=db_engine)
     _backfill_pipeline_run_name_annotations(db_engine=db_engine)
 
