@@ -87,9 +87,6 @@ class DockerContainerLauncher(
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedDockerContainer":
         container_spec = component_spec.implementation.container
-        input_names = list(input_arguments.keys())
-        output_names = list(output_uris.keys())
-
         # TODO: Validate the output URIs. Don't forget about (`C:\*` and `C:/*` paths)
 
         container_inputs_root = pathlib.PurePosixPath("/tmp/inputs")

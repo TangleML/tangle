@@ -419,7 +419,7 @@ def _setup_routes_internal(
         permissions = list(
             permission
             for permission, is_granted in (user_details.permissions or {}).items()
-            if is_granted == True
+            if is_granted
         )
         return GetUserResponse(
             id=user_details.name,

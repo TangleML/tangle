@@ -9,7 +9,6 @@ from sqlalchemy import orm
 
 from . import backend_types_sql as bts
 from . import component_structures as structures
-from . import database_ops
 from . import errors
 from . import filter_query_sql
 
@@ -854,11 +853,11 @@ class ExecutionNodesApiService_Sql:
         elif container_execution.status == bts.ContainerExecutionStatus.RUNNING:
             if not container_launcher:
                 raise ApiServiceError(
-                    f"Reading log of an unfinished container requires `container_launcher`."
+                    "Reading log of an unfinished container requires `container_launcher`."
                 )
             if not container_execution.launcher_data:
                 raise ApiServiceError(
-                    f"Execution does not have container launcher data."
+                    "Execution does not have container launcher data."
                 )
 
             launched_container = (
@@ -888,11 +887,11 @@ class ExecutionNodesApiService_Sql:
         container_execution = execution.container_execution
         if not container_execution:
             raise ApiServiceError(
-                f"Execution does not have container execution information."
+                "Execution does not have container execution information."
             )
         if not container_execution.launcher_data:
             raise ApiServiceError(
-                f"Execution does not have container launcher information."
+                "Execution does not have container launcher information."
             )
         if container_execution.status == bts.ContainerExecutionStatus.RUNNING:
             launched_container = (
@@ -1045,7 +1044,7 @@ class ArtifactNodesApiService_Sql:
         if not artifact_data.uri:
             raise ValueError(f"Artifact node with {id=} does not have artifact URI.")
         if artifact_data.is_dir:
-            raise ValueError(f"Cannot generate signer URL for a directory artifact.")
+            raise ValueError("Cannot generate signer URL for a directory artifact.")
         if not artifact_data.uri.startswith("gs://"):
             raise ValueError(
                 f"The get_signed_artifact_url method only supports Google Cloud Storage URIs, but got {artifact_data.uri=}."
@@ -1108,7 +1107,7 @@ class SecretsApiService:
     ) -> SecretInfoResponse:
         secret_name = secret_name.strip()
         if not secret_name:
-            raise ApiServiceError(f"Secret name must not be empty.")
+            raise ApiServiceError("Secret name must not be empty.")
         return self._create_or_update_secret(
             session=session,
             user_id=user_id,
@@ -1343,7 +1342,7 @@ def _recursively_create_all_executions_and_artifacts(
 
     # FIX: Handle ExecutionNode.constant_arguments
     # We do not touch root_task_spec.arguments. We use graph_input_artifact_nodes instead
-    constant_input_artifacts: dict[str, bts.ArtifactData] = {}
+    # constant_input_artifacts: dict[str, bts.ArtifactData] = {}
     input_artifact_nodes = dict(input_artifact_nodes)
     for input_spec in root_component_spec.inputs or []:
         input_artifact_node = input_artifact_nodes.get(input_spec.name)

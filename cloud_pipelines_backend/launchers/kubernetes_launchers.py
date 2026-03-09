@@ -410,7 +410,7 @@ class _KubernetesContainerLauncherBase:
             main_container_spec.security_context.capabilities.add = (
                 main_container_spec.security_context.capabilities.add or []
             )
-            if not "IPC_LOCK" in main_container_spec.security_context.capabilities.add:
+            if "IPC_LOCK" not in main_container_spec.security_context.capabilities.add:
                 main_container_spec.security_context.capabilities.add.append("IPC_LOCK")
 
         pod_spec = k8s_client_lib.V1PodSpec(
@@ -1019,7 +1019,7 @@ class _KubernetesJobLauncher(
             explicit_resource_name = resource_name_prefix + container_execution_id
         else:
             _logger.warning(
-                f"Should not happen: Container execution ID annotation is required for multi-node execution, but it was not found."
+                "Should not happen: Container execution ID annotation is required for multi-node execution, but it was not found."
             )
             import uuid
 
@@ -1338,7 +1338,6 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
     @property
     def ended_at(self) -> datetime.datetime | None:
-        job = self._debug_job
         job_status = self._debug_job.status
         if not job_status:
             return None

@@ -46,13 +46,11 @@ __all__ = [
 ]
 
 import dataclasses
-from collections import OrderedDict
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import pydantic
 import pydantic.alias_generators
-from pydantic.dataclasses import dataclass as pydantic_dataclasses
 
 # PrimitiveTypes = Union[str, int, float, bool]
 PrimitiveTypes = str

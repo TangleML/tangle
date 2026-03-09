@@ -1,4 +1,3 @@
-from typing import Any
 
 import sqlalchemy
 from sqlalchemy import orm
@@ -28,7 +27,7 @@ def create_db_engine(
 ) -> sqlalchemy.Engine:
     if database_uri.startswith("mysql://"):
         try:
-            import MySQLdb
+            import MySQLdb  # noqa: F401
         except ImportError:
             # Using PyMySQL instead of missing MySQLdb
             database_uri = database_uri.replace("mysql://", "mysql+pymysql://")

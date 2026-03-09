@@ -43,8 +43,8 @@ def test_published_component_service():
         assert published_component.digest
         assert published_component.published_by == user_name
         assert published_component.name == component_name
-        assert published_component.deprecated == False
-        assert published_component.superseded_by == None
+        assert published_component.deprecated
+        assert published_component.superseded_by is None
 
     # Test listing
     with session_factory() as session:
@@ -93,7 +93,7 @@ def test_published_component_service():
             user_name=user_name,
             deprecated=True,
         )
-        assert published_component_2.deprecated == True
+        assert published_component_2.deprecated
     with session_factory() as session:
         with pytest.raises(errors.ItemNotFoundError):
             published_component_service.update(
@@ -170,7 +170,7 @@ def test_component_library_service():
         )
         assert library_2.id
         assert library_2.name == library_name
-        assert library_2.hide_from_search == False
+        assert not library_2.hide_from_search
         assert library_2.component_count == 1
         assert library_2.published_by == user_name
         assert library_2.root_folder
@@ -183,8 +183,8 @@ def test_component_library_service():
         assert component_ref_2.name == component_name
         assert component_ref_2.url == component_url
         # By default, the returned library does not include component text or spec attributes
-        assert component_ref_2.text == None
-        assert component_ref_2.spec == None
+        assert component_ref_2.text is None
+        assert component_ref_2.spec is None
 
     # Test: Test `get()`, `include_component_texts`
     with session_factory() as session:
@@ -268,7 +268,7 @@ def test_component_library_service():
             session=session, id=user_library_id
         )
         assert library_8.id == user_library_id
-        assert library_8.hide_from_search == True
+        assert library_8.hide_from_search
         assert user_name in library_8.name
 
     # Test: Replacing user library
