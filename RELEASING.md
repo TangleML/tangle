@@ -44,5 +44,4 @@ Any disputes or disagreements related to the release process will be handled in 
 Current list of Release Managers:
 
 * @Ark-kun
-* @camielvs
 
