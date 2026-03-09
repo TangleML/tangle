@@ -51,7 +51,7 @@ def main():
 
     try:
         k8s_config_lib.load_incluster_config()
-    except:
+    except Exception:
         k8s_config_lib.load_kube_config()
     k8s_client = k8s_client_lib.ApiClient()
 

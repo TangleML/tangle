@@ -65,7 +65,7 @@ class OrchestratorService_Sql:
             try:
                 self.process_each_queue_once()
                 time.sleep(self._sleep_seconds_between_queue_sweeps)
-            except:
+            except Exception:
                 _logger.exception("Error while calling `process_each_queue_once`")
 
     def process_each_queue_once(self):
@@ -77,7 +77,7 @@ class OrchestratorService_Sql:
             try:
                 with self._session_factory() as session:
                     queue_handler(session=session)
-            except:
+            except Exception:
                 _logger.exception(f"Error while executing {queue_handler=}")
 
     def internal_process_queued_executions_queue(self, session: orm.Session):
@@ -679,7 +679,7 @@ class OrchestratorService_Sql:
                 # We should preserve the logs before terminating/deleting the container
                 try:
                     _retry(lambda: launched_container.upload_log())
-                except:
+                except Exception:
                     _logger.exception("Error uploading logs before termination.")
                 # Requesting container termination.
                 # Termination might not happen immediately (e.g. Kubernetes has grace period).
@@ -783,7 +783,7 @@ class OrchestratorService_Sql:
                     try:
                         text = data.decode("utf-8")
                         return text
-                    except:
+                    except Exception:
                         pass
 
             output_artifact_uris: dict[str, str] = {
@@ -1029,7 +1029,7 @@ def _retry(
     for i in range(max_retries):
         try:
             return func()
-        except:
+        except Exception:
             _logger.exception(f"Exception calling {func}.")
             time.sleep(wait_seconds)
             if i == max_retries - 1:
@@ -1088,5 +1088,5 @@ def _maybe_get_small_artifact_value(
         try:
             text = data.decode("utf-8")
             return text
-        except:
+        except Exception:
             pass

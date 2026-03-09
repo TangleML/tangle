@@ -843,7 +843,7 @@ class ExecutionNodesApiService_Sql:
                     log_uri=container_execution.log_uri,
                     storage_provider=storage_provider,
                 )
-            except:
+            except Exception:
                 # Do not raise exception if the execution is in SYSTEM_ERROR state
                 # We want to return the system error exception.
                 if (
