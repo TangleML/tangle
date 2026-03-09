@@ -1375,7 +1375,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 output_uris=self._output_uris,
                 log_uri=self._log_uri,
                 debug_job=job_dict,
-                debug_pod=pod_dicts,
+                debug_pods=pod_dicts,
             ),
         }
         return result
@@ -1386,7 +1386,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     ) -> LaunchedKubernetesJob:
         d = d[cls.SERIALIZATION_ROOT_KEY]
         debug_job = _kubernetes_deserialize(d["debug_job"], cls=k8s_client_lib.V1Job)
-        debug_pod_dicts = d.get("debug_pods")
+        debug_pod_dicts = d.get("debug_pods") or d.get("debug_pod")
         debug_pods = None
         if debug_pod_dicts is not None:
             debug_pods = {
