@@ -43,7 +43,7 @@ def test_published_component_service():
         assert published_component.digest
         assert published_component.published_by == user_name
         assert published_component.name == component_name
-        assert published_component.deprecated
+        assert not published_component.deprecated
         assert published_component.superseded_by is None
 
     # Test listing
