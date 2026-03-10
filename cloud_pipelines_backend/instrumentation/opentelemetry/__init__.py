@@ -9,10 +9,10 @@ Usage::
     otel.instrument_fastapi(app)
 """
 
-from cloud_pipelines_backend.instrumentation.opentelemetry import auto_instrumentation
-from cloud_pipelines_backend.instrumentation.opentelemetry import metrics
-from cloud_pipelines_backend.instrumentation.opentelemetry import providers
-from cloud_pipelines_backend.instrumentation.opentelemetry import tracing
+from . import auto_instrumentation
+from . import metrics
+from . import providers
+from . import tracing
 
 instrument_fastapi = auto_instrumentation.instrument_fastapi
 setup_metrics = metrics.setup
