@@ -172,6 +172,11 @@ def _backfill_pipeline_names_from_extra_data(
     when extra_data is NULL or the key is absent (no Python error).
     """
     pipeline_name_expr = bts.PipelineRun.extra_data["pipeline_name"].as_string()
+    truncated_name = sqlalchemy.func.substr(
+        pipeline_name_expr,
+        1,
+        bts._STR_MAX_LENGTH,
+    )
     stmt = sqlalchemy.insert(bts.PipelineRunAnnotation).from_select(
         ["pipeline_run_id", "key", "value"],
         sqlalchemy.select(
@@ -179,7 +184,7 @@ def _backfill_pipeline_names_from_extra_data(
             sqlalchemy.literal(
                 filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
             ),
-            pipeline_name_expr,
+            truncated_name,
         ).where(
             pipeline_name_expr.isnot(None),
         ),
@@ -304,6 +309,11 @@ def _backfill_pipeline_names_from_component_spec(
     name_expr = bts.ExecutionNode.task_spec[
         ("componentRef", "spec", "name")
     ].as_string()
+    truncated_name = sqlalchemy.func.substr(
+        name_expr,
+        1,
+        bts._STR_MAX_LENGTH,
+    )
     existing_ann = orm.aliased(bts.PipelineRunAnnotation)
 
     # Step 4: INSERT INTO pipeline_run_annotation
@@ -312,7 +322,7 @@ def _backfill_pipeline_names_from_component_spec(
         sqlalchemy.select(
             bts.PipelineRun.id,
             sqlalchemy.literal(str(key)),
-            name_expr,
+            truncated_name,
         )
         # Step 1: INNER JOIN execution_node
         .join(

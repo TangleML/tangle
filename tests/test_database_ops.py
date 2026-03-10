@@ -511,6 +511,157 @@ class TestPipelineNameBackfill:
             annotations = service.list_annotations(session=session, id=run.id)
         assert annotations[key] == ""
 
+    # --- Overflow truncation tests ---
+    # Uses mysql_varchar_limit_session_factory with SQLite TRIGGER enforcement.
+    # Verifies that backfill truncates >255 char values to 255,
+    # preventing MySQL DataError 1406.
+
+    def test_backfill_p1_long_name_truncated(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+    ) -> None:
+        """P1: a 300-char pipeline_name in extra_data is truncated to 255."""
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(pipeline_name="some-name"),
+        )
+        key = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
+        _delete_annotation(
+            session_factory=mysql_varchar_limit_session_factory, run_id=run.id, key=key
+        )
+        with mysql_varchar_limit_session_factory() as session:
+            assert key not in service.list_annotations(session=session, id=run.id)
+
+        long_name = "x" * 300
+        with mysql_varchar_limit_session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            db_run.extra_data = {"pipeline_name": long_name}
+            session.commit()
+
+        with mysql_varchar_limit_session_factory() as session:
+            database_ops._backfill_pipeline_names_from_extra_data(session=session)
+            session.commit()
+
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations[key] == "x" * bts._STR_MAX_LENGTH
+
+    def test_backfill_p1_exact_255_preserved(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+    ) -> None:
+        """P1: a 255-char pipeline_name is stored without truncation."""
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(pipeline_name="some-name"),
+        )
+        key = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
+        _delete_annotation(
+            session_factory=mysql_varchar_limit_session_factory, run_id=run.id, key=key
+        )
+        with mysql_varchar_limit_session_factory() as session:
+            assert key not in service.list_annotations(session=session, id=run.id)
+
+        exact_name = "x" * bts._STR_MAX_LENGTH
+        with mysql_varchar_limit_session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            db_run.extra_data = {"pipeline_name": exact_name}
+            session.commit()
+
+        with mysql_varchar_limit_session_factory() as session:
+            database_ops._backfill_pipeline_names_from_extra_data(session=session)
+            session.commit()
+
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations[key] == exact_name
+
+    def test_backfill_p2_long_name_truncated(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+    ) -> None:
+        """P2: a 300-char name in task_spec is truncated to 255."""
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(pipeline_name="some-name"),
+        )
+        key = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
+        _delete_annotation(
+            session_factory=mysql_varchar_limit_session_factory, run_id=run.id, key=key
+        )
+        with mysql_varchar_limit_session_factory() as session:
+            assert key not in service.list_annotations(session=session, id=run.id)
+
+        long_name = "y" * 300
+        with mysql_varchar_limit_session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            db_run.extra_data = None
+            session.commit()
+        _set_execution_node_task_spec_raw(
+            session_factory=mysql_varchar_limit_session_factory,
+            run_id=run.id,
+            task_spec_dict={
+                "componentRef": {"spec": {"name": long_name}},
+            },
+        )
+
+        with mysql_varchar_limit_session_factory() as session:
+            database_ops._backfill_pipeline_names_from_component_spec(
+                session=session,
+            )
+            session.commit()
+
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations[key] == "y" * bts._STR_MAX_LENGTH
+
+    def test_backfill_p2_exact_255_preserved(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+    ) -> None:
+        """P2: a 255-char name in task_spec is stored without truncation."""
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(pipeline_name="some-name"),
+        )
+        key = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
+        _delete_annotation(
+            session_factory=mysql_varchar_limit_session_factory, run_id=run.id, key=key
+        )
+        with mysql_varchar_limit_session_factory() as session:
+            assert key not in service.list_annotations(session=session, id=run.id)
+
+        exact_name = "y" * bts._STR_MAX_LENGTH
+        with mysql_varchar_limit_session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            db_run.extra_data = None
+            session.commit()
+        _set_execution_node_task_spec_raw(
+            session_factory=mysql_varchar_limit_session_factory,
+            run_id=run.id,
+            task_spec_dict={
+                "componentRef": {"spec": {"name": exact_name}},
+            },
+        )
+
+        with mysql_varchar_limit_session_factory() as session:
+            database_ops._backfill_pipeline_names_from_component_spec(
+                session=session,
+            )
+            session.commit()
+
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations[key] == exact_name
+
     # --- Phase 2 tests (_backfill_pipeline_names_from_component_spec) ---
     # Ordered by JSON traversal depth (0 -> 4).
     # Path: ExecutionNode row -> task_spec -> componentRef -> spec -> name

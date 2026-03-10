@@ -1225,6 +1225,29 @@ _ArtifactNodeOrDynamicDataType = typing.Union[
 ]
 
 
+def _truncate_for_annotation(
+    *,
+    value: str,
+    field_name: str,
+    pipeline_run_id: bts.IdType,
+) -> str:
+    """Truncate a string to fit the annotation VARCHAR column.
+
+    Returns the value unchanged if it fits within _STR_MAX_LENGTH,
+    otherwise truncates and logs a warning with the run ID and
+    original length.
+    """
+    max_len = bts._STR_MAX_LENGTH
+    if len(value) <= max_len:
+        return value
+
+    _logger.warning(
+        f"Truncating {field_name} annotation for run {pipeline_run_id}: "
+        f"{len(value)} chars -> {max_len} chars"
+    )
+    return value[:max_len]
+
+
 def _mirror_system_annotations(
     *,
     session: orm.Session,
@@ -1232,8 +1255,20 @@ def _mirror_system_annotations(
     created_by: str | None,
     pipeline_name: str | None,
 ) -> None:
-    """Mirror pipeline run fields as system annotations for filter_query search."""
+    """Mirror pipeline run fields as system annotations for filter_query search"""
+
+    # TODO: The original pipeline_run.created_by and the pipeline name stored in
+    # extra_data / task_spec are saved untruncated, while the annotation mirror
+    # is truncated to VARCHAR(255). This creates a data parity mismatch between
+    # the source columns and their annotation copies. Revisit this to either
+    # widen the annotation column or enforce the same limit at the source.
+
     if created_by:
+        created_by = _truncate_for_annotation(
+            value=created_by,
+            field_name=filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY,
+            pipeline_run_id=pipeline_run_id,
+        )
         session.add(
             bts.PipelineRunAnnotation(
                 pipeline_run_id=pipeline_run_id,
@@ -1242,6 +1277,11 @@ def _mirror_system_annotations(
             )
         )
     if pipeline_name:
+        pipeline_name = _truncate_for_annotation(
+            value=pipeline_name,
+            field_name=filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
+            pipeline_run_id=pipeline_run_id,
+        )
         session.add(
             bts.PipelineRunAnnotation(
                 pipeline_run_id=pipeline_run_id,

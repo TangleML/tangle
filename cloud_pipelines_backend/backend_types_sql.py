@@ -96,6 +96,9 @@ class UtcDateTime(sql.TypeDecorator):
         return value
 
 
+_STR_MAX_LENGTH: Final[int] = 255
+
+
 class _TableBase(orm.MappedAsDataclass, orm.DeclarativeBase, kw_only=True):
     # Not really needed due to kw_only=True
     _: dataclasses.KW_ONLY
@@ -117,7 +120,7 @@ class _TableBase(orm.MappedAsDataclass, orm.DeclarativeBase, kw_only=True):
         # structures.TypeSpecType: sql.JSON,  # !!! Gotcha. This causes str map to JSON
         # SqlIOTypeStruct: sql.JSON,
         # PipelineSpec: sql.JSON,
-        str: sql.String(255),
+        str: sql.String(_STR_MAX_LENGTH),
         datetime.datetime: UtcDateTime,  # sql.DateTime(timezone=True) is not enough
     }
 

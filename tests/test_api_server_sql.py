@@ -582,6 +582,135 @@ class TestPipelineRunAnnotationCrud:
                 )
 
 
+class TestTruncateForAnnotation:
+    """Unit tests for _truncate_for_annotation() helper."""
+
+    def test_exact_255_unchanged(self) -> None:
+        value = "a" * bts._STR_MAX_LENGTH
+        result = api_server_sql._truncate_for_annotation(
+            value=value,
+            field_name=filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
+            pipeline_run_id="run-1",
+        )
+        assert result == value
+
+    def test_256_truncated_and_logs_warning(self, caplog) -> None:
+        value = "b" * 256
+        field = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
+        with caplog.at_level("WARNING"):
+            result = api_server_sql._truncate_for_annotation(
+                value=value,
+                field_name=field,
+                pipeline_run_id="run-xyz",
+            )
+        assert result == "b" * bts._STR_MAX_LENGTH
+        assert len(caplog.records) == 1
+        msg = caplog.records[0].message
+        assert "run-xyz" in msg
+        assert str(field) in msg
+
+
+class TestAnnotationValueOverflow:
+    """Reproduction tests using mysql_varchar_limit_session_factory (SQLite TRIGGER
+    enforcement). These tests prove that >255 char values are rejected,
+    mimicking MySQL's DataError 1406.
+
+    Covers all write paths into pipeline_run_annotation:
+    - set_annotation(): long key, long value
+    - create() via _mirror_system_annotations(): long pipeline_name, long created_by
+    """
+
+    # TODO: set_annotation() currently has no truncation guard for the
+    # VARCHAR(255) limit on annotation key/value columns. These tests
+    # document the failure. Fix deferred to a separate PR to avoid
+    # convoluting the backfill + _mirror_system_annotations fix.
+
+    def test_set_annotation_long_value_raises_on_overflow(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        """set_annotation() with a 300-char value overflows the
+        VARCHAR(255) column and triggers IntegrityError."""
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user1",
+        )
+        with mysql_varchar_limit_session_factory() as session:
+            with pytest.raises(
+                sqlalchemy.exc.IntegrityError, match="Data too long.*value"
+            ):
+                service.set_annotation(
+                    session=session,
+                    id=run.id,
+                    key="team",
+                    value="v" * 300,
+                    user_name="user1",
+                )
+
+    def test_set_annotation_long_key_raises_on_overflow(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        """set_annotation() with a 300-char key overflows the
+        VARCHAR(255) key column and triggers IntegrityError."""
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user1",
+        )
+        with mysql_varchar_limit_session_factory() as session:
+            with pytest.raises(
+                sqlalchemy.exc.IntegrityError, match="Data too long.*key"
+            ):
+                service.set_annotation(
+                    session=session,
+                    id=run.id,
+                    key="k" * 300,
+                    value="short",
+                    user_name="user1",
+                )
+
+    def test_create_run_long_pipeline_name_truncated(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        """create() with a 300-char pipeline name is truncated to 255
+        in _mirror_system_annotations()."""
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec("p" * 300),
+        )
+        key = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations[key] == "p" * bts._STR_MAX_LENGTH
+
+    def test_create_run_long_created_by_truncated(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        """create() with a 300-char created_by is truncated to 255
+        in _mirror_system_annotations()."""
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="u" * 300,
+        )
+        key = filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations[key] == "u" * bts._STR_MAX_LENGTH
+
+
 class TestFilterQueryApiWiring:
     def test_filter_query_validates_invalid_json(self, session_factory, service):
         from pydantic import ValidationError
