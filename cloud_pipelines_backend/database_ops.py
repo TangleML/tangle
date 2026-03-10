@@ -90,7 +90,9 @@ def migrate_db(db_engine: sqlalchemy.Engine):
             break
 
     _backfill_pipeline_run_created_by_annotations(db_engine=db_engine)
-    _backfill_pipeline_run_name_annotations(db_engine=db_engine)
+    # Disable backfill since it's failing.
+    # IntegrityError: (1062, "Duplicate entry '019860807454ece868df-system/pipeline_run.name' for key 'pipeline_run_annotation.PRIMARY'")
+    # _backfill_pipeline_run_name_annotations(db_engine=db_engine)
 
 
 def _is_pipeline_run_annotation_key_already_backfilled(
