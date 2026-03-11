@@ -86,9 +86,22 @@ class ListPipelineJobsResponse:
     next_page_token: str | None = None
 
 
+@dataclasses.dataclass(kw_only=True)
+class BatchCreateRequest:
+    root_task: structures.TaskSpec
+    components: Optional[list[structures.ComponentReference]] = None
+    annotations: Optional[dict[str, Any]] = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class BatchCreatePipelineRunsResponse:
+    created_runs: list[PipelineRunResponse]
+
+
 class PipelineRunsApiService_Sql:
     _PIPELINE_NAME_EXTRA_DATA_KEY = "pipeline_name"
     _DEFAULT_PAGE_SIZE: Final[int] = 10
+    _MAX_BATCH_SIZE: Final[int] = 100
     _SYSTEM_KEY_RESERVED_MSG = (
         "Annotation keys starting with "
         f"{filter_query_sql.SYSTEM_KEY_PREFIX!r} are reserved for system use."
@@ -147,6 +160,62 @@ class PipelineRunsApiService_Sql:
 
         session.refresh(pipeline_run)
         return PipelineRunResponse.from_db(pipeline_run)
+
+    def create_batch(
+        self,
+        session: orm.Session,
+        runs: list[BatchCreateRequest],
+        created_by: str | None = None,
+    ) -> BatchCreatePipelineRunsResponse:
+        if not runs:
+            raise errors.ApiValidationError("Batch must contain at least one run.")
+        if len(runs) > self._MAX_BATCH_SIZE:
+            raise errors.ApiValidationError(
+                f"Batch size {len(runs)} exceeds the maximum of {self._MAX_BATCH_SIZE}."
+            )
+
+        pipeline_runs: list[bts.PipelineRun] = []
+
+        with session.begin():
+            for run_request in runs:
+                pipeline_name = run_request.root_task.component_ref.spec.name
+
+                root_execution_node = (
+                    _recursively_create_all_executions_and_artifacts_root(
+                        session=session,
+                        root_task_spec=run_request.root_task,
+                    )
+                )
+
+                current_time = _get_current_time()
+                pipeline_run = bts.PipelineRun(
+                    root_execution=root_execution_node,
+                    created_at=current_time,
+                    updated_at=current_time,
+                    annotations=run_request.annotations,
+                    created_by=created_by,
+                    extra_data={
+                        self._PIPELINE_NAME_EXTRA_DATA_KEY: pipeline_name,
+                    },
+                )
+                session.add(pipeline_run)
+                session.flush()
+                _mirror_system_annotations(
+                    session=session,
+                    pipeline_run_id=pipeline_run.id,
+                    created_by=created_by,
+                    pipeline_name=pipeline_name,
+                )
+                pipeline_runs.append(pipeline_run)
+
+            session.commit()
+
+        responses: list[PipelineRunResponse] = []
+        for pipeline_run in pipeline_runs:
+            session.refresh(pipeline_run)
+            responses.append(PipelineRunResponse.from_db(pipeline_run))
+
+        return BatchCreatePipelineRunsResponse(created_runs=responses)
 
     def get(self, session: orm.Session, id: bts.IdType) -> PipelineRunResponse:
         pipeline_run = session.get(bts.PipelineRun, id)

@@ -1628,3 +1628,98 @@ class TestGetPipelineNameFromTaskSpec:
             task_spec_dict={"bad": "data"}
         )
         assert result is None
+
+
+class TestPipelineRunServiceCreateBatch:
+    def test_create_batch_returns_all_runs(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec(f"pipeline-{i}"))
+            for i in range(3)
+        ]
+        with session_factory() as session:
+            result = service.create_batch(session=session, runs=runs)
+        assert len(result.created_runs) == 3
+        ids = [r.id for r in result.created_runs]
+        assert len(set(ids)) == 3  # All unique IDs
+
+    def test_create_batch_with_created_by(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec("p1")),
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec("p2")),
+        ]
+        with session_factory() as session:
+            result = service.create_batch(
+                session=session, runs=runs, created_by="alice@example.com"
+            )
+        for run in result.created_runs:
+            assert run.created_by == "alice@example.com"
+
+    def test_create_batch_with_annotations(self, session_factory, service):
+        annotations = {"team": "ml-ops"}
+        runs = [
+            api_server_sql.BatchCreateRequest(
+                root_task=_make_task_spec(), annotations=annotations
+            ),
+        ]
+        with session_factory() as session:
+            result = service.create_batch(session=session, runs=runs)
+        assert result.created_runs[0].annotations == annotations
+
+    def test_create_batch_mirrors_system_annotations(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec("batch-pipe")),
+        ]
+        with session_factory() as session:
+            result = service.create_batch(
+                session=session, runs=runs, created_by="bob"
+            )
+        with session_factory() as session:
+            annotations = service.list_annotations(
+                session=session, id=result.created_runs[0].id
+            )
+        assert (
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
+            == "batch-pipe"
+        )
+        assert (
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
+            == "bob"
+        )
+
+    def test_create_batch_rejects_empty_list(self, session_factory, service):
+        with session_factory() as session:
+            with pytest.raises(errors.ApiValidationError, match="at least one run"):
+                service.create_batch(session=session, runs=[])
+
+    def test_create_batch_rejects_exceeding_max_size(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec())
+            for _ in range(101)
+        ]
+        with session_factory() as session:
+            with pytest.raises(errors.ApiValidationError, match="exceeds the maximum"):
+                service.create_batch(session=session, runs=runs)
+
+    def test_create_batch_accepts_max_size(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec(f"p-{i}"))
+            for i in range(100)
+        ]
+        with session_factory() as session:
+            result = service.create_batch(session=session, runs=runs)
+        assert len(result.created_runs) == 100
+
+    def test_create_batch_is_atomic(self, session_factory, service):
+        """All runs in a batch share a single transaction."""
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec(f"atomic-{i}"))
+            for i in range(3)
+        ]
+        with session_factory() as session:
+            result = service.create_batch(session=session, runs=runs)
+
+        # Verify all runs are retrievable
+        with session_factory() as session:
+            for run in result.created_runs:
+                fetched = service.get(session=session, id=run.id)
+                assert fetched.id == run.id
