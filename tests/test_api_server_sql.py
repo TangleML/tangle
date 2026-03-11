@@ -1663,7 +1663,9 @@ class TestPipelineRunServiceCreateBatch:
         ]
         with session_factory() as session:
             result = service.create_batch(session=session, runs=runs)
-        assert result.created_runs[0].annotations == annotations
+        run_annotations = result.created_runs[0].annotations
+        assert run_annotations["team"] == "ml-ops"
+        assert "batch_id" in run_annotations  # batch_id is always injected
 
     def test_create_batch_mirrors_system_annotations(self, session_factory, service):
         runs = [
@@ -1723,3 +1725,47 @@ class TestPipelineRunServiceCreateBatch:
             for run in result.created_runs:
                 fetched = service.get(session=session, id=run.id)
                 assert fetched.id == run.id
+
+    def test_create_batch_returns_batch_id(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec())
+            for _ in range(2)
+        ]
+        with session_factory() as session:
+            result = service.create_batch(session=session, runs=runs)
+        # batch_id is a valid UUID string
+        import uuid
+        uuid.UUID(result.batch_id)  # raises ValueError if invalid
+
+    def test_create_batch_all_runs_share_batch_id(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec(f"p-{i}"))
+            for i in range(3)
+        ]
+        with session_factory() as session:
+            result = service.create_batch(session=session, runs=runs)
+        for run in result.created_runs:
+            assert run.annotations["batch_id"] == result.batch_id
+
+    def test_create_batch_different_batches_get_different_ids(self, session_factory, service):
+        runs = [api_server_sql.BatchCreateRequest(root_task=_make_task_spec())]
+        with session_factory() as session:
+            result1 = service.create_batch(session=session, runs=runs)
+        with session_factory() as session:
+            result2 = service.create_batch(session=session, runs=runs)
+        assert result1.batch_id != result2.batch_id
+
+    def test_create_batch_mirrors_batch_id_system_annotation(self, session_factory, service):
+        runs = [
+            api_server_sql.BatchCreateRequest(root_task=_make_task_spec()),
+        ]
+        with session_factory() as session:
+            result = service.create_batch(session=session, runs=runs)
+        with session_factory() as session:
+            annotations = service.list_annotations(
+                session=session, id=result.created_runs[0].id
+            )
+        assert (
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.BATCH_ID]
+            == result.batch_id
+        )

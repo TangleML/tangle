@@ -95,6 +95,7 @@ class BatchCreateRequest:
 
 @dataclasses.dataclass(kw_only=True)
 class BatchCreatePipelineRunsResponse:
+    batch_id: str
     created_runs: list[PipelineRunResponse]
 
 
@@ -152,6 +153,7 @@ class PipelineRunsApiService_Sql:
             pipeline_run_id=pipeline_run.id,
             created_by=created_by,
             pipeline_name=pipeline_name,
+            annotations=annotations,
         )
         return pipeline_run
 
@@ -194,14 +196,19 @@ class PipelineRunsApiService_Sql:
                 f"Batch size {len(runs)} exceeds the maximum of {self._MAX_BATCH_SIZE}."
             )
 
+        batch_id = bts.generate_unique_id()
         pipeline_runs: list[bts.PipelineRun] = []
 
         with session.begin():
             for run_request in runs:
+                run_annotations = {
+                    **(run_request.annotations or {}),
+                    "batch_id": batch_id,
+                }
                 pipeline_run = self._build_pipeline_run(
                     session=session,
                     root_task=run_request.root_task,
-                    annotations=run_request.annotations,
+                    annotations=run_annotations,
                     created_by=created_by,
                 )
                 pipeline_runs.append(pipeline_run)
@@ -213,7 +220,10 @@ class PipelineRunsApiService_Sql:
             session.refresh(pipeline_run)
             responses.append(PipelineRunResponse.from_db(pipeline_run))
 
-        return BatchCreatePipelineRunsResponse(created_runs=responses)
+        return BatchCreatePipelineRunsResponse(
+            batch_id=batch_id,
+            created_runs=responses,
+        )
 
     def get(self, session: orm.Session, id: bts.IdType) -> PipelineRunResponse:
         pipeline_run = session.get(bts.PipelineRun, id)
@@ -1321,6 +1331,7 @@ def _mirror_system_annotations(
     pipeline_run_id: bts.IdType,
     created_by: str | None,
     pipeline_name: str | None,
+    annotations: dict[str, Any] | None = None,
 ) -> None:
     """Mirror pipeline run fields as system annotations for filter_query search"""
 
@@ -1354,6 +1365,15 @@ def _mirror_system_annotations(
                 pipeline_run_id=pipeline_run_id,
                 key=filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
                 value=pipeline_name,
+            )
+        )
+    batch_id = (annotations or {}).get("batch_id")
+    if batch_id:
+        session.add(
+            bts.PipelineRunAnnotation(
+                pipeline_run_id=pipeline_run_id,
+                key=filter_query_sql.PipelineRunAnnotationSystemKey.BATCH_ID,
+                value=str(batch_id)[:bts._STR_MAX_LENGTH],
             )
         )
 
