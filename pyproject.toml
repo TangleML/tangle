@@ -13,7 +13,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.39.1",
     "opentelemetry-instrumentation-fastapi>=0.60b1",
     "opentelemetry-sdk>=1.39.1",
-    "requests<2.32.0",
+    "requests<2.33.0",
     "sqlalchemy>=2.0.41",
 ]
 
