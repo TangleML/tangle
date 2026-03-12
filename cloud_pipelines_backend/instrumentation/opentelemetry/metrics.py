@@ -17,12 +17,8 @@ from opentelemetry.sdk import metrics as otel_sdk_metrics
 from opentelemetry.sdk import resources as otel_resources
 from opentelemetry.sdk.metrics import export as otel_metrics_export
 
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
-    configuration,
-)
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
-    temporality as temporality_mod,
-)
+from ._internal import configuration
+from ._internal import temporality as temporality_mod
 
 _logger = logging.getLogger(__name__)
 

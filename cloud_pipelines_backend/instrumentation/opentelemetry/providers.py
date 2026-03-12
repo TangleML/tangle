@@ -6,11 +6,9 @@ Provides entry points to configure OpenTelemetry providers.
 
 import logging
 
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
-    configuration,
-)
-from cloud_pipelines_backend.instrumentation.opentelemetry import metrics
-from cloud_pipelines_backend.instrumentation.opentelemetry import tracing
+from ._internal import configuration
+from . import metrics
+from . import tracing
 
 _logger = logging.getLogger(__name__)
 
