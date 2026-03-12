@@ -41,6 +41,7 @@ class TimeRange(_BaseModel):
     AwareDatetime requires timezone info (e.g. "2024-01-01T00:00:00Z").
     Naive datetimes like "2024-01-01T00:00:00" are rejected, preventing
     ambiguous timestamps that could silently resolve to the wrong timezone.
+    When both bounds are present, start_time must be <= end_time.
     """
 
     key: NonEmptyStr
@@ -48,11 +49,17 @@ class TimeRange(_BaseModel):
     end_time: pydantic.AwareDatetime | None = None
 
     @pydantic.model_validator(mode="after")
-    def _at_least_one_time_bound(self) -> TimeRange:
+    def _validate_time_bounds(self) -> TimeRange:
         if self.start_time is None and self.end_time is None:
             raise ValueError(
                 "TimeRange requires at least one of 'start_time' or 'end_time'."
             )
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.start_time > self.end_time
+        ):
+            raise ValueError("TimeRange requires start_time <= end_time.")
         return self
 
 
