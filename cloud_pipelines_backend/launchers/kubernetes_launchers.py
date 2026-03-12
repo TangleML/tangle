@@ -1289,7 +1289,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         if not self.has_ended:
             return None
         # Shortcut for succeeded jobs
-        if not self.has_succeeded:
+        if self.has_succeeded:
             return 0
         main_container_states = [
             # TODO: Properly select the main container
