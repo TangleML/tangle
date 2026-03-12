@@ -84,6 +84,11 @@ class TestLeafPredicates:
         with pytest.raises(pydantic.ValidationError, match="timezone"):
             filter_query_models.TimeRangePredicate.model_validate_json(json_str)
 
+    def test_time_range_rejects_start_after_end(self):
+        json_str = '{"time_range": {"key": "k", "start_time": "2024-01-02T00:00:00Z", "end_time": "2024-01-01T00:00:00Z"}}'
+        with pytest.raises(pydantic.ValidationError, match="start_time <= end_time"):
+            filter_query_models.TimeRangePredicate.model_validate_json(json_str)
+
 
 class TestEmptyStringRejections:
     def test_key_exists_empty_key(self):
