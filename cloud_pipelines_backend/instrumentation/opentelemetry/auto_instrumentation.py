@@ -10,7 +10,7 @@ import logging
 
 from opentelemetry.instrumentation import fastapi as otel_fastapi
 
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import providers
+from ._internal import providers
 
 _logger = logging.getLogger(__name__)
 

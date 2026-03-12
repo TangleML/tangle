@@ -6,9 +6,7 @@ from opentelemetry import metrics as otel_metrics
 from opentelemetry.sdk import metrics as otel_sdk_metrics
 from opentelemetry.sdk.metrics import export as otel_metrics_export
 
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
-    configuration,
-)
+from . import configuration
 
 _TEMPORALITY_MAP = {
     configuration.AggregationTemporality.DELTA: otel_metrics_export.AggregationTemporality.DELTA,

@@ -17,9 +17,7 @@ from opentelemetry.sdk import resources as otel_resources
 from opentelemetry.sdk import trace as otel_trace
 from opentelemetry.sdk.trace import export as otel_trace_export
 
-from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
-    configuration,
-)
+from ._internal import configuration
 
 _logger = logging.getLogger(__name__)
 
