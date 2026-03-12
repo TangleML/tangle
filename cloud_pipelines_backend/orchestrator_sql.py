@@ -903,6 +903,16 @@ class OrchestratorService_Sql:
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
                 )
+        elif new_status == launcher_interfaces.ContainerStatus.PENDING:
+            for execution_node in execution_nodes:
+                execution_node.container_execution_status = (
+                    bts.ContainerExecutionStatus.PENDING
+                )
+            # ? Should we reset `started_at` or keep it?
+            container_execution.started_at = None
+            _logger.warning(
+                f"Container execution status changed from {previous_status} to {new_status} which is unexpected. This can happen when a running job was suspended."
+            )
         else:
             _logger.error(
                 f"Container execution is now in unexpected state {new_status}. System error. {container_execution=}"
