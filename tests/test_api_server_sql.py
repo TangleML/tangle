@@ -379,8 +379,8 @@ class TestPipelineRunServiceCreate:
             == "solo-pipeline"
         )
         assert (
-            filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY
-            not in annotations
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
+            == ""
         )
 
     def test_create_mirrors_created_by_only(self, session_factory, service):
@@ -396,11 +396,13 @@ class TestPipelineRunServiceCreate:
             == "alice"
         )
         assert (
-            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
-            not in annotations
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
+            == ""
         )
 
-    def test_create_skips_mirror_when_empty_values(self, session_factory, service):
+    def test_create_mirrors_empty_values_as_empty_string(
+        self, session_factory, service
+    ):
         run = _create_run(
             session_factory,
             service,
@@ -410,27 +412,29 @@ class TestPipelineRunServiceCreate:
         with session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
         assert (
-            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
-            not in annotations
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
+            == ""
         )
         assert (
-            filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY
-            not in annotations
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
+            == ""
         )
 
-    def test_create_skips_mirror_when_both_absent(self, session_factory, service):
+    def test_create_mirrors_absent_values_as_empty_string(
+        self, session_factory, service
+    ):
         task_spec = _make_task_spec("placeholder")
         task_spec.component_ref.spec.name = None
         run = _create_run(session_factory, service, root_task=task_spec)
         with session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
         assert (
-            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
-            not in annotations
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
+            == ""
         )
         assert (
-            filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY
-            not in annotations
+            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
+            == ""
         )
 
 
@@ -541,7 +545,8 @@ class TestPipelineRunAnnotationCrud:
         with session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
         assert annotations == {
-            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME: "test-pipeline"
+            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME: "test-pipeline",
+            filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY: "",
         }
 
     def test_set_annotation_rejects_system_key(self, session_factory, service):
