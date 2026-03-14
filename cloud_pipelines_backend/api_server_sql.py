@@ -84,6 +84,7 @@ class GetPipelineRunResponse(PipelineRunResponse):
 class ListPipelineJobsResponse:
     pipeline_runs: list[PipelineRunResponse]
     next_page_token: str | None = None
+    total_count: int | None = None
 
 
 class PipelineRunsApiService_Sql:
@@ -206,6 +207,7 @@ class PipelineRunsApiService_Sql:
         current_user: str | None = None,
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
+        include_total_count: bool = False,
     ) -> ListPipelineJobsResponse:
         where_clauses, offset, next_token = filter_query_sql.build_list_filters(
             filter_value=filter,
@@ -225,6 +227,14 @@ class PipelineRunsApiService_Sql:
             ).all()
         )
 
+        total_count = None
+        if include_total_count:
+            total_count = session.scalar(
+                sql.select(sql.func.count())
+                .select_from(bts.PipelineRun)
+                .where(*where_clauses)
+            )
+
         next_page_token = (
             next_token if len(pipeline_runs) >= self._DEFAULT_PAGE_SIZE else None
         )
@@ -240,6 +250,7 @@ class PipelineRunsApiService_Sql:
                 for pipeline_run in pipeline_runs
             ],
             next_page_token=next_page_token,
+            total_count=total_count,
         )
 
     def _create_pipeline_run_response(

@@ -230,6 +230,84 @@ class TestPipelineRunServiceList:
         assert len(result.pipeline_runs) == 1
         assert result.pipeline_runs[0].created_by == "alice@example.com"
 
+    def test_list_total_count_not_included_by_default(self, session_factory, service):
+        _create_run(session_factory, service, root_task=_make_task_spec())
+
+        with session_factory() as session:
+            result = service.list(session=session)
+        assert len(result.pipeline_runs) == 1
+        assert result.total_count is None
+
+    def test_list_total_count_empty(self, session_factory, service):
+        with session_factory() as session:
+            result = service.list(session=session, include_total_count=True)
+        assert result.total_count == 0
+
+    def test_list_total_count_matches_results(self, session_factory, service):
+        _create_run(session_factory, service, root_task=_make_task_spec("a"))
+        _create_run(session_factory, service, root_task=_make_task_spec("b"))
+        _create_run(session_factory, service, root_task=_make_task_spec("c"))
+
+        with session_factory() as session:
+            result = service.list(session=session, include_total_count=True)
+        assert len(result.pipeline_runs) == 3
+        assert result.total_count == 3
+
+    def test_list_total_count_with_pagination(self, session_factory, service):
+        for i in range(12):
+            _create_run(
+                session_factory,
+                service,
+                root_task=_make_task_spec(f"pipeline-{i}"),
+            )
+
+        with session_factory() as session:
+            page1 = service.list(session=session, include_total_count=True)
+        assert len(page1.pipeline_runs) == 10
+        assert page1.total_count == 12
+
+        with session_factory() as session:
+            page2 = service.list(
+                session=session,
+                page_token=page1.next_page_token,
+                include_total_count=True,
+            )
+        assert len(page2.pipeline_runs) == 2
+        assert page2.total_count == 12
+
+    def test_list_total_count_with_filter(self, session_factory, service):
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user1",
+        )
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user1",
+        )
+        _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user2",
+        )
+
+        with session_factory() as session:
+            result = service.list(
+                session=session,
+                filter="created_by:user1",
+                include_total_count=True,
+            )
+        assert len(result.pipeline_runs) == 2
+        assert result.total_count == 2
+
+        with session_factory() as session:
+            all_result = service.list(session=session, include_total_count=True)
+        assert all_result.total_count == 3
+
 
 class TestCreatePipelineRunResponse:
     def test_base_response(self, session_factory, service):
