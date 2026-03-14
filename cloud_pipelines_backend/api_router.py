@@ -331,6 +331,20 @@ def _setup_routes_internal(
         **default_config,
     )(create_run_func)
 
+    create_batch_func = pipeline_run_service.create_batch
+    create_batch_func = inject_session_dependency(create_batch_func)
+    create_batch_func = add_parameter_annotation_metadata(
+        create_batch_func,
+        parameter_name="created_by",
+        annotation_metadata=get_user_name_dependency,
+    )
+    router.post(
+        "/api/pipeline_runs/batch",
+        tags=["pipelineRuns"],
+        dependencies=pipeline_run_creation_dependencies,
+        **default_config,
+    )(create_batch_func)
+
     router.get(
         "/api/artifacts/{id}/signed_artifact_url", tags=["artifacts"], **default_config
     )(inject_session_dependency(artifact_service.get_signed_artifact_url))
