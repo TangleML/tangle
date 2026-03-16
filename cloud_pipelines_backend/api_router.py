@@ -253,7 +253,7 @@ def _setup_routes_internal(
 
     LauncherDep = typing.Annotated[
         "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer]",
-        fastapi.Depends(get_launcher),
+        fastapi.Depends(get_launcher) if get_launcher else None,
     ]
 
     @router.get(
