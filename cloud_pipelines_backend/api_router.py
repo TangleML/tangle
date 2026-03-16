@@ -251,26 +251,30 @@ def _setup_routes_internal(
         inject_session_dependency(execution_service.get_artifacts)
     )
 
-    LauncherDep = typing.Annotated[
-        launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer],
-        fastapi.Depends(get_launcher),
-    ] if get_launcher else None
-
-    @router.get(
-        "/api/executions/{id}/container_log", tags=["executions"], **default_config
-    )
-    def get_container_log(
-        id: backend_types_sql.IdType,
-        session: SessionDep,
-        container_launcher: LauncherDep,
-    ) -> api_server_sql.GetContainerExecutionLogResponse:
-        return execution_service.get_container_execution_log(
-            id=id,
-            session=session,
-            container_launcher=container_launcher,
-        )
-
     if get_launcher:
+        LauncherDep = typing.Annotated[
+            "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer]",
+            fastapi.Depends(get_launcher),
+        ]
+        # It's also possible to use type annotation like this:
+        # LauncherDep = typing.Annotated[
+        #     "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer]",
+        #     fastapi.Depends(get_launcher),
+        # ] if get_launcher else typing.Annotated[None, fastapi.Query(include_in_schema=False)]
+
+        @router.get(
+            "/api/executions/{id}/container_log", tags=["executions"], **default_config
+        )
+        def get_container_log(
+            id: backend_types_sql.IdType,
+            session: SessionDep,
+            container_launcher: LauncherDep,
+        ) -> api_server_sql.GetContainerExecutionLogResponse:
+            return execution_service.get_container_execution_log(
+                id=id,
+                session=session,
+                container_launcher=container_launcher,
+            )
 
         @router.get(
             "/api/executions/{id}/stream_container_log",
@@ -291,6 +295,21 @@ def _setup_routes_internal(
                 iterator,
                 headers={"X-Content-Type-Options": "nosniff"},
                 media_type="text/event-stream",
+            )
+
+    else:
+
+        @router.get(
+            "/api/executions/{id}/container_log", tags=["executions"], **default_config
+        )
+        def get_container_log(
+            id: backend_types_sql.IdType,
+            session: SessionDep,
+        ) -> api_server_sql.GetContainerExecutionLogResponse:
+            return execution_service.get_container_execution_log(
+                id=id,
+                session=session,
+                container_launcher=None,
             )
 
     list_pipeline_runs_func = pipeline_run_service.list
