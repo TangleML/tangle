@@ -582,3 +582,11 @@ class UserPipeline(_TableBase):
             "ix_user_pipeline_user_id_modified_at_desc", user_id, modified_at.desc()
         ),
     )
+
+
+class UserSettings(_TableBase):
+    __tablename__ = "user_settings"
+
+    user_id: orm.Mapped[str] = orm.mapped_column(primary_key=True)
+    settings: orm.Mapped[dict[str, Any]] = orm.mapped_column(default_factory=dict)
+    extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)

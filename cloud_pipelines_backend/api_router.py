@@ -521,6 +521,36 @@ def _setup_routes_internal(
     )
     # endregion
 
+    # region UserSettings routes
+    user_settings_service = api_server_sql.UserSettingsApiService()
+
+    router.get("/api/users/me/settings", tags=["user_settings"], **default_config)(
+        add_parameter_annotation_metadata(
+            inject_session_dependency(
+                inject_user_name(
+                    user_settings_service.get_settings, parameter_name="user_id"
+                )
+            ),
+            parameter_name="setting_names",
+            annotation_metadata=fastapi.Query(),
+        )
+    )
+    router.put("/api/users/me/settings", tags=["user_settings"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(
+                user_settings_service.set_settings, parameter_name="user_id"
+            )
+        ),
+    )
+    router.delete("/api/users/me/settings", tags=["user_settings"], **default_config)(
+        inject_session_dependency(
+            inject_user_name(
+                user_settings_service.delete_settings, parameter_name="user_id"
+            )
+        )
+    )
+    # endregion
+
     ### Component library routes
 
     component_service = components_api.ComponentService()

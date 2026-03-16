@@ -1368,6 +1368,79 @@ class UserPipelineApiService:
 
 # endregion
 
+
+# region: User Settings API Service
+# /api/user/me/settings
+
+
+@dataclasses.dataclass(kw_only=True)
+class UserSettingsResponse:
+    # Which type definition to use?
+    # A naive `JsonValue` implementation via a recursive type `Union` causes `RecursionError` in Pydantic.
+    # We could use `pydantic.JsonValue`
+    # But we can also just use `Any` which essentially becomes arbitrary JSON.
+    # settings: dict[str, _JsonType]
+    # settings: dict[str, pydantic.JsonValue]
+    settings: dict[str, Any]
+
+
+class UserSettingsApiService:
+
+    def get_settings(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        setting_names: list[str] | None = None,
+    ) -> UserSettingsResponse:
+        """Gets user settings.
+
+        If `setting_names` is specified, returns only those settings.
+        """
+        settings_row = session.get(bts.UserSettings, user_id)
+        settings: dict[str, Any] = {}
+        not_found_token = object()
+        if settings_row:
+            for setting_name in setting_names or []:
+                setting_value = settings_row.settings.get(setting_name, not_found_token)
+                if setting_value is not not_found_token:
+                    settings[setting_name] = setting_value
+        return UserSettingsResponse(settings=settings)
+
+    def set_settings(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        settings: dict[str, Any],
+    ) -> None:
+        settings_row = session.get(bts.UserSettings, user_id)
+        if not settings_row:
+            settings_row = bts.UserSettings(user_id=user_id)
+            session.add(settings_row)
+
+        settings_row.settings.update(settings)
+        # Mark the complex field as modified
+        settings_row.settings = settings_row.settings
+        session.commit()
+
+    def delete_settings(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        setting_names: list[str],
+    ) -> None:
+        settings_row = session.get(bts.UserSettings, user_id)
+        if settings_row:
+            for setting_name in setting_names or []:
+                settings_row.settings.pop(setting_name, None)
+        session.commit()
+
+
+# endregion
+
+
 # ============
 
 # Idea for how to add deep nested graph:
