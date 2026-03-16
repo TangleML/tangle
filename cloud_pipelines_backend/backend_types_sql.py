@@ -529,3 +529,56 @@ class Secret(_TableBase):
     expires_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
     description: orm.Mapped[str | None] = orm.mapped_column(default=None)
     extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
+
+
+class UserPipeline(_TableBase):
+    __tablename__ = "user_pipeline"
+
+    # What should be the maximum file path length we support?
+    # VARCHAR length cannot be more than ~16 * 1024 (or even less) in some databases like MySQL.
+    # See for example: https://dev.mysql.com/doc/refman/8.4/en/column-count-limit.html (end of the document)
+    # Setting it to 1024 for now.
+    MAX_FILE_PATH_LENGTH = 1024
+
+    # What should be the primary key?
+    # * (user_id, file_path)?
+    # * Surrogate ID?
+    # * User-provided ID?
+    # Value of `file_path` may be changed by the user (in the future) and changing IDs is discouraged, so this leads us to use surrogate primary key.
+    # Should we use generate_unique_id or normal auto-increment integer?
+    # Leaning towards using generate_unique_id here too.
+    id: orm.Mapped[str] = orm.mapped_column(
+        primary_key=True, init=False, insert_default=generate_unique_id
+    )
+    user_id: orm.Mapped[str] = orm.mapped_column(index=True)
+    # Which SQL type to use for file paths?
+    # The TEXT type in MySQL is stored off-row and creates some issues, especially when it's part of an index
+    # See https://dev.mysql.com/doc/refman/8.4/en/blob.html
+    # file_path: orm.Mapped[str] = orm.mapped_column(type_=sql.Text())
+    file_path: orm.Mapped[str] = orm.mapped_column(
+        type_=sql.String(MAX_FILE_PATH_LENGTH)
+    )
+    created_at: orm.Mapped[datetime.datetime] = orm.mapped_column()
+    modified_at: orm.Mapped[datetime.datetime] = orm.mapped_column()
+
+    # What exactly do we want to store?
+    # ! Pipeline is usually a ComponentSpec, but we want to save more.
+    # First of all, we want to save pipeline arguments. So we need TaskSpec.
+    # But the user might also want to save pipeline run annotations.
+    root_pipeline_task: orm.Mapped[dict[str, Any]] = orm.mapped_column()
+    pipeline_run_annotations: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(
+        default=None
+    )
+    extra_data: orm.Mapped[dict[str, Any] | None] = orm.mapped_column(default=None)
+
+    __table_args__ = (
+        sql.Index(
+            "ix_user_pipeline_user_id_file_path_unique", user_id, file_path, unique=True
+        ),
+        sql.Index(
+            "ix_user_pipeline_user_id_created_at_desc", user_id, created_at.desc()
+        ),
+        sql.Index(
+            "ix_user_pipeline_user_id_modified_at_desc", user_id, modified_at.desc()
+        ),
+    )
