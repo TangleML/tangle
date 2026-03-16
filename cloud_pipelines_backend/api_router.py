@@ -252,9 +252,9 @@ def _setup_routes_internal(
     )
 
     LauncherDep = typing.Annotated[
-        "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer]",
-        fastapi.Depends(get_launcher) if get_launcher else None,
-    ]
+        launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer],
+        fastapi.Depends(get_launcher),
+    ] if get_launcher else None
 
     @router.get(
         "/api/executions/{id}/container_log", tags=["executions"], **default_config
