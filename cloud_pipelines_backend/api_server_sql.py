@@ -1402,6 +1402,9 @@ class UserSettingsApiService:
         settings: dict[str, Any] = {}
         not_found_token = object()
         if settings_row:
+            if not setting_names:
+                # Return all settings
+                return UserSettingsResponse(settings=settings_row.settings)
             for setting_name in setting_names or []:
                 setting_value = settings_row.settings.get(setting_name, not_found_token)
                 if setting_value is not not_found_token:
