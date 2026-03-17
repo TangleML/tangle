@@ -536,11 +536,16 @@ def _setup_routes_internal(
         )
     )
     router.put("/api/users/me/settings", tags=["user_settings"], **default_config)(
-        inject_session_dependency(
-            inject_user_name(
-                user_settings_service.set_settings, parameter_name="user_id"
-            )
-        ),
+        add_parameter_annotation_metadata(
+            inject_session_dependency(
+                inject_user_name(
+                    user_settings_service.set_settings, parameter_name="user_id"
+                )
+            ),
+            # Making it possible to expand the request format without breaking changes.
+            parameter_name="settings",
+            annotation_metadata=fastapi.Body(embed=True),
+        )
     )
     router.delete("/api/users/me/settings", tags=["user_settings"], **default_config)(
         inject_session_dependency(
