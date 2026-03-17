@@ -824,6 +824,7 @@ class ExecutionNodesApiService_Sql:
             bts.ContainerExecutionStatus.SUCCEEDED,
             bts.ContainerExecutionStatus.FAILED,
             bts.ContainerExecutionStatus.SYSTEM_ERROR,
+            bts.ContainerExecutionStatus.CANCELLED,
         ):
             try:
                 # Returning completed log
