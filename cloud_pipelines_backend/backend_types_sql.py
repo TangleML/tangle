@@ -537,8 +537,13 @@ class UserPipeline(_TableBase):
     # What should be the maximum file path length we support?
     # VARCHAR length cannot be more than ~16 * 1024 (or even less) in some databases like MySQL.
     # See for example: https://dev.mysql.com/doc/refman/8.4/en/column-count-limit.html (end of the document)
-    # Setting it to 1024 for now.
-    MAX_FILE_PATH_LENGTH = 1024
+    # Maybe, set it to 1024 for now.
+    # No. On MySQL, the max length of an indexed string column must be at least <= 768.
+    # Otherwise we get an error in MySQL: "Specified key was too long; max key length is 3072 bytes" when creating the main index.
+    # See https://github.com/TangleML/tangle/issues/173
+    # And since the index also includes user_id (which is a string or max size 255), we have even less space: 512 bytes.
+    # So, let's just limit the length to 255 for now.
+    MAX_FILE_PATH_LENGTH = 255
 
     # What should be the primary key?
     # * (user_id, file_path)?
