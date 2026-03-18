@@ -424,7 +424,10 @@ class ExecutionNode(_TableBase):
         repr=False,
     )
 
+    _status_changed: bool = dataclasses.field(default=False, init=False, repr=False)
 
+
+EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY = "container_execution_status_history"
 EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY = (
     "system_error_exception_message"
 )
