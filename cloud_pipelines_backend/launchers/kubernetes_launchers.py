@@ -1489,7 +1489,11 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         for pod_key, log in logs.items():
             if not log:
                 continue
-            for line in log.splitlines():
+            # We have to split lines using `str.split` instead of `str.splitlines`.
+            # Kubernetes only recognizes `\n` while `str.splitlines()` splits by a dozen of different characters including \r.
+            # This may result in incorrect splitting and sorting of lines.
+            # See https://github.com/TangleML/tangle/issues/175
+            for line in log.split("\n"):
                 timestamp, _, line = line.partition(" ")
                 all_log_lines.append(f"{timestamp} {pod_key} {line}")
         all_log_lines.sort(
