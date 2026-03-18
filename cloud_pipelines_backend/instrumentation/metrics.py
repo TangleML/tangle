@@ -22,7 +22,17 @@ Bad example:
 - Instrument: orchestrator_execution_system_errors
 """
 
+import enum
+
 from opentelemetry import metrics as otel_metrics
+
+
+class MetricUnit(str, enum.Enum):
+    """UCUM-style unit strings accepted by the OTel SDK."""
+
+    SECONDS = "s"
+    ERRORS = "{error}"
+
 
 # ---------------------------------------------------------------------------
 # tangle.orchestrator
@@ -32,5 +42,12 @@ orchestrator_meter = otel_metrics.get_meter("tangle.orchestrator")
 execution_system_errors = orchestrator_meter.create_counter(
     name="execution.system_errors",
     description="Number of execution nodes that ended in SYSTEM_ERROR status",
-    unit="{error}",
+    unit=MetricUnit.ERRORS,
 )
+
+execution_status_transition_duration = orchestrator_meter.create_histogram(
+    name="execution.status_transition.duration",
+    description="Duration an execution spent in a status before transitioning to the next status",
+    unit=MetricUnit.SECONDS,
+)
+
