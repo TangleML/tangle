@@ -1,5 +1,4 @@
 import logging
-
 import sqlalchemy
 from sqlalchemy import orm
 
@@ -66,12 +65,49 @@ def create_db_engine(
     return db_engine
 
 
+def _add_columns_if_missing(*, db_engine: sqlalchemy.Engine) -> None:
+    """Add new nullable columns to existing tables when they are not yet present.
+
+    SQLAlchemy's create_all() only creates missing tables, not missing columns,
+    so new columns require an explicit migration step.  All additions run in a
+    single transaction so the schema is updated atomically."""
+    _COLUMN_MIGRATIONS = [
+        bts.ExecutionNode.__table__.c.status_updated_at,
+    ]
+    inspector = sqlalchemy.inspect(db_engine)
+    with db_engine.connect() as conn:
+        for col in _COLUMN_MIGRATIONS:
+            existing = {c["name"] for c in inspector.get_columns(col.table.name)}
+            if col.name not in existing:
+                _logger.info(
+                    f"Migrating: ALTER TABLE {col.table.name} ADD COLUMN {col.name} ({col.type})"
+                )
+                try:
+                    col_type_str = col.type.compile(dialect=db_engine.dialect)
+                    conn.execute(
+                        sqlalchemy.text(
+                            f"ALTER TABLE {col.table.name}"
+                            f" ADD COLUMN {col.name} {col_type_str}"
+                        )
+                    )
+                except sqlalchemy.exc.OperationalError:
+                    _logger.info(
+                        f"Column {col.table.name}.{col.name} already exists (concurrent migration) — skipping"
+                    )
+            else:
+                _logger.info(
+                    f"Column {col.table.name}.{col.name} already exists — skipping"
+                )
+        conn.commit()
+
+
 def migrate_db(
     *,
     db_engine: sqlalchemy.Engine,
     do_skip_backfill: bool,
 ) -> None:
     _logger.info("Enter migrate DB")
+    _add_columns_if_missing(db_engine=db_engine)
 
     # # Example:
     # sqlalchemy.Index(
