@@ -131,6 +131,9 @@ class _TableBase(orm.MappedAsDataclass, orm.DeclarativeBase, kw_only=True):
 
 class PipelineRun(_TableBase):
     __tablename__ = "pipeline_run"
+    _IX_PR_CREATED_AT_DESC_ID_DESC: Final[str] = (
+        "ix_pipeline_run_created_at_desc_id_desc"
+    )
     id: orm.Mapped[IdType] = orm.mapped_column(
         primary_key=True, init=False, insert_default=generate_unique_id
     )
@@ -162,6 +165,11 @@ class PipelineRun(_TableBase):
             "ix_pipeline_run_created_by_created_at_desc",
             created_by,
             created_at.desc(),
+        ),
+        sql.Index(
+            _IX_PR_CREATED_AT_DESC_ID_DESC,
+            created_at.desc(),
+            id.desc(),
         ),
     )
 
