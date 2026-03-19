@@ -481,46 +481,6 @@ def _setup_routes_internal(
         )
     )
 
-    # region UserPipelines routes
-    user_pipelines_service = api_server_sql.UserPipelineApiService()
-
-    # The routes pass `file_path` as query parameter, not path parameter since file_path may contain slashes and ASGI/FastAPI has buggy handling of them.
-    # We're not using `{file_path:path}` (although that's pretty tempting) since this will essentially block all future API expansion under `/api/users/me/pipelines/`.
-    # For example adding `/api/users/me/pipelines/copy` method would be impossible since it would clash with pipeline name.
-    # See https://github.com/fastapi/fastapi/issues/791 https://github.com/Kludex/starlette/issues/826
-
-    router.get(
-        "/api/users/me/pipelines/all", tags=["user_pipelines"], **default_config
-    )(
-        inject_session_dependency(
-            inject_user_name(
-                user_pipelines_service.list_pipelines, parameter_name="user_id"
-            )
-        )
-    )
-    router.get("/api/users/me/pipelines", tags=["user_pipelines"], **default_config)(
-        inject_session_dependency(
-            inject_user_name(
-                user_pipelines_service.get_pipeline, parameter_name="user_id"
-            )
-        )
-    )
-    router.put("/api/users/me/pipelines", tags=["user_pipelines"], **default_config)(
-        inject_session_dependency(
-            inject_user_name(
-                user_pipelines_service.set_pipeline, parameter_name="user_id"
-            )
-        ),
-    )
-    router.delete("/api/users/me/pipelines", tags=["user_pipelines"], **default_config)(
-        inject_session_dependency(
-            inject_user_name(
-                user_pipelines_service.delete_pipeline, parameter_name="user_id"
-            )
-        )
-    )
-    # endregion
-
     # region UserSettings routes
     user_settings_service = api_server_sql.UserSettingsApiService()
 
