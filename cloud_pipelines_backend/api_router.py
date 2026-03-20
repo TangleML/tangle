@@ -39,13 +39,16 @@ def setup_routes(
     user_details_getter: typing.Callable[..., UserDetails],
     container_launcher_for_log_streaming: "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer] | None" = None,
     default_component_library_owner_username: str = "admin",
+    do_skip_backfill: bool = False,
 ):
     def get_session():
         with orm.Session(autocommit=False, autoflush=False, bind=db_engine) as session:
             yield session
 
     def create_db_and_tables():
-        database_ops.initialize_and_migrate_db(db_engine=db_engine)
+        database_ops.initialize_and_migrate_db(
+            db_engine=db_engine, do_skip_backfill=do_skip_backfill
+        )
 
         # The default library must be initialized here, not when adding the Component Library routes.
         # Otherwise the tables won't yet exist when initialization is performed.
