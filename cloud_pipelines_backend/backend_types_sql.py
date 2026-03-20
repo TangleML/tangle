@@ -64,7 +64,7 @@ id_column = orm.mapped_column(
 
 # # Needed to put a union type into DB
 # class SqlIOTypeStruct(_BaseModel):
-#     type: structures.TypeSpecType
+# type: structures.TypeSpecType
 # No. We'll represent TypeSpecType as name:str + properties:dict
 # Supported cases:
 # * type: "name"
@@ -358,7 +358,9 @@ class ExecutionNode(_TableBase):
         repr=False,
     )
 
-    # updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
+    status_updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        default=None
+    )
 
     # execution_kind = orm.Mapped[typing.Literal["CONTAINER", "GRAPH"]]
 
@@ -423,6 +425,23 @@ class ExecutionNode(_TableBase):
         init=False,
         repr=False,
     )
+
+
+@sql.event.listens_for(ExecutionNode.container_execution_status, "set")
+def _stamp_execution_status_updated_at(
+    target: ExecutionNode,
+    value: ContainerExecutionStatus | None,
+    _old_value: object,
+    _initiator: object,
+) -> None:
+    """Keep status_updated_at in sync with container_execution_status.
+
+    Fires for every Python-level write anywhere in the codebase (orchestrator,
+    API server, etc.).  Does NOT fire on database loads, so there is no risk of
+    overwriting the column when SQLAlchemy hydrates a row from a SELECT.
+    """
+    if value is not None:
+        target.status_updated_at = datetime.datetime.now(datetime.timezone.utc)
 
 
 EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY = (
