@@ -1051,15 +1051,30 @@ class ArtifactNodesApiService_Sql:
                 f"The get_signed_artifact_url method only supports Google Cloud Storage URIs, but got {artifact_data.uri=}."
             )
 
+        import os
         from google.cloud import storage
-        from google import auth
 
-        # Avoiding error: "you need a private key to sign credentials."
-        # "the credentials you are currently using <class 'google.auth.compute_engine.credentials.Credentials'> just contains a token.
-        # "see https://googleapis.dev/python/google-api-core/latest/auth.html#setting-up-a-service-account for more details."
-        credentials = auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"]
-        )[0]
+        # On GKE/Cloud Run the default SA credentials already have a private key.
+        # Locally, ADC is typically an OAuth user token (no private key), so we allow
+        # pointing GCS_SIGNING_KEY_FILE at a service account JSON key file to use instead.
+        sa_key_file = os.environ.get("GCS_SIGNING_KEY_FILE")
+        if sa_key_file:
+            from google.oauth2 import service_account
+
+            credentials = service_account.Credentials.from_service_account_file(
+                sa_key_file,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+        else:
+            from google import auth
+
+            # Avoiding error: "you need a private key to sign credentials."
+            # "the credentials you are currently using <class 'google.auth.compute_engine.credentials.Credentials'> just contains a token.
+            # "see https://googleapis.dev/python/google-api-core/latest/auth.html#setting-up-a-service-account for more details."
+            credentials = auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )[0]
+
         storage_client = storage.Client(credentials=credentials)
         blob = storage.Blob.from_string(uri=artifact_data.uri, client=storage_client)
         signed_url = blob.generate_signed_url(
