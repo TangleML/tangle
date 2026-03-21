@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import enum
 import json
 import logging
 import os
@@ -65,6 +66,34 @@ _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_ad
 
 # Environment variables for multi-node execution.
 _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
+
+
+class JobConditionType(str, enum.Enum):
+    """Kubernetes Job condition types.
+
+    A Job is considered finished when it is in a terminal condition,
+    either "Complete" or "Failed".
+
+    Reference: https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/job-v1/
+    See: `A job is considered finished when it is in a terminal condition, either "Complete" or "Failed".`
+    """
+
+    COMPLETE = "Complete"
+    FAILED = "Failed"
+    SUSPENDED = "Suspended"
+    FAILURE_TARGET = "FailureTarget"
+
+
+class ConditionStatus(str, enum.Enum):
+    """Kubernetes condition status values.
+
+    Reference: https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/job-v1/
+    See: `Status of the condition, one of True, False, Unknown.`
+    """
+
+    TRUE = "True"
+    FALSE = "False"
+    UNKNOWN = "Unknown"
 
 
 _T = typing.TypeVar("_T")
@@ -1265,11 +1294,13 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         if not job_status:
             return interfaces.ContainerStatus.PENDING
         has_succeeded_condition = any(
-            condition.type == "Complete" and condition.status == "True"
+            condition.type == JobConditionType.COMPLETE
+            and condition.status == ConditionStatus.TRUE
             for condition in job_status.conditions or []
         )
         has_failed_condition = any(
-            condition.type == "Failed" and condition.status == "True"
+            condition.type == JobConditionType.FAILED
+            and condition.status == ConditionStatus.TRUE
             for condition in job_status.conditions or []
         )
         if has_failed_condition:
@@ -1338,13 +1369,19 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
     @property
     def ended_at(self) -> datetime.datetime | None:
+        """Return the time when the Job entered a terminal condition.
+
+        A Job is considered finished when it has a "Complete" or "Failed"
+        condition with status "True".
+        """
         job_status = self._debug_job.status
         if not job_status:
             return None
         ended_condition_times = [
             condition.last_transition_time
             for condition in job_status.conditions or []
-            if condition.type in ("Succeeded", "Failed") and condition.status == "True"
+            if condition.type in (JobConditionType.COMPLETE, JobConditionType.FAILED)
+            and condition.status == ConditionStatus.TRUE
         ]
         if not ended_condition_times:
             return None
