@@ -498,7 +498,7 @@ def _setup_routes_internal(
             annotation_metadata=fastapi.Query(),
         )
     )
-    router.put("/api/users/me/settings", tags=["user_settings"], **default_config)(
+    router.patch("/api/users/me/settings", tags=["user_settings"], **default_config)(
         add_parameter_annotation_metadata(
             inject_session_dependency(
                 inject_user_name(
