@@ -211,6 +211,35 @@ run_configured_orchestrator = lambda: run_orchestrator(
 # endregion
 
 
+# region: Metrics poller initialization
+
+from cloud_pipelines_backend.instrumentation import metrics_poller
+from cloud_pipelines_backend.instrumentation.opentelemetry._internal import (
+    configuration as otel_configuration,
+)
+
+
+def run_metrics_poller(*, db_engine: sqlalchemy.Engine) -> None:
+    otel_config = otel_configuration.resolve()
+    if otel_config is None or otel_config.metrics is None:
+        logger.info(
+            f"No OTel metrics endpoint configured"
+            f" (set {otel_configuration.EnvVar.METRIC_EXPORTER_ENDPOINT})"
+            f" — metrics poller not starting"
+        )
+        return
+    session_factory = orm.sessionmaker(
+        autocommit=False, autoflush=False, bind=db_engine
+    )
+    metrics_poller.PollingService(session_factory=session_factory).run_loop()
+
+
+run_configured_metrics_poller = lambda: run_metrics_poller(
+    db_engine=db_engine,
+)
+# endregion
+
+
 # region: API Server initialization
 import contextlib
 import threading
@@ -228,10 +257,8 @@ from cloud_pipelines_backend.instrumentation import contextual_logging
 @contextlib.asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
     database_ops.initialize_and_migrate_db(db_engine=db_engine)
-    threading.Thread(
-        target=run_configured_orchestrator,
-        daemon=True,
-    ).start()
+    threading.Thread(target=run_configured_orchestrator, daemon=True).start()
+    threading.Thread(target=run_configured_metrics_poller, daemon=True).start()
     if os.environ.get("GOOGLE_CLOUD_SHELL") == "true":
         # TODO: Find a way to get fastapi/starlette/uvicorn port
         port = 8000
