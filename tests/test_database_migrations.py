@@ -1929,3 +1929,110 @@ class TestMigrateDbBackfillFlag:
             _count_annotations(session_factory=session_factory, key=pipeline_name_key)
             == 0
         )
+
+
+# ---------------------------------------------------------------------------
+# secret_value column migration
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_secret_value_column_idempotent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """First call ALTERs VARCHAR(255) to TEXT; second call skips (already TEXT)."""
+    db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+    bts._TableBase.metadata.create_all(db_engine)
+
+    varchar_255 = sqlalchemy.types.String(length=255)
+    text_type = sqlalchemy.types.Text()
+
+    call_count = 0
+
+    def _fake_get_columns(
+        *,
+        table_name: str,
+    ) -> list[dict[str, Any]]:
+        nonlocal call_count
+        call_count += 1
+        fake_type = varchar_255 if call_count == 1 else text_type
+        return [{"name": "secret_value", "type": fake_type}]
+
+    mock_conn = mock.MagicMock()
+    mock_connect = mock.MagicMock()
+    mock_connect.__enter__ = mock.MagicMock(return_value=mock_conn)
+    mock_connect.__exit__ = mock.MagicMock(return_value=False)
+
+    real_dialect = db_engine.dialect
+    fake_dialect = mock.MagicMock(wraps=real_dialect)
+    fake_dialect.name = "mysql"
+    fake_dialect.type_compiler_instance = real_dialect.type_compiler_instance
+
+    with (
+        mock.patch.object(db_engine, "dialect", fake_dialect),
+        mock.patch("sqlalchemy.inspect") as mock_inspect,
+        mock.patch.object(db_engine, "connect", return_value=mock_connect),
+        caplog.at_level(logging.INFO),
+    ):
+        mock_inspect.return_value.get_columns.side_effect = (
+            lambda table_name: _fake_get_columns(table_name=table_name)
+        )
+
+        database_migrations.migrate_secret_value_column(db_engine=db_engine)
+        database_migrations.migrate_secret_value_column(db_engine=db_engine)
+
+    msgs = caplog.messages
+    assert len(msgs) == 4
+    assert (
+        "current_type=VARCHAR(255), current_length=255, target_type=TEXT, dialect=mysql"
+        in msgs[0]
+    )
+    assert (
+        "executing SQL: ALTER TABLE secret MODIFY COLUMN secret_value TEXT" in msgs[1]
+    )
+    assert "complete" in msgs[2]
+    assert "skipped (already TEXT)" in msgs[3]
+    mock_conn.execute.assert_called_once()
+    mock_conn.commit.assert_called_once()
+
+
+def test_migrate_secret_value_column_mysql_alter_sql(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mock MySQL dialect and verify the exact ALTER SQL generated."""
+    db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+    bts._TableBase.metadata.create_all(db_engine)
+
+    real_dialect = db_engine.dialect
+
+    def _fake_get_columns(
+        *,
+        table_name: str,
+    ) -> list[dict[str, Any]]:
+        return [{"name": "secret_value", "type": sqlalchemy.types.String(length=255)}]
+
+    mock_conn = mock.MagicMock()
+    mock_connect = mock.MagicMock()
+    mock_connect.__enter__ = mock.MagicMock(return_value=mock_conn)
+    mock_connect.__exit__ = mock.MagicMock(return_value=False)
+
+    fake_dialect = mock.MagicMock(wraps=real_dialect)
+    fake_dialect.name = "mysql"
+    fake_dialect.type_compiler_instance = real_dialect.type_compiler_instance
+
+    with (
+        mock.patch.object(db_engine, "dialect", fake_dialect),
+        mock.patch("sqlalchemy.inspect") as mock_inspect,
+        mock.patch.object(db_engine, "connect", return_value=mock_connect),
+        caplog.at_level(logging.INFO),
+    ):
+        mock_inspect.return_value.get_columns.side_effect = (
+            lambda table_name: _fake_get_columns(table_name=table_name)
+        )
+
+        database_migrations.migrate_secret_value_column(db_engine=db_engine)
+
+    executed_sql = mock_conn.execute.call_args[0][0].text
+    assert executed_sql == "ALTER TABLE secret MODIFY COLUMN secret_value TEXT"
+    assert any("current_length=255" in msg for msg in caplog.messages)
+    assert any("dialect=mysql" in msg for msg in caplog.messages)
+    mock_conn.commit.assert_called_once()

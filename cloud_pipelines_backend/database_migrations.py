@@ -722,3 +722,67 @@ def run_all_annotation_backfills(
 
     _logger.info("Exit backfill for annotations table")
     return result
+
+
+def migrate_secret_value_column(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> None:
+    """Widen secret.secret_value to TEXT.
+
+    Idempotent: inspects the actual DB column and skips if already TEXT.
+    Dialect-aware: MySQL, PostgreSQL, SQLite.
+    """
+    table = bts.Secret.__table__
+    column = table.c.secret_value
+    type_sql = column.type.compile(dialect=db_engine.dialect)
+
+    inspector = sqlalchemy.inspect(db_engine)
+    db_columns = {c["name"]: c for c in inspector.get_columns(table.name)}
+    col_type = db_columns[column.name]["type"]
+    dialect = db_engine.dialect.name
+
+    if isinstance(col_type, sqlalchemy.types.Text):
+        _logger.info(f"migrate column to TEXT: skipped (already TEXT)")
+        return
+
+    current_length = col_type.length if isinstance(col_type.length, int) else 0
+
+    _logger.info(
+        f"migrate column to TEXT: {table.name}.{column.name}"
+        f" — current_type={col_type}, current_length={current_length},"
+        f" target_type={type_sql}, dialect={dialect}"
+    )
+
+    try:
+        if dialect == "mysql":
+            alter_sql = (
+                f"ALTER TABLE {table.name} MODIFY COLUMN {column.name} {type_sql}"
+            )
+        elif dialect == "postgresql":
+            alter_sql = (
+                f"ALTER TABLE {table.name} ALTER COLUMN {column.name} TYPE {type_sql}"
+            )
+        elif dialect == "sqlite":
+            _logger.info(
+                f"migrate column to TEXT: SQLite does not enforce VARCHAR length"
+                f" and does not support ALTER COLUMN — no migration needed"
+            )
+            return
+        else:
+            _logger.warning(
+                f"migrate column to TEXT: unsupported dialect {dialect} — skipping"
+            )
+            return
+
+        _logger.info(f"migrate column to TEXT: executing SQL: {alter_sql}")
+        with db_engine.connect() as conn:
+            conn.execute(sqlalchemy.text(alter_sql))
+            conn.commit()
+        _logger.info(f"migrate column to TEXT: complete")
+    except Exception:
+        _logger.exception(
+            f"migrate column to TEXT failed: table={table.name},"
+            f" column={column.name}, current_type={col_type},"
+            f" target_type={type_sql}, dialect={dialect}"
+        )
