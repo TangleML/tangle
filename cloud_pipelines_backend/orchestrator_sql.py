@@ -99,6 +99,12 @@ class OrchestratorService_Sql:
         if queued_execution:
             self._queued_executions_queue_idle = False
             start_timestamp = time.monotonic_ns()
+            # Capture before the try/except: session.rollback() in the except
+            # handler expires every attribute on every loaded instance, so
+            # reading these after rollback would trigger an unintended
+            # lazy-load SELECT instead of returning the in-memory values.
+            queued_prev_status = queued_execution.container_execution_status
+            queued_prev_status_updated_at = queued_execution.status_updated_at
 
             with contextual_logging.logging_context(execution_id=queued_execution.id):
                 _logger.info("Before processing queued execution")
@@ -109,8 +115,11 @@ class OrchestratorService_Sql:
                 except Exception as ex:
                     _logger.exception("Error processing queued execution")
                     session.rollback()
-                    queued_execution.container_execution_status = (
-                        bts.ContainerExecutionStatus.SYSTEM_ERROR
+                    _transition_execution_status(
+                        execution=queued_execution,
+                        new_status=bts.ContainerExecutionStatus.SYSTEM_ERROR,
+                        prev_status=queued_prev_status,
+                        prev_status_updated_at=queued_prev_status_updated_at,
                     )
                     record_system_error_exception(
                         execution=queued_execution, exception=ex
@@ -179,8 +188,11 @@ class OrchestratorService_Sql:
                     # Mark our ExecutionNode as SYSTEM_ERROR
                     execution_nodes = running_container_execution.execution_nodes
                     for execution_node in execution_nodes:
-                        execution_node.container_execution_status = (
-                            bts.ContainerExecutionStatus.SYSTEM_ERROR
+                        _transition_execution_status(
+                            execution=execution_node,
+                            new_status=bts.ContainerExecutionStatus.SYSTEM_ERROR,
+                            prev_status=execution_node.container_execution_status,
+                            prev_status_updated_at=execution_node.status_updated_at,
                         )
                         record_system_error_exception(
                             execution=execution_node, exception=ex
@@ -239,8 +251,11 @@ class OrchestratorService_Sql:
             _logger.info(
                 f"Execution did not have all input artifact data present. Waiting for upstream. {execution.id=}"
             )
-            execution.container_execution_status = (
-                bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+            _transition_execution_status(
+                execution=execution,
+                new_status=bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+                prev_status=execution.container_execution_status,
+                prev_status_updated_at=execution.status_updated_at,
             )
             session.commit()
             return
@@ -329,8 +344,11 @@ class OrchestratorService_Sql:
                 execution.extra_data = {}
             execution.extra_data["reused_from_execution_node_id"] = old_execution.id
 
-            execution.container_execution_status = (
-                old_execution.container_execution_status
+            _transition_execution_status(
+                execution=execution,
+                new_status=old_execution.container_execution_status,
+                prev_status=execution.container_execution_status,
+                prev_status_updated_at=execution.status_updated_at,
             )
 
             # If the execution is still running, it's enough to just link execution node to it.
@@ -373,8 +391,11 @@ class OrchestratorService_Sql:
                         downstream_execution.container_execution_status
                         == bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
                     ):
-                        downstream_execution.container_execution_status = (
-                            bts.ContainerExecutionStatus.QUEUED
+                        _transition_execution_status(
+                            execution=downstream_execution,
+                            new_status=bts.ContainerExecutionStatus.QUEUED,
+                            prev_status=bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+                            prev_status_updated_at=downstream_execution.status_updated_at,
                         )
             session.commit()
             return
@@ -410,8 +431,11 @@ class OrchestratorService_Sql:
             _logger.info(
                 f"Cancelling execution {execution.id} and skipping all downstream executions."
             )
-            execution.container_execution_status = (
-                bts.ContainerExecutionStatus.CANCELLED
+            _transition_execution_status(
+                execution=execution,
+                new_status=bts.ContainerExecutionStatus.CANCELLED,
+                prev_status=execution.container_execution_status,
+                prev_status_updated_at=execution.status_updated_at,
             )
             _mark_all_downstream_executions_as_skipped(
                 session=session, execution=execution
@@ -560,6 +584,13 @@ class OrchestratorService_Sql:
             container_execution_uuid
         )
 
+        # Capture before the launcher call: both error and success paths cross a
+        # session.rollback() boundary, after which the instance is expired.
+        # Reading these here — while the instance is live — avoids an unintended
+        # lazy-load SELECT on the far side of the rollback.
+        _pre_launch_status = execution.container_execution_status
+        _pre_launch_status_updated_at = execution.status_updated_at
+
         try:
             launched_container: launcher_interfaces.LaunchedContainer = (
                 self._launcher.launch_container_task(
@@ -583,8 +614,11 @@ class OrchestratorService_Sql:
             with session.begin():
                 # Logs whole exception
                 _logger.exception(f"Error launching container for {execution.id=}")
-                execution.container_execution_status = (
-                    bts.ContainerExecutionStatus.SYSTEM_ERROR
+                _transition_execution_status(
+                    execution=execution,
+                    new_status=bts.ContainerExecutionStatus.SYSTEM_ERROR,
+                    prev_status=_pre_launch_status,
+                    prev_status_updated_at=_pre_launch_status_updated_at,
                 )
                 record_system_error_exception(execution=execution, exception=ex)
                 _mark_all_downstream_executions_as_skipped(
@@ -628,7 +662,12 @@ class OrchestratorService_Sql:
             session.add(container_execution)
             execution.container_execution = container_execution
             execution.container_execution_cache_key = cache_key
-            execution.container_execution_status = container_execution.status
+            _transition_execution_status(
+                execution=execution,
+                new_status=container_execution.status,
+                prev_status=_pre_launch_status,
+                prev_status_updated_at=_pre_launch_status_updated_at,
+            )
             # TODO: Maybe add artifact value and URI to input ArtifactData.
 
     def internal_process_one_running_execution(
@@ -694,8 +733,11 @@ class OrchestratorService_Sql:
                 _logger.info(
                     f"Cancelling execution {execution_node.id} and skipping all downstream executions."
                 )
-                execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.CANCELLED
+                _transition_execution_status(
+                    execution=execution_node,
+                    new_status=bts.ContainerExecutionStatus.CANCELLED,
+                    prev_status=execution_node.container_execution_status,
+                    prev_status_updated_at=execution_node.status_updated_at,
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
@@ -742,8 +784,11 @@ class OrchestratorService_Sql:
             container_execution.status = bts.ContainerExecutionStatus.RUNNING
             container_execution.started_at = reloaded_launched_container.started_at
             for execution_node in execution_nodes:
-                execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.RUNNING
+                _transition_execution_status(
+                    execution=execution_node,
+                    new_status=bts.ContainerExecutionStatus.RUNNING,
+                    prev_status=execution_node.container_execution_status,
+                    prev_status_updated_at=execution_node.status_updated_at,
                 )
         elif new_status == launcher_interfaces.ContainerStatus.SUCCEEDED:
             container_execution.status = bts.ContainerExecutionStatus.SUCCEEDED
@@ -813,8 +858,11 @@ class OrchestratorService_Sql:
                 )
                 # Skip downstream executions
                 for execution_node in execution_nodes:
-                    execution_node.container_execution_status = (
-                        bts.ContainerExecutionStatus.FAILED
+                    _transition_execution_status(
+                        execution=execution_node,
+                        new_status=bts.ContainerExecutionStatus.FAILED,
+                        prev_status=execution_node.container_execution_status,
+                        prev_status_updated_at=execution_node.status_updated_at,
                     )
                     _mark_all_downstream_executions_as_skipped(
                         session=session, execution=execution_node
@@ -855,8 +903,11 @@ class OrchestratorService_Sql:
 
                 session.add_all(new_output_artifact_data_map.values())
                 for execution_node in execution_nodes:
-                    execution_node.container_execution_status = (
-                        bts.ContainerExecutionStatus.SUCCEEDED
+                    _transition_execution_status(
+                        execution=execution_node,
+                        new_status=bts.ContainerExecutionStatus.SUCCEEDED,
+                        prev_status=execution_node.container_execution_status,
+                        prev_status_updated_at=execution_node.status_updated_at,
                     )
                     # TODO: Optimize
                     for output_name, artifact_node in session.execute(
@@ -877,8 +928,11 @@ class OrchestratorService_Sql:
                             downstream_execution.container_execution_status
                             == bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
                         ):
-                            downstream_execution.container_execution_status = (
-                                bts.ContainerExecutionStatus.QUEUED
+                            _transition_execution_status(
+                                execution=downstream_execution,
+                                new_status=bts.ContainerExecutionStatus.QUEUED,
+                                prev_status=bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+                                prev_status_updated_at=downstream_execution.status_updated_at,
                             )
         elif new_status == launcher_interfaces.ContainerStatus.FAILED:
             container_execution.status = bts.ContainerExecutionStatus.FAILED
@@ -897,16 +951,22 @@ class OrchestratorService_Sql:
             _retry(reloaded_launched_container.upload_log)
             # Skip downstream executions
             for execution_node in execution_nodes:
-                execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.FAILED
+                _transition_execution_status(
+                    execution=execution_node,
+                    new_status=bts.ContainerExecutionStatus.FAILED,
+                    prev_status=execution_node.container_execution_status,
+                    prev_status_updated_at=execution_node.status_updated_at,
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
                 )
         elif new_status == launcher_interfaces.ContainerStatus.PENDING:
             for execution_node in execution_nodes:
-                execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.PENDING
+                _transition_execution_status(
+                    execution=execution_node,
+                    new_status=bts.ContainerExecutionStatus.PENDING,
+                    prev_status=execution_node.container_execution_status,
+                    prev_status_updated_at=execution_node.status_updated_at,
                 )
             # ? Should we reset `started_at` or keep it?
             container_execution.started_at = None
@@ -948,12 +1008,18 @@ def _mark_all_downstream_executions_as_skipped(
     if execution.id in seen_execution_ids:
         return
     seen_execution_ids.add(execution.id)
-    if execution.container_execution_status in {
+    current_status = execution.container_execution_status
+    if current_status in {
         bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
         # A downstream ExecutionNode can be in "Queued" state when it's been "woken up" by one of its upstreams.
         bts.ContainerExecutionStatus.QUEUED,
     }:
-        execution.container_execution_status = bts.ContainerExecutionStatus.SKIPPED
+        _transition_execution_status(
+            execution=execution,
+            new_status=bts.ContainerExecutionStatus.SKIPPED,
+            prev_status=current_status,
+            prev_status_updated_at=execution.status_updated_at,
+        )
 
     # for artifact_node in execution.output_artifact_nodes:
     #     for downstream_execution in artifact_node.downstream_executions:
@@ -1045,6 +1111,42 @@ def _retry(
             if i == max_retries - 1:
                 raise
     raise
+
+
+def _transition_execution_status(
+    *,
+    execution: bts.ExecutionNode,
+    new_status: bts.ContainerExecutionStatus,
+    prev_status: bts.ContainerExecutionStatus | None,
+    prev_status_updated_at: datetime.datetime | None,
+) -> None:
+    """Set execution node status and record the status transition duration metric.
+
+    The caller is always responsible for supplying prev_status and
+    prev_status_updated_at.  Typically these are read directly from the live
+    instance immediately before the call.
+
+    At call sites that cross a session.rollback() boundary, capture these
+    values *before* the rollback.  SQLAlchemy's rollback() marks every
+    attribute on every loaded instance as "expired", meaning the next read
+    of any attribute issues a fresh SELECT against the database.  If
+    prev_status or prev_status_updated_at were read *after* rollback, they
+    would trigger that unexpected lazy-load rather than returning the
+    in-memory value that was current at transition time.
+
+    Passing None for either argument skips metric recording for that transition
+    without affecting the status write.  status_updated_at is maintained
+    automatically by the SQLAlchemy event listener in backend_types_sql.py.
+    """
+    if prev_status is not None and prev_status_updated_at is not None:
+        app_metrics.record_status_transition(
+            from_status=prev_status.value,
+            to_status=new_status.value,
+            duration_seconds=(
+                _get_current_time() - prev_status_updated_at
+            ).total_seconds(),
+        )
+    execution.container_execution_status = new_status
 
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):
