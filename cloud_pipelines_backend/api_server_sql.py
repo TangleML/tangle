@@ -1052,16 +1052,31 @@ class ArtifactNodesApiService_Sql:
                 f"The get_signed_artifact_url method only supports Google Cloud Storage URIs, but got {artifact_data.uri=}."
             )
 
+        from google.auth import compute_engine
+        from google.auth import iam
+        from google.auth.transport import requests as google_requests
         from google.cloud import storage
-        from google import auth
+        from google.oauth2 import service_account
 
-        # Avoiding error: "you need a private key to sign credentials."
-        # "the credentials you are currently using <class 'google.auth.compute_engine.credentials.Credentials'> just contains a token.
-        # "see https://googleapis.dev/python/google-api-core/latest/auth.html#setting-up-a-service-account for more details."
-        credentials = auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform.read-only"]
-        )[0]
-        storage_client = storage.Client(credentials=credentials)
+        # When running on GKE with Workload Identity, google.auth.default() returns
+        # token-based Compute Engine credentials that have no private key and cannot
+        # sign URLs directly. Instead, we use the IAM Sign Blob API, which lets the
+        # service account sign on its own behalf — no JSON key required. This requires
+        # iam.serviceAccounts.signBlob to be granted to the SA on itself.
+        auth_request = google_requests.Request()
+        credentials = compute_engine.Credentials()
+        credentials.refresh(auth_request)
+        signer = iam.Signer(
+            request=auth_request,
+            credentials=credentials,
+            service_account_email=credentials.service_account_email,
+        )
+        signing_credentials = service_account.Credentials(
+            signer=signer,
+            service_account_email=credentials.service_account_email,
+            token_uri="https://oauth2.googleapis.com/token",
+        )
+        storage_client = storage.Client(credentials=signing_credentials)
         blob = storage.Blob.from_string(uri=artifact_data.uri, client=storage_client)
         signed_url = blob.generate_signed_url(
             # Expiration is required. Max expiration value is 7 days.
