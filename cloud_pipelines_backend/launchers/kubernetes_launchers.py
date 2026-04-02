@@ -1557,6 +1557,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             name=self._job_name,
             namespace=self._namespace,
             grace_period_seconds=10,
+            propagation_policy="Foreground",
         )
         _logger.info(f"Terminated job {self._job_name} in namespace {self._namespace}")
 
