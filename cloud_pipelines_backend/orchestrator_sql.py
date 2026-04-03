@@ -170,8 +170,10 @@ class OrchestratorService_Sql:
                 except Exception as ex:
                     _logger.exception("Error processing running container execution")
                     session.rollback()
-                    running_container_execution.status = (
-                        bts.ContainerExecutionStatus.SYSTEM_ERROR
+                    _record_terminal_state(
+                        container_execution=running_container_execution,
+                        status=bts.ContainerExecutionStatus.SYSTEM_ERROR,
+                        ended_at=_get_current_time(),
                     )
                     # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
                     session.commit()
@@ -684,9 +686,12 @@ class OrchestratorService_Sql:
                 # Requesting container termination.
                 # Termination might not happen immediately (e.g. Kubernetes has grace period).
                 launched_container.terminate()
-                container_execution.ended_at = _get_current_time()
                 # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
-                container_execution.status = bts.ContainerExecutionStatus.CANCELLED
+                _record_terminal_state(
+                    container_execution=container_execution,
+                    status=bts.ContainerExecutionStatus.CANCELLED,
+                    ended_at=_get_current_time(),
+                )
                 terminated = True
 
             # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
@@ -746,10 +751,13 @@ class OrchestratorService_Sql:
                     bts.ContainerExecutionStatus.RUNNING
                 )
         elif new_status == launcher_interfaces.ContainerStatus.SUCCEEDED:
-            container_execution.status = bts.ContainerExecutionStatus.SUCCEEDED
-            container_execution.exit_code = reloaded_launched_container.exit_code
-            container_execution.started_at = reloaded_launched_container.started_at
-            container_execution.ended_at = reloaded_launched_container.ended_at
+            _record_terminal_state(
+                container_execution=container_execution,
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+                exit_code=reloaded_launched_container.exit_code,
+                started_at=reloaded_launched_container.started_at,
+                ended_at=reloaded_launched_container.ended_at,
+            )
 
             # Don't fail the execution if log upload fails.
             # Logs are important, but not so important that we should fail a successfully completed container execution.
@@ -881,10 +889,13 @@ class OrchestratorService_Sql:
                                 bts.ContainerExecutionStatus.QUEUED
                             )
         elif new_status == launcher_interfaces.ContainerStatus.FAILED:
-            container_execution.status = bts.ContainerExecutionStatus.FAILED
-            container_execution.exit_code = reloaded_launched_container.exit_code
-            container_execution.started_at = reloaded_launched_container.started_at
-            container_execution.ended_at = reloaded_launched_container.ended_at
+            _record_terminal_state(
+                container_execution=container_execution,
+                status=bts.ContainerExecutionStatus.FAILED,
+                exit_code=reloaded_launched_container.exit_code,
+                started_at=reloaded_launched_container.started_at,
+                ended_at=reloaded_launched_container.ended_at,
+            )
             launcher_error = reloaded_launched_container.launcher_error_message
             if launcher_error:
                 orchestration_error_message = f"Launcher error: {launcher_error}"
@@ -1008,6 +1019,28 @@ def _calculate_container_execution_cache_key(
 
 def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
+
+
+def _record_terminal_state(
+    *,
+    container_execution: bts.ContainerExecution,
+    status: bts.ContainerExecutionStatus,
+    ended_at: datetime.datetime,
+    exit_code: int | None = None,
+    started_at: datetime.datetime | None = None,
+) -> None:
+    """Record terminal state fields on a container execution.
+
+    A terminal state must minimally include a status change and an end time.
+    exit_code and started_at are optional — they depend on whether the
+    launcher was able to report them before the execution ended.
+    """
+    container_execution.status = status
+    container_execution.ended_at = ended_at
+    if exit_code is not None:
+        container_execution.exit_code = exit_code
+    if started_at is not None:
+        container_execution.started_at = started_at
 
 
 def _generate_random_id() -> str:
