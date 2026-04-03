@@ -2,7 +2,7 @@ import dataclasses
 import datetime
 import logging
 import typing
-from typing import Any, Final, Optional
+from typing import Any, Optional
 
 import sqlalchemy as sql
 from sqlalchemy import orm
@@ -10,7 +10,12 @@ from sqlalchemy import orm
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import errors
-from . import filter_query_sql
+from .annotation import utils as annotation_utils
+from .search import runs as search_runs
+from .search.runs import (
+    ListPipelineJobsResponse,
+    PipelineRunResponse,
+)
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -32,72 +37,7 @@ def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
 
 
-def _get_pipeline_name_from_task_spec(
-    *,
-    task_spec_dict: dict[str, Any],
-) -> str | None:
-    """Extract pipeline name from a task_spec dict via component_ref.spec.name.
-
-    Traversal path:
-        task_spec_dict -> TaskSpec -> component_ref -> spec -> name
-
-    Returns None if any step in the chain is missing or parsing fails.
-    """
-    try:
-        task_spec = structures.TaskSpec.from_json_dict(task_spec_dict)
-    except Exception:
-        return None
-    spec = task_spec.component_ref.spec
-    if spec is None:
-        return None
-    return spec.name or None
-
-
-# ==== PipelineJobService
-@dataclasses.dataclass(kw_only=True)
-class PipelineRunResponse:
-    id: bts.IdType
-    root_execution_id: bts.IdType
-    annotations: dict[str, Any] | None = None
-    # status: "PipelineJobStatus"
-    created_by: str | None = None
-    created_at: datetime.datetime | None = None
-    pipeline_name: str | None = None
-    execution_status_stats: dict[str, int] | None = None
-
-    @classmethod
-    def from_db(cls, pipeline_run: bts.PipelineRun) -> "PipelineRunResponse":
-        return PipelineRunResponse(
-            id=pipeline_run.id,
-            root_execution_id=pipeline_run.root_execution_id,
-            annotations=pipeline_run.annotations,
-            created_by=pipeline_run.created_by,
-            created_at=pipeline_run.created_at,
-        )
-
-
-class GetPipelineRunResponse(PipelineRunResponse):
-    pass
-
-
-@dataclasses.dataclass(kw_only=True)
-class ListPipelineJobsResponse:
-    pipeline_runs: list[PipelineRunResponse]
-    next_page_token: str | None = None
-
-
 class PipelineRunsApiService_Sql:
-    _PIPELINE_NAME_EXTRA_DATA_KEY = "pipeline_name"
-    _DEFAULT_PAGE_SIZE: Final[int] = 10
-    _SYSTEM_KEY_RESERVED_MSG = (
-        "Annotation keys starting with "
-        f"{filter_query_sql.SYSTEM_KEY_PREFIX!r} are reserved for system use."
-    )
-
-    def _fail_if_changing_system_annotation(self, *, key: str) -> None:
-        if key.startswith(filter_query_sql.SYSTEM_KEY_PREFIX):
-            raise errors.ApiValidationError(self._SYSTEM_KEY_RESERVED_MSG)
-
     def create(
         self,
         session: orm.Session,
@@ -130,14 +70,14 @@ class PipelineRunsApiService_Sql:
                 annotations=annotations,
                 created_by=created_by,
                 extra_data={
-                    self._PIPELINE_NAME_EXTRA_DATA_KEY: pipeline_name,
+                    search_runs._PIPELINE_NAME_EXTRA_DATA_KEY: pipeline_name,
                 },
             )
             session.add(pipeline_run)
             # Flush to populate pipeline_run.id (server-generated) before inserting annotation FKs.
             # TODO: Use ORM relationship instead of explicit flush + manual FK assignment.
             session.flush()
-            _mirror_system_annotations(
+            annotation_utils.mirror_system_annotations(
                 session=session,
                 pipeline_run_id=pipeline_run.id,
                 created_by=created_by,
@@ -207,99 +147,15 @@ class PipelineRunsApiService_Sql:
         include_pipeline_names: bool = False,
         include_execution_stats: bool = False,
     ) -> ListPipelineJobsResponse:
-        where_clauses, offset, next_token = filter_query_sql.build_list_filters(
-            filter_value=filter,
-            filter_query_value=filter_query,
-            page_token_value=page_token,
+        return search_runs.get_pipeline_runs(
+            session=session,
+            page_token=page_token,
+            filter=filter,
+            filter_query=filter_query,
             current_user=current_user,
-            page_size=self._DEFAULT_PAGE_SIZE,
+            include_pipeline_names=include_pipeline_names,
+            include_execution_stats=include_execution_stats,
         )
-
-        pipeline_runs = list(
-            session.scalars(
-                sql.select(bts.PipelineRun)
-                .where(*where_clauses)
-                .order_by(bts.PipelineRun.created_at.desc())
-                .offset(offset)
-                .limit(self._DEFAULT_PAGE_SIZE)
-            ).all()
-        )
-
-        next_page_token = (
-            next_token if len(pipeline_runs) >= self._DEFAULT_PAGE_SIZE else None
-        )
-
-        return ListPipelineJobsResponse(
-            pipeline_runs=[
-                self._create_pipeline_run_response(
-                    session=session,
-                    pipeline_run=pipeline_run,
-                    include_pipeline_names=include_pipeline_names,
-                    include_execution_stats=include_execution_stats,
-                )
-                for pipeline_run in pipeline_runs
-            ],
-            next_page_token=next_page_token,
-        )
-
-    def _create_pipeline_run_response(
-        self,
-        *,
-        session: orm.Session,
-        pipeline_run: bts.PipelineRun,
-        include_pipeline_names: bool,
-        include_execution_stats: bool,
-    ) -> PipelineRunResponse:
-        response = PipelineRunResponse.from_db(pipeline_run)
-        if include_pipeline_names:
-            pipeline_name = None
-            extra_data = pipeline_run.extra_data or {}
-            if self._PIPELINE_NAME_EXTRA_DATA_KEY in extra_data:
-                pipeline_name = extra_data[self._PIPELINE_NAME_EXTRA_DATA_KEY]
-            else:
-                execution_node = session.get(
-                    bts.ExecutionNode, pipeline_run.root_execution_id
-                )
-                if execution_node:
-                    pipeline_name = _get_pipeline_name_from_task_spec(
-                        task_spec_dict=execution_node.task_spec
-                    )
-            response.pipeline_name = pipeline_name
-        if include_execution_stats:
-            execution_status_stats = self._calculate_execution_status_stats(
-                session=session, root_execution_id=pipeline_run.root_execution_id
-            )
-            response.execution_status_stats = {
-                status.value: count for status, count in execution_status_stats.items()
-            }
-        return response
-
-    def _calculate_execution_status_stats(
-        self, session: orm.Session, root_execution_id: bts.IdType
-    ) -> dict[bts.ContainerExecutionStatus, int]:
-        query = (
-            sql.select(
-                bts.ExecutionNode.container_execution_status,
-                sql.func.count().label("count"),
-            )
-            .join(
-                bts.ExecutionToAncestorExecutionLink,
-                bts.ExecutionToAncestorExecutionLink.execution_id
-                == bts.ExecutionNode.id,
-            )
-            .where(
-                bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
-                == root_execution_id
-            )
-            .where(bts.ExecutionNode.container_execution_status != None)
-            .group_by(
-                bts.ExecutionNode.container_execution_status,
-            )
-        )
-        execution_status_stat_rows = session.execute(query).tuples().all()
-        execution_status_stats = dict(execution_status_stat_rows)
-
-        return execution_status_stats
 
     def list_annotations(
         self,
@@ -330,7 +186,7 @@ class PipelineRunsApiService_Sql:
         user_name: str | None = None,
         skip_user_check: bool = False,
     ):
-        self._fail_if_changing_system_annotation(key=key)
+        annotation_utils.fail_if_changing_system_annotation(key=key)
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
@@ -353,7 +209,7 @@ class PipelineRunsApiService_Sql:
         user_name: str | None = None,
         skip_user_check: bool = False,
     ):
-        self._fail_if_changing_system_annotation(key=key)
+        annotation_utils.fail_if_changing_system_annotation(key=key)
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
@@ -467,22 +323,6 @@ class GetExecutionInfoResponse:
 @dataclasses.dataclass
 class ArtifactNodeIdResponse:
     id: bts.IdType
-
-
-@dataclasses.dataclass(kw_only=True)
-class ExecutionStatusSummary:
-    total_executions: int = 0
-    ended_executions: int = 0
-    has_ended: bool = False
-
-    def count_execution_status(
-        self, *, status: bts.ContainerExecutionStatus, count: int
-    ) -> None:
-        self.total_executions += count
-        if status in bts.CONTAINER_STATUSES_ENDED:
-            self.ended_executions += count
-
-        self.has_ended = self.ended_executions == self.total_executions
 
 
 @dataclasses.dataclass
@@ -1299,94 +1139,6 @@ class UserSettingsApiService:
 _ArtifactNodeOrDynamicDataType = typing.Union[
     bts.ArtifactNode, structures.DynamicDataArgument
 ]
-
-
-def _truncate_for_annotation(
-    *,
-    value: str,
-    field_name: str,
-    pipeline_run_id: bts.IdType,
-) -> str:
-    """Truncate a string to fit the annotation VARCHAR column.
-
-    Returns the value unchanged if it fits within _STR_MAX_LENGTH,
-    otherwise truncates and logs a warning with the run ID and
-    original length.
-    """
-    max_len = bts._STR_MAX_LENGTH
-    if len(value) <= max_len:
-        return value
-
-    _logger.warning(
-        f"Truncating {field_name} annotation for run {pipeline_run_id}: "
-        f"{len(value)} chars -> {max_len} chars"
-    )
-    return value[:max_len]
-
-
-def _mirror_system_annotations(
-    *,
-    session: orm.Session,
-    pipeline_run_id: bts.IdType,
-    created_by: str | None,
-    pipeline_name: str | None,
-) -> None:
-    """Mirror pipeline run fields as system annotations for filter_query search.
-
-    Always creates an annotation for every run, even when the source value is
-    None or empty (stored as ""). This ensures data parity so every run has a
-    row for each system key.
-    """
-
-    # TODO: The original pipeline_run.created_by and the pipeline name stored in
-    # extra_data / task_spec are saved untruncated, while the annotation mirror
-    # is truncated to VARCHAR(255). This creates a data parity mismatch between
-    # the source columns and their annotation copies. Revisit this to either
-    # widen the annotation column or enforce the same limit at the source.
-
-    created_by_value = created_by
-    if created_by_value is None:
-        created_by_value = ""
-        _logger.warning(
-            f"Pipeline run id {pipeline_run_id} `created_by` is None, "
-            'setting it to empty string "" for data parity'
-        )
-
-    created_by_value = _truncate_for_annotation(
-        value=created_by_value,
-        field_name=filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY,
-        pipeline_run_id=pipeline_run_id,
-    )
-
-    session.add(
-        bts.PipelineRunAnnotation(
-            pipeline_run_id=pipeline_run_id,
-            key=filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY,
-            value=created_by_value,
-        )
-    )
-
-    pipeline_name_value = pipeline_name
-    if pipeline_name_value is None:
-        pipeline_name_value = ""
-        _logger.warning(
-            f"Pipeline run id {pipeline_run_id} `pipeline_name` is None, "
-            'setting it to empty string "" for data parity'
-        )
-
-    pipeline_name_value = _truncate_for_annotation(
-        value=pipeline_name_value,
-        field_name=filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
-        pipeline_run_id=pipeline_run_id,
-    )
-
-    session.add(
-        bts.PipelineRunAnnotation(
-            pipeline_run_id=pipeline_run_id,
-            key=filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
-            value=pipeline_name_value,
-        )
-    )
 
 
 def _recursively_create_all_executions_and_artifacts_root(

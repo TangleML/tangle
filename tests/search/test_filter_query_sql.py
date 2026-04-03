@@ -7,8 +7,8 @@ from sqlalchemy.dialects import sqlite as sqlite_dialect
 
 from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import errors
-from cloud_pipelines_backend import filter_query_models
-from cloud_pipelines_backend import filter_query_sql
+from cloud_pipelines_backend.search import filter_query_models
+from cloud_pipelines_backend.search import filter_query_sql
 
 
 def _compile(clause: sql.ColumnElement) -> str:

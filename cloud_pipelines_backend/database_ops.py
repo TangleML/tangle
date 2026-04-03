@@ -4,7 +4,7 @@ import sqlalchemy
 from sqlalchemy import orm
 
 from . import backend_types_sql as bts
-from . import database_migrations
+from .backfill import annotations as backfill_annotations
 
 _logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ def migrate_db(
         _logger.info("Skipping annotation backfills")
     else:
         with orm.Session(db_engine) as session:
-            database_migrations.run_all_annotation_backfills(
+            backfill_annotations.run_all_annotation_backfills(
                 session=session,
             )
 
