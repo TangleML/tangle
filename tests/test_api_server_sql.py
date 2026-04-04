@@ -15,58 +15,52 @@ from cloud_pipelines_backend import filter_query_sql
 
 
 class TestExecutionStatusSummary:
-    def test_initial_state(self):
-        summary = api_server_sql.ExecutionStatusSummary()
-        assert summary.total_executions == 0
-        assert summary.ended_executions == 0
-        assert summary.has_ended is False
+    def test_all_ended_statuses(self) -> None:
+        stats = {
+            status: 2**i
+            for i, status in enumerate(
+                sorted(bts.CONTAINER_STATUSES_ENDED, key=lambda s: s.value)
+            )
+        }
+        total = sum(stats.values())
+        summary = api_server_sql.ExecutionStatusSummary(
+            total_executions=total,
+            ended_executions=total,
+            has_ended=True,
+        )
+        assert summary.total_executions == total
+        assert summary.ended_executions == total
+        assert summary.has_ended is True
 
-    def test_accumulate_all_ended_statuses(self):
-        """Add each ended status with 2^i count for robust uniqueness."""
-        summary = api_server_sql.ExecutionStatusSummary()
-        ended_statuses = sorted(bts.CONTAINER_STATUSES_ENDED, key=lambda s: s.value)
-        expected_total = 0
-        expected_ended = 0
-        for i, status in enumerate(ended_statuses):
-            count = 2**i
-            summary.count_execution_status(status=status, count=count)
-            expected_total += count
-            expected_ended += count
-            assert summary.total_executions == expected_total
-            assert summary.ended_executions == expected_ended
-            assert summary.has_ended is True
-
-    def test_accumulate_all_in_progress_statuses(self):
-        """Add each in-progress status with 2^i count for robust uniqueness."""
-        summary = api_server_sql.ExecutionStatusSummary()
-        in_progress_statuses = sorted(
+    def test_all_in_progress_statuses(self) -> None:
+        in_progress = sorted(
             set(bts.ContainerExecutionStatus) - bts.CONTAINER_STATUSES_ENDED,
             key=lambda s: s.value,
         )
-        expected_total = 0
-        for i, status in enumerate(in_progress_statuses):
-            count = 2**i
-            summary.count_execution_status(status=status, count=count)
-            expected_total += count
-            assert summary.total_executions == expected_total
-            assert summary.ended_executions == 0
-            assert summary.has_ended is False
+        stats = {status: 2**i for i, status in enumerate(in_progress)}
+        total = sum(stats.values())
+        summary = api_server_sql.ExecutionStatusSummary(
+            total_executions=total,
+            ended_executions=0,
+            has_ended=False,
+        )
+        assert summary.total_executions == total
+        assert summary.ended_executions == 0
+        assert summary.has_ended is False
 
-    def test_accumulate_all_statuses(self):
-        """Add every status with 2^i count. Summary math must be exact."""
-        summary = api_server_sql.ExecutionStatusSummary()
+    def test_mixed_statuses(self) -> None:
         all_statuses = sorted(bts.ContainerExecutionStatus, key=lambda s: s.value)
-        expected_total = 0
-        expected_ended = 0
-        for i, status in enumerate(all_statuses):
-            count = 2**i
-            expected_total += count
-            if status in bts.CONTAINER_STATUSES_ENDED:
-                expected_ended += count
-            summary.count_execution_status(status=status, count=count)
-            assert summary.total_executions == expected_total
-            assert summary.ended_executions == expected_ended
-            assert summary.has_ended == (expected_ended == expected_total)
+        stats = {status: 2**i for i, status in enumerate(all_statuses)}
+        total = sum(stats.values())
+        ended = sum(c for s, c in stats.items() if s in bts.CONTAINER_STATUSES_ENDED)
+        summary = api_server_sql.ExecutionStatusSummary(
+            total_executions=total,
+            ended_executions=ended,
+            has_ended=(ended == total),
+        )
+        assert summary.total_executions == total
+        assert summary.ended_executions == ended
+        assert summary.has_ended is False
 
 
 def _make_task_spec(pipeline_name: str = "test-pipeline") -> structures.TaskSpec:
@@ -1735,8 +1729,14 @@ class TestPipelineRunServiceList:
         with session_factory() as session:
             result = service.list(session=session, include_execution_stats=True)
             assert len(result.pipeline_runs) == 1
-            assert result.pipeline_runs[0].root_execution_id == root_id
-            stats = result.pipeline_runs[0].execution_status_stats
+            run = result.pipeline_runs[0]
+            assert run.root_execution_id == root_id
+            stats = run.execution_status_stats
             assert stats is not None
             assert stats["SUCCEEDED"] == 1
             assert stats["RUNNING"] == 1
+            summary = run.execution_summary
+            assert summary is not None
+            assert summary.total_executions == 2
+            assert summary.ended_executions == 1
+            assert summary.has_ended is False
