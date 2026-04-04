@@ -10,62 +10,8 @@ from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import errors
-from cloud_pipelines_backend import filter_query_sql
-
-
-class TestExecutionStatusSummary:
-    def test_initial_state(self):
-        summary = api_server_sql.ExecutionStatusSummary()
-        assert summary.total_executions == 0
-        assert summary.ended_executions == 0
-        assert summary.has_ended is False
-
-    def test_accumulate_all_ended_statuses(self):
-        """Add each ended status with 2^i count for robust uniqueness."""
-        summary = api_server_sql.ExecutionStatusSummary()
-        ended_statuses = sorted(bts.CONTAINER_STATUSES_ENDED, key=lambda s: s.value)
-        expected_total = 0
-        expected_ended = 0
-        for i, status in enumerate(ended_statuses):
-            count = 2**i
-            summary.count_execution_status(status=status, count=count)
-            expected_total += count
-            expected_ended += count
-            assert summary.total_executions == expected_total
-            assert summary.ended_executions == expected_ended
-            assert summary.has_ended is True
-
-    def test_accumulate_all_in_progress_statuses(self):
-        """Add each in-progress status with 2^i count for robust uniqueness."""
-        summary = api_server_sql.ExecutionStatusSummary()
-        in_progress_statuses = sorted(
-            set(bts.ContainerExecutionStatus) - bts.CONTAINER_STATUSES_ENDED,
-            key=lambda s: s.value,
-        )
-        expected_total = 0
-        for i, status in enumerate(in_progress_statuses):
-            count = 2**i
-            summary.count_execution_status(status=status, count=count)
-            expected_total += count
-            assert summary.total_executions == expected_total
-            assert summary.ended_executions == 0
-            assert summary.has_ended is False
-
-    def test_accumulate_all_statuses(self):
-        """Add every status with 2^i count. Summary math must be exact."""
-        summary = api_server_sql.ExecutionStatusSummary()
-        all_statuses = sorted(bts.ContainerExecutionStatus, key=lambda s: s.value)
-        expected_total = 0
-        expected_ended = 0
-        for i, status in enumerate(all_statuses):
-            count = 2**i
-            expected_total += count
-            if status in bts.CONTAINER_STATUSES_ENDED:
-                expected_ended += count
-            summary.count_execution_status(status=status, count=count)
-            assert summary.total_executions == expected_total
-            assert summary.ended_executions == expected_ended
-            assert summary.has_ended == (expected_ended == expected_total)
+from cloud_pipelines_backend.search import filter_query_sql
+from cloud_pipelines_backend.search import runs as search_runs
 
 
 def _make_task_spec(pipeline_name: str = "test-pipeline") -> structures.TaskSpec:
@@ -236,7 +182,7 @@ class TestCreatePipelineRunResponse:
         run = _create_run(session_factory, service, root_task=_make_task_spec())
         with session_factory() as session:
             db_run = session.get(bts.PipelineRun, run.id)
-            response = service._create_pipeline_run_response(
+            response = search_runs._create_pipeline_run_response(
                 session=session,
                 pipeline_run=db_run,
                 include_pipeline_names=False,
@@ -254,7 +200,7 @@ class TestCreatePipelineRunResponse:
         )
         with session_factory() as session:
             db_run = session.get(bts.PipelineRun, run.id)
-            response = service._create_pipeline_run_response(
+            response = search_runs._create_pipeline_run_response(
                 session=session,
                 pipeline_run=db_run,
                 include_pipeline_names=True,
@@ -274,7 +220,7 @@ class TestCreatePipelineRunResponse:
             session.commit()
         with session_factory() as session:
             db_run = session.get(bts.PipelineRun, run.id)
-            response = service._create_pipeline_run_response(
+            response = search_runs._create_pipeline_run_response(
                 session=session,
                 pipeline_run=db_run,
                 include_pipeline_names=True,
@@ -295,7 +241,7 @@ class TestCreatePipelineRunResponse:
             session.commit()
         with session_factory() as session:
             db_run = session.get(bts.PipelineRun, run.id)
-            response = service._create_pipeline_run_response(
+            response = search_runs._create_pipeline_run_response(
                 session=session,
                 pipeline_run=db_run,
                 include_pipeline_names=True,
@@ -307,413 +253,13 @@ class TestCreatePipelineRunResponse:
         run = _create_run(session_factory, service, root_task=_make_task_spec())
         with session_factory() as session:
             db_run = session.get(bts.PipelineRun, run.id)
-            response = service._create_pipeline_run_response(
+            response = search_runs._create_pipeline_run_response(
                 session=session,
                 pipeline_run=db_run,
                 include_pipeline_names=False,
                 include_execution_stats=True,
             )
         assert response.execution_status_stats is not None
-
-
-class TestPipelineRunServiceCreate:
-    def test_create_returns_pipeline_run(self, session_factory, service):
-        result = _create_run(
-            session_factory, service, root_task=_make_task_spec("my-pipeline")
-        )
-        assert result.id is not None
-        assert result.root_execution_id is not None
-        assert result.created_at is not None
-
-    def test_create_with_created_by(self, session_factory, service):
-        result = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1@example.com",
-        )
-        assert result.created_by == "user1@example.com"
-
-    def test_create_with_annotations(self, session_factory, service):
-        annotations = {"team": "ml-ops", "project": "search"}
-        result = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            annotations=annotations,
-        )
-        assert result.annotations == annotations
-
-    def test_create_without_created_by(self, session_factory, service):
-        result = _create_run(session_factory, service, root_task=_make_task_spec())
-        assert result.created_by is None
-
-    def test_create_mirrors_name_and_created_by(self, session_factory, service):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec("my-pipeline"),
-            created_by="alice",
-        )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
-            == "my-pipeline"
-        )
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
-            == "alice"
-        )
-
-    def test_create_mirrors_name_only(self, session_factory, service):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec("solo-pipeline"),
-        )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
-            == "solo-pipeline"
-        )
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
-            == ""
-        )
-
-    def test_create_mirrors_created_by_only(self, session_factory, service):
-        task_spec = _make_task_spec("placeholder")
-        task_spec.component_ref.spec.name = None
-        run = _create_run(
-            session_factory, service, root_task=task_spec, created_by="alice"
-        )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
-            == "alice"
-        )
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
-            == ""
-        )
-
-    def test_create_mirrors_empty_values_as_empty_string(
-        self, session_factory, service
-    ):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(""),
-            created_by="",
-        )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
-            == ""
-        )
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
-            == ""
-        )
-
-    def test_create_mirrors_absent_values_as_empty_string(
-        self, session_factory, service
-    ):
-        task_spec = _make_task_spec("placeholder")
-        task_spec.component_ref.spec.name = None
-        run = _create_run(session_factory, service, root_task=task_spec)
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
-            == ""
-        )
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
-            == ""
-        )
-
-
-class TestPipelineRunAnnotationCrud:
-    def test_system_annotations_coexist_with_user_annotations(
-        self, session_factory, service
-    ):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec("my-pipeline"),
-            created_by="alice",
-        )
-        with session_factory() as session:
-            service.set_annotation(
-                session=session,
-                id=run.id,
-                key="team",
-                value="ml-ops",
-                user_name="alice",
-            )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations["team"] == "ml-ops"
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
-            == "my-pipeline"
-        )
-        assert (
-            annotations[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
-            == "alice"
-        )
-
-    def test_set_annotation(self, session_factory, service):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-        with session_factory() as session:
-            service.set_annotation(
-                session=session,
-                id=run.id,
-                key="team",
-                value="ml-ops",
-                user_name="user1",
-            )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations["team"] == "ml-ops"
-
-    def test_set_annotation_overwrites(self, session_factory, service):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-        with session_factory() as session:
-            service.set_annotation(
-                session=session,
-                id=run.id,
-                key="team",
-                value="old-value",
-                user_name="user1",
-            )
-        with session_factory() as session:
-            service.set_annotation(
-                session=session,
-                id=run.id,
-                key="team",
-                value="new-value",
-                user_name="user1",
-            )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations["team"] == "new-value"
-
-    def test_delete_annotation(self, session_factory, service):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-        with session_factory() as session:
-            service.set_annotation(
-                session=session,
-                id=run.id,
-                key="team",
-                value="ml-ops",
-                user_name="user1",
-            )
-        with session_factory() as session:
-            service.delete_annotation(
-                session=session,
-                id=run.id,
-                key="team",
-                user_name="user1",
-            )
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert "team" not in annotations
-
-    def test_list_annotations_only_system(self, session_factory, service):
-        run = _create_run(session_factory, service, root_task=_make_task_spec())
-        with session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations == {
-            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME: "test-pipeline",
-            filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY: "",
-        }
-
-    def test_set_annotation_rejects_system_key(self, session_factory, service):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-        with session_factory() as session:
-            with pytest.raises(
-                errors.ApiValidationError, match="reserved for system use"
-            ):
-                service.set_annotation(
-                    session=session,
-                    id=run.id,
-                    key="system/pipeline_run.created_by",
-                    value="hacker",
-                    user_name="user1",
-                )
-
-    def test_delete_annotation_rejects_system_key(self, session_factory, service):
-        run = _create_run(
-            session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-        with session_factory() as session:
-            with pytest.raises(
-                errors.ApiValidationError, match="reserved for system use"
-            ):
-                service.delete_annotation(
-                    session=session,
-                    id=run.id,
-                    key="system/pipeline_run.created_by",
-                    user_name="user1",
-                )
-
-
-class TestTruncateForAnnotation:
-    """Unit tests for _truncate_for_annotation() helper."""
-
-    def test_exact_255_unchanged(self) -> None:
-        value = "a" * bts._STR_MAX_LENGTH
-        result = api_server_sql._truncate_for_annotation(
-            value=value,
-            field_name=filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
-            pipeline_run_id="run-1",
-        )
-        assert result == value
-
-    def test_256_truncated_and_logs_warning(self, caplog) -> None:
-        value = "b" * 256
-        field = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
-        with caplog.at_level("WARNING"):
-            result = api_server_sql._truncate_for_annotation(
-                value=value,
-                field_name=field,
-                pipeline_run_id="run-xyz",
-            )
-        assert result == "b" * bts._STR_MAX_LENGTH
-        assert len(caplog.records) == 1
-        msg = caplog.records[0].message
-        assert "run-xyz" in msg
-        assert str(field) in msg
-
-
-class TestAnnotationValueOverflow:
-    """Reproduction tests using mysql_varchar_limit_session_factory (SQLite TRIGGER
-    enforcement). These tests prove that >255 char values are rejected,
-    mimicking MySQL's DataError 1406.
-
-    Covers all write paths into pipeline_run_annotation:
-    - set_annotation(): long key, long value
-    - create() via _mirror_system_annotations(): long pipeline_name, long created_by
-    """
-
-    # TODO: set_annotation() currently has no truncation guard for the
-    # VARCHAR(255) limit on annotation key/value columns. These tests
-    # document the failure. Fix deferred to a separate PR to avoid
-    # convoluting the backfill + _mirror_system_annotations fix.
-
-    def test_set_annotation_long_value_raises_on_overflow(
-        self,
-        mysql_varchar_limit_session_factory: orm.sessionmaker,
-        service: api_server_sql.PipelineRunsApiService_Sql,
-    ) -> None:
-        """set_annotation() with a 300-char value overflows the
-        VARCHAR(255) column and triggers IntegrityError."""
-        run = _create_run(
-            mysql_varchar_limit_session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-        with mysql_varchar_limit_session_factory() as session:
-            with pytest.raises(
-                sqlalchemy.exc.IntegrityError, match="Data too long.*value"
-            ):
-                service.set_annotation(
-                    session=session,
-                    id=run.id,
-                    key="team",
-                    value="v" * 300,
-                    user_name="user1",
-                )
-
-    def test_set_annotation_long_key_raises_on_overflow(
-        self,
-        mysql_varchar_limit_session_factory: orm.sessionmaker,
-        service: api_server_sql.PipelineRunsApiService_Sql,
-    ) -> None:
-        """set_annotation() with a 300-char key overflows the
-        VARCHAR(255) key column and triggers IntegrityError."""
-        run = _create_run(
-            mysql_varchar_limit_session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="user1",
-        )
-        with mysql_varchar_limit_session_factory() as session:
-            with pytest.raises(
-                sqlalchemy.exc.IntegrityError, match="Data too long.*key"
-            ):
-                service.set_annotation(
-                    session=session,
-                    id=run.id,
-                    key="k" * 300,
-                    value="short",
-                    user_name="user1",
-                )
-
-    def test_create_run_long_pipeline_name_truncated(
-        self,
-        mysql_varchar_limit_session_factory: orm.sessionmaker,
-        service: api_server_sql.PipelineRunsApiService_Sql,
-    ) -> None:
-        """create() with a 300-char pipeline name is truncated to 255
-        in _mirror_system_annotations()."""
-        run = _create_run(
-            mysql_varchar_limit_session_factory,
-            service,
-            root_task=_make_task_spec("p" * 300),
-        )
-        key = filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME
-        with mysql_varchar_limit_session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations[key] == "p" * bts._STR_MAX_LENGTH
-
-    def test_create_run_long_created_by_truncated(
-        self,
-        mysql_varchar_limit_session_factory: orm.sessionmaker,
-        service: api_server_sql.PipelineRunsApiService_Sql,
-    ) -> None:
-        """create() with a 300-char created_by is truncated to 255
-        in _mirror_system_annotations()."""
-        run = _create_run(
-            mysql_varchar_limit_session_factory,
-            service,
-            root_task=_make_task_spec(),
-            created_by="u" * 300,
-        )
-        key = filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY
-        with mysql_varchar_limit_session_factory() as session:
-            annotations = service.list_annotations(session=session, id=run.id)
-        assert annotations[key] == "u" * bts._STR_MAX_LENGTH
 
 
 class TestFilterQueryApiWiring:
@@ -1579,26 +1125,32 @@ class TestFilterQueryIntegration:
 
 
 class TestGetPipelineNameFromTaskSpec:
-    """Unit tests for _get_pipeline_name_from_task_spec."""
+    """Unit tests for get_pipeline_name_from_task_spec."""
 
     def test_returns_name(self):
         """Happy path: task_spec_dict -> TaskSpec -> component_ref -> spec -> name"""
         task = _make_task_spec(pipeline_name="my-pipe")
-        result = api_server_sql._get_pipeline_name_from_task_spec(
+        from cloud_pipelines_backend.search import runs
+
+        result = runs.get_pipeline_name_from_task_spec(
             task_spec_dict=task.to_json_dict()
         )
         assert result == "my-pipe"
 
     def test_returns_none_when_spec_is_none(self):
         """task_spec_dict -> TaskSpec -> component_ref -> [spec=None]"""
-        result = api_server_sql._get_pipeline_name_from_task_spec(
+        from cloud_pipelines_backend.search import runs
+
+        result = runs.get_pipeline_name_from_task_spec(
             task_spec_dict={"component_ref": {}},
         )
         assert result is None
 
     def test_returns_none_when_name_is_none(self):
         """task_spec_dict -> ... -> spec -> [name=None]"""
-        result = api_server_sql._get_pipeline_name_from_task_spec(
+        from cloud_pipelines_backend.search import runs
+
+        result = runs.get_pipeline_name_from_task_spec(
             task_spec_dict={
                 "component_ref": {
                     "spec": {
@@ -1613,7 +1165,9 @@ class TestGetPipelineNameFromTaskSpec:
 
     def test_returns_none_when_name_is_empty(self):
         """task_spec_dict -> ... -> spec -> [name=""]"""
-        result = api_server_sql._get_pipeline_name_from_task_spec(
+        from cloud_pipelines_backend.search import runs
+
+        result = runs.get_pipeline_name_from_task_spec(
             task_spec_dict={
                 "component_ref": {
                     "spec": {
@@ -1629,7 +1183,115 @@ class TestGetPipelineNameFromTaskSpec:
 
     def test_returns_none_on_malformed_dict(self):
         """[task_spec_dict=malformed] -> from_json_dict() raises"""
-        result = api_server_sql._get_pipeline_name_from_task_spec(
-            task_spec_dict={"bad": "data"}
-        )
+        from cloud_pipelines_backend.search import runs
+
+        result = runs.get_pipeline_name_from_task_spec(task_spec_dict={"bad": "data"})
         assert result is None
+
+
+class TestCalculateExecutionStatusStats:
+    """Unit tests for search_runs._calculate_execution_status_stats."""
+
+    _MINIMAL_TASK_SPEC: dict = {
+        "componentRef": {
+            "spec": {
+                "name": "stub",
+                "implementation": {
+                    "container": {"image": "stub:latest"},
+                },
+            }
+        }
+    }
+
+    def _make_execution(
+        self,
+        session: orm.Session,
+        *,
+        root: bts.ExecutionNode,
+        status: bts.ContainerExecutionStatus | None = None,
+    ) -> bts.ExecutionNode:
+        node = bts.ExecutionNode(task_spec=self._MINIMAL_TASK_SPEC)
+        node.container_execution_status = status
+        session.add(node)
+        session.flush()
+        link = bts.ExecutionToAncestorExecutionLink(
+            ancestor_execution=root,
+            execution=node,
+        )
+        session.add(link)
+        session.flush()
+        return node
+
+    def test_empty(self, session_factory):
+        root = bts.ExecutionNode(task_spec=self._MINIMAL_TASK_SPEC)
+        with session_factory() as session:
+            session.add(root)
+            session.flush()
+            result = search_runs._calculate_execution_status_stats(
+                session=session, root_execution_id=root.id
+            )
+        assert result == {}
+
+    def test_single_status_group(self, session_factory):
+        root = bts.ExecutionNode(task_spec=self._MINIMAL_TASK_SPEC)
+        with session_factory() as session:
+            session.add(root)
+            session.flush()
+            self._make_execution(
+                session,
+                root=root,
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+            )
+            self._make_execution(
+                session,
+                root=root,
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+            )
+            result = search_runs._calculate_execution_status_stats(
+                session=session, root_execution_id=root.id
+            )
+        assert result == {bts.ContainerExecutionStatus.SUCCEEDED: 2}
+
+    def test_multiple_status_groups(self, session_factory):
+        root = bts.ExecutionNode(task_spec=self._MINIMAL_TASK_SPEC)
+        with session_factory() as session:
+            session.add(root)
+            session.flush()
+            self._make_execution(
+                session,
+                root=root,
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+            )
+            self._make_execution(
+                session,
+                root=root,
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+            )
+            self._make_execution(
+                session,
+                root=root,
+                status=bts.ContainerExecutionStatus.FAILED,
+            )
+            result = search_runs._calculate_execution_status_stats(
+                session=session, root_execution_id=root.id
+            )
+        assert result == {
+            bts.ContainerExecutionStatus.SUCCEEDED: 2,
+            bts.ContainerExecutionStatus.FAILED: 1,
+        }
+
+    def test_null_statuses_excluded(self, session_factory):
+        root = bts.ExecutionNode(task_spec=self._MINIMAL_TASK_SPEC)
+        with session_factory() as session:
+            session.add(root)
+            session.flush()
+            self._make_execution(
+                session,
+                root=root,
+                status=bts.ContainerExecutionStatus.RUNNING,
+            )
+            self._make_execution(session, root=root, status=None)
+            result = search_runs._calculate_execution_status_stats(
+                session=session, root_execution_id=root.id
+            )
+        assert result == {bts.ContainerExecutionStatus.RUNNING: 1}

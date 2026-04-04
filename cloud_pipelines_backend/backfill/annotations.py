@@ -6,8 +6,8 @@ from typing import Any
 import sqlalchemy
 from sqlalchemy import orm
 
-from . import backend_types_sql as bts
-from . import filter_query_sql
+from .. import backend_types_sql as bts
+from ..search import filter_query_sql
 
 _logger = logging.getLogger(__name__)
 

@@ -29,9 +29,9 @@ from typing import Any
 from cloud_pipelines_backend import api_server_sql
 from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
-from cloud_pipelines_backend import database_migrations
+from cloud_pipelines_backend.backfill import annotations as database_migrations
 from cloud_pipelines_backend import database_ops
-from cloud_pipelines_backend import filter_query_sql
+from cloud_pipelines_backend.search import filter_query_sql
 
 
 def _make_task_spec(

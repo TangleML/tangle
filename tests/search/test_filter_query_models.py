@@ -1,7 +1,7 @@
 import pydantic
 import pytest
 
-from cloud_pipelines_backend import filter_query_models
+from cloud_pipelines_backend.search import filter_query_models
 
 
 class TestFilterQuery:
