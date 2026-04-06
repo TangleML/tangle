@@ -511,10 +511,14 @@ def _setup_routes_internal(
         )
     )
     router.delete("/api/users/me/settings", tags=["user_settings"], **default_config)(
-        inject_session_dependency(
-            inject_user_name(
-                user_settings_service.delete_settings, parameter_name="user_id"
-            )
+        add_parameter_annotation_metadata(
+            inject_session_dependency(
+                inject_user_name(
+                    user_settings_service.delete_settings, parameter_name="user_id"
+                )
+            ),
+            parameter_name="setting_names",
+            annotation_metadata=fastapi.Query(),
         )
     )
     # endregion
