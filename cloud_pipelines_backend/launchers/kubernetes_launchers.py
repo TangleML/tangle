@@ -1366,7 +1366,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         ended_condition_times = [
             condition.last_transition_time
             for condition in job_status.conditions or []
-            if condition.type in ("Succeeded", "Failed") and condition.status == "True"
+            if condition.type in ("Complete", "Failed") and condition.status == "True"
         ]
         if not ended_condition_times:
             return None

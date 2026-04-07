@@ -173,6 +173,7 @@ class OrchestratorService_Sql:
                     running_container_execution.status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
                     )
+                    running_container_execution.ended_at = _get_current_time()
                     # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
                     session.commit()
 
