@@ -1,5 +1,6 @@
 import datetime
 import json
+from collections.abc import Callable
 
 import pytest
 import sqlalchemy
@@ -1633,3 +1634,109 @@ class TestGetPipelineNameFromTaskSpec:
             task_spec_dict={"bad": "data"}
         )
         assert result is None
+
+
+def _initialize_db_and_get_session_factory() -> Callable[[], orm.Session]:
+    db_engine = database_ops.create_db_engine_and_migrate_db(database_uri="sqlite://")
+    return lambda: orm.Session(bind=db_engine)
+
+
+def _create_execution_node(
+    *,
+    session: orm.Session,
+    task_spec: dict | None = None,
+    status: bts.ContainerExecutionStatus | None = None,
+    parent: bts.ExecutionNode | None = None,
+) -> bts.ExecutionNode:
+    """Helper to create an ExecutionNode with optional status and parent."""
+    node = bts.ExecutionNode(task_spec=task_spec or {})
+    if parent is not None:
+        node.parent_execution = parent
+    if status is not None:
+        node.container_execution_status = status
+    session.add(node)
+    session.flush()
+    return node
+
+
+def _link_ancestor(
+    *,
+    session: orm.Session,
+    execution_node: bts.ExecutionNode,
+    ancestor_node: bts.ExecutionNode,
+) -> None:
+    """Create an ExecutionToAncestorExecutionLink."""
+    link = bts.ExecutionToAncestorExecutionLink(
+        ancestor_execution=ancestor_node,
+        execution=execution_node,
+    )
+    session.add(link)
+    session.flush()
+
+
+def _create_pipeline_run(
+    *,
+    session: orm.Session,
+    root_execution: bts.ExecutionNode,
+) -> bts.PipelineRun:
+    """Helper to create a PipelineRun linked to a root execution node."""
+    run = bts.PipelineRun(root_execution=root_execution)
+    session.add(run)
+    session.flush()
+    return run
+
+
+class TestPipelineRunServiceList:
+    def test_list_empty(self) -> None:
+        session_factory = _initialize_db_and_get_session_factory()
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        with session_factory() as session:
+            result = service.list(session=session)
+            assert result.pipeline_runs == []
+            assert result.next_page_token is None
+
+    def test_list_returns_pipeline_runs(self) -> None:
+        session_factory = _initialize_db_and_get_session_factory()
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        with session_factory() as session:
+            root = _create_execution_node(session=session)
+            root_id = root.id
+            _create_pipeline_run(session=session, root_execution=root)
+            session.commit()
+
+        with session_factory() as session:
+            result = service.list(session=session)
+            assert len(result.pipeline_runs) == 1
+            assert result.pipeline_runs[0].root_execution_id == root_id
+            assert result.pipeline_runs[0].created_by is None
+            assert result.pipeline_runs[0].execution_status_stats is None
+
+    def test_list_with_execution_stats(self) -> None:
+        session_factory = _initialize_db_and_get_session_factory()
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        with session_factory() as session:
+            root = _create_execution_node(session=session)
+            root_id = root.id
+            child1 = _create_execution_node(
+                session=session,
+                parent=root,
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+            )
+            child2 = _create_execution_node(
+                session=session,
+                parent=root,
+                status=bts.ContainerExecutionStatus.RUNNING,
+            )
+            _link_ancestor(session=session, execution_node=child1, ancestor_node=root)
+            _link_ancestor(session=session, execution_node=child2, ancestor_node=root)
+            _create_pipeline_run(session=session, root_execution=root)
+            session.commit()
+
+        with session_factory() as session:
+            result = service.list(session=session, include_execution_stats=True)
+            assert len(result.pipeline_runs) == 1
+            assert result.pipeline_runs[0].root_execution_id == root_id
+            stats = result.pipeline_runs[0].execution_status_stats
+            assert stats is not None
+            assert stats["SUCCEEDED"] == 1
+            assert stats["RUNNING"] == 1
