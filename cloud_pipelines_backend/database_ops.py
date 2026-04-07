@@ -108,6 +108,11 @@ def migrate_db(
         _logger.info("Skipping annotation backfills")
     else:
         with orm.Session(db_engine) as session:
+            # Set transaction isolation level to be SERIALIZABLE so a transaction error
+            # will be thrown if multiple backfills are happening at the same time.
+            session.connection(
+                execution_options={"isolation_level": "SERIALIZABLE"},
+            )
             database_migrations.run_all_annotation_backfills(
                 session=session,
             )
