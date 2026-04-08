@@ -7,6 +7,7 @@ from sqlalchemy import orm
 
 from cloud_pipelines_backend import api_server_sql
 from cloud_pipelines_backend import backend_types_sql as bts
+from cloud_pipelines_backend import container_statuses
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import errors
@@ -23,7 +24,7 @@ class TestExecutionStatusSummary:
     def test_accumulate_all_ended_statuses(self):
         """Add each ended status with 2^i count for robust uniqueness."""
         summary = api_server_sql.ExecutionStatusSummary()
-        ended_statuses = sorted(bts.CONTAINER_STATUSES_ENDED, key=lambda s: s.value)
+        ended_statuses = sorted(container_statuses.CONTAINER_STATUSES_ENDED, key=lambda s: s.value)
         expected_total = 0
         expected_ended = 0
         for i, status in enumerate(ended_statuses):
@@ -39,7 +40,7 @@ class TestExecutionStatusSummary:
         """Add each in-progress status with 2^i count for robust uniqueness."""
         summary = api_server_sql.ExecutionStatusSummary()
         in_progress_statuses = sorted(
-            set(bts.ContainerExecutionStatus) - bts.CONTAINER_STATUSES_ENDED,
+            set(container_statuses.ContainerExecutionStatus) - container_statuses.CONTAINER_STATUSES_ENDED,
             key=lambda s: s.value,
         )
         expected_total = 0
@@ -54,13 +55,13 @@ class TestExecutionStatusSummary:
     def test_accumulate_all_statuses(self):
         """Add every status with 2^i count. Summary math must be exact."""
         summary = api_server_sql.ExecutionStatusSummary()
-        all_statuses = sorted(bts.ContainerExecutionStatus, key=lambda s: s.value)
+        all_statuses = sorted(container_statuses.ContainerExecutionStatus, key=lambda s: s.value)
         expected_total = 0
         expected_ended = 0
         for i, status in enumerate(all_statuses):
             count = 2**i
             expected_total += count
-            if status in bts.CONTAINER_STATUSES_ENDED:
+            if status in container_statuses.CONTAINER_STATUSES_ENDED:
                 expected_ended += count
             summary.count_execution_status(status=status, count=count)
             assert summary.total_executions == expected_total

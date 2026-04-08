@@ -1,6 +1,5 @@
 import dataclasses
 import datetime
-import enum
 import typing
 from typing import Any, Final
 
@@ -8,39 +7,9 @@ import sqlalchemy as sql
 from sqlalchemy import orm
 from sqlalchemy.ext import mutable
 
+from . import container_statuses
+
 IdType: typing.TypeAlias = str
-
-
-class ContainerExecutionStatus(str, enum.Enum):
-    INVALID = "INVALID"  # Compatibility with Vertex AI CustomJob
-    UNINITIALIZED = "UNINITIALIZED"  # Remove
-    QUEUED = "QUEUED"  # Before WAITING_FOR_UPSTREAM or STARTING
-    # READY_TO_START = "READY_TO_START"  # Input artifacts ready, but no job ID
-    WAITING_FOR_UPSTREAM = "WAITING_FOR_UPSTREAM"
-    # STARTING = "STARTING"
-    PENDING = "PENDING"  # == Starting
-    RUNNING = "RUNNING"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    # UPSTREAM_FAILED = "UPSTREAM_FAILED"
-    # CONDITIONALLY_SKIPPED = "CONDITIONALLY_SKIPPED"
-    SYSTEM_ERROR = "SYSTEM_ERROR"
-
-    # new
-    CANCELLING = "CANCELLING"
-    CANCELLED = "CANCELLED"
-    # UPSTREAM_FAILED_OR_SKIPPED = "UPSTREAM_FAILED_OR_SKIPPED"
-    SKIPPED = "SKIPPED"
-
-
-CONTAINER_STATUSES_ENDED = {
-    ContainerExecutionStatus.INVALID,
-    ContainerExecutionStatus.SUCCEEDED,
-    ContainerExecutionStatus.FAILED,
-    ContainerExecutionStatus.SYSTEM_ERROR,
-    ContainerExecutionStatus.CANCELLED,
-    ContainerExecutionStatus.SKIPPED,
-}
 
 
 def generate_unique_id() -> str:
@@ -64,7 +33,7 @@ id_column = orm.mapped_column(
 
 # # Needed to put a union type into DB
 # class SqlIOTypeStruct(_BaseModel):
-#     type: structures.TypeSpecType
+# type: structures.TypeSpecType
 # No. We'll represent TypeSpecType as name:str + properties:dict
 # Supported cases:
 # * type: "name"
@@ -385,7 +354,7 @@ class ExecutionNode(_TableBase):
         default=None, repr=False, back_populates="execution_nodes"
     )
     # TODO: Do we need this? It's denormalized.
-    container_execution_status: orm.Mapped[ContainerExecutionStatus | None] = (
+    container_execution_status: orm.Mapped[container_statuses.ContainerExecutionStatus | None] = (
         orm.mapped_column(default=None, index=True)
     )
     container_execution_cache_key: orm.Mapped[str | None] = orm.mapped_column(
@@ -459,7 +428,7 @@ class ContainerExecution(_TableBase):
         primary_key=True, init=False, insert_default=generate_unique_id
     )
     # task_spec: orm.Mapped[dict[str, Any]]
-    status: orm.Mapped[ContainerExecutionStatus] = orm.mapped_column(index=True)
+    status: orm.Mapped[container_statuses.ContainerExecutionStatus] = orm.mapped_column(index=True)
     last_processed_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
         default=None
     )

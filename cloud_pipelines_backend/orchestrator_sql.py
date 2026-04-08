@@ -18,6 +18,7 @@ from cloud_pipelines.orchestration.launchers import naming_utils
 
 from . import backend_types_sql as bts
 from . import component_structures as structures
+from . import container_statuses
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import contextual_logging
@@ -85,8 +86,8 @@ class OrchestratorService_Sql:
             sql.select(bts.ExecutionNode).where(
                 bts.ExecutionNode.container_execution_status.in_(
                     (
-                        bts.ContainerExecutionStatus.UNINITIALIZED,
-                        bts.ContainerExecutionStatus.QUEUED,
+                        container_statuses.ContainerExecutionStatus.UNINITIALIZED,
+                        container_statuses.ContainerExecutionStatus.QUEUED,
                     )
                 )
             )
@@ -110,7 +111,7 @@ class OrchestratorService_Sql:
                     _logger.exception("Error processing queued execution")
                     session.rollback()
                     queued_execution.container_execution_status = (
-                        bts.ContainerExecutionStatus.SYSTEM_ERROR
+                        container_statuses.ContainerExecutionStatus.SYSTEM_ERROR
                     )
                     record_system_error_exception(
                         execution=queued_execution, exception=ex
@@ -135,8 +136,8 @@ class OrchestratorService_Sql:
             .where(
                 bts.ContainerExecution.status.in_(
                     (
-                        bts.ContainerExecutionStatus.PENDING,
-                        bts.ContainerExecutionStatus.RUNNING,
+                        container_statuses.ContainerExecutionStatus.PENDING,
+                        container_statuses.ContainerExecutionStatus.RUNNING,
                     )
                 )
             )
@@ -171,7 +172,7 @@ class OrchestratorService_Sql:
                     _logger.exception("Error processing running container execution")
                     session.rollback()
                     running_container_execution.status = (
-                        bts.ContainerExecutionStatus.SYSTEM_ERROR
+                        container_statuses.ContainerExecutionStatus.SYSTEM_ERROR
                     )
                     # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
                     session.commit()
@@ -180,7 +181,7 @@ class OrchestratorService_Sql:
                     execution_nodes = running_container_execution.execution_nodes
                     for execution_node in execution_nodes:
                         execution_node.container_execution_status = (
-                            bts.ContainerExecutionStatus.SYSTEM_ERROR
+                            container_statuses.ContainerExecutionStatus.SYSTEM_ERROR
                         )
                         record_system_error_exception(
                             execution=execution_node, exception=ex
@@ -240,7 +241,7 @@ class OrchestratorService_Sql:
                 f"Execution did not have all input artifact data present. Waiting for upstream. {execution.id=}"
             )
             execution.container_execution_status = (
-                bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+                container_statuses.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
             )
             session.commit()
             return
@@ -280,10 +281,10 @@ class OrchestratorService_Sql:
                             # We can reuse both succeeded executions and also non yet finished ones.
                             # Reusing still running executions is important since it allows cache reuse
                             # when multiple versions of a pipeline are submitted in parallel.
-                            # bts.ContainerExecutionStatus.STARTING,  # Doesn't exist yet
-                            bts.ContainerExecutionStatus.PENDING,
-                            bts.ContainerExecutionStatus.RUNNING,
-                            bts.ContainerExecutionStatus.SUCCEEDED,
+                            # container_statuses.ContainerExecutionStatus.STARTING,  # Doesn't exist yet
+                            container_statuses.ContainerExecutionStatus.PENDING,
+                            container_statuses.ContainerExecutionStatus.RUNNING,
+                            container_statuses.ContainerExecutionStatus.SUCCEEDED,
                         ]
                     )
                 )
@@ -339,7 +340,7 @@ class OrchestratorService_Sql:
             # However if the container execution has already ended, we need to copy the outputs ourselves.
             if (
                 old_execution.container_execution_status
-                == bts.ContainerExecutionStatus.SUCCEEDED
+                == container_statuses.ContainerExecutionStatus.SUCCEEDED
             ):
                 # Copying the output artifact data (if the execution already succeeded).
                 reused_execution_output_artifact_data_ids = {
@@ -371,10 +372,10 @@ class OrchestratorService_Sql:
                 ):
                     if (
                         downstream_execution.container_execution_status
-                        == bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+                        == container_statuses.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
                     ):
                         downstream_execution.container_execution_status = (
-                            bts.ContainerExecutionStatus.QUEUED
+                            container_statuses.ContainerExecutionStatus.QUEUED
                         )
             session.commit()
             return
@@ -411,7 +412,7 @@ class OrchestratorService_Sql:
                 f"Cancelling execution {execution.id} and skipping all downstream executions."
             )
             execution.container_execution_status = (
-                bts.ContainerExecutionStatus.CANCELLED
+                container_statuses.ContainerExecutionStatus.CANCELLED
             )
             _mark_all_downstream_executions_as_skipped(
                 session=session, execution=execution
@@ -584,7 +585,7 @@ class OrchestratorService_Sql:
                 # Logs whole exception
                 _logger.exception(f"Error launching container for {execution.id=}")
                 execution.container_execution_status = (
-                    bts.ContainerExecutionStatus.SYSTEM_ERROR
+                    container_statuses.ContainerExecutionStatus.SYSTEM_ERROR
                 )
                 record_system_error_exception(execution=execution, exception=ex)
                 _mark_all_downstream_executions_as_skipped(
@@ -595,7 +596,7 @@ class OrchestratorService_Sql:
         current_time = _get_current_time()
 
         container_execution = bts.ContainerExecution(
-            status=bts.ContainerExecutionStatus(launched_container.status),
+            status=container_statuses.ContainerExecutionStatus(launched_container.status),
             last_processed_at=current_time,
             created_at=current_time,
             launcher_data=launched_container.to_dict(),
@@ -646,8 +647,8 @@ class OrchestratorService_Sql:
         )
         previous_status = launched_container.status
         if previous_status not in (
-            bts.ContainerExecutionStatus.PENDING,
-            bts.ContainerExecutionStatus.RUNNING,
+            container_statuses.ContainerExecutionStatus.PENDING,
+            container_statuses.ContainerExecutionStatus.RUNNING,
         ):
             raise OrchestratorError(
                 f"Unexpected running container status: {previous_status=}, {launched_container=}"
@@ -686,7 +687,7 @@ class OrchestratorService_Sql:
                 launched_container.terminate()
                 container_execution.ended_at = _get_current_time()
                 # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
-                container_execution.status = bts.ContainerExecutionStatus.CANCELLED
+                container_execution.status = container_statuses.ContainerExecutionStatus.CANCELLED
                 terminated = True
 
             # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
@@ -695,7 +696,7 @@ class OrchestratorService_Sql:
                     f"Cancelling execution {execution_node.id} and skipping all downstream executions."
                 )
                 execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.CANCELLED
+                    container_statuses.ContainerExecutionStatus.CANCELLED
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
@@ -739,14 +740,14 @@ class OrchestratorService_Sql:
             )
 
         if new_status == launcher_interfaces.ContainerStatus.RUNNING:
-            container_execution.status = bts.ContainerExecutionStatus.RUNNING
+            container_execution.status = container_statuses.ContainerExecutionStatus.RUNNING
             container_execution.started_at = reloaded_launched_container.started_at
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.RUNNING
+                    container_statuses.ContainerExecutionStatus.RUNNING
                 )
         elif new_status == launcher_interfaces.ContainerStatus.SUCCEEDED:
-            container_execution.status = bts.ContainerExecutionStatus.SUCCEEDED
+            container_execution.status = container_statuses.ContainerExecutionStatus.SUCCEEDED
             container_execution.exit_code = reloaded_launched_container.exit_code
             container_execution.started_at = reloaded_launched_container.started_at
             container_execution.ended_at = reloaded_launched_container.ended_at
@@ -803,7 +804,7 @@ class OrchestratorService_Sql:
 
             if missing_output_names:
                 # Marking the container execution as FAILED (even though the program itself has completed successfully)
-                container_execution.status = bts.ContainerExecutionStatus.FAILED
+                container_execution.status = container_statuses.ContainerExecutionStatus.FAILED
                 orchestration_error_message = f"Container execution is marked as FAILED due to missing outputs: {missing_output_names}."
                 _logger.error(orchestration_error_message)
                 _record_orchestration_error_message(
@@ -814,7 +815,7 @@ class OrchestratorService_Sql:
                 # Skip downstream executions
                 for execution_node in execution_nodes:
                     execution_node.container_execution_status = (
-                        bts.ContainerExecutionStatus.FAILED
+                        container_statuses.ContainerExecutionStatus.FAILED
                     )
                     _mark_all_downstream_executions_as_skipped(
                         session=session, execution=execution_node
@@ -856,7 +857,7 @@ class OrchestratorService_Sql:
                 session.add_all(new_output_artifact_data_map.values())
                 for execution_node in execution_nodes:
                     execution_node.container_execution_status = (
-                        bts.ContainerExecutionStatus.SUCCEEDED
+                        container_statuses.ContainerExecutionStatus.SUCCEEDED
                     )
                     # TODO: Optimize
                     for output_name, artifact_node in session.execute(
@@ -875,13 +876,13 @@ class OrchestratorService_Sql:
                     ):
                         if (
                             downstream_execution.container_execution_status
-                            == bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+                            == container_statuses.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
                         ):
                             downstream_execution.container_execution_status = (
-                                bts.ContainerExecutionStatus.QUEUED
+                                container_statuses.ContainerExecutionStatus.QUEUED
                             )
         elif new_status == launcher_interfaces.ContainerStatus.FAILED:
-            container_execution.status = bts.ContainerExecutionStatus.FAILED
+            container_execution.status = container_statuses.ContainerExecutionStatus.FAILED
             container_execution.exit_code = reloaded_launched_container.exit_code
             container_execution.started_at = reloaded_launched_container.started_at
             container_execution.ended_at = reloaded_launched_container.ended_at
@@ -898,7 +899,7 @@ class OrchestratorService_Sql:
             # Skip downstream executions
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.FAILED
+                    container_statuses.ContainerExecutionStatus.FAILED
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
@@ -906,7 +907,7 @@ class OrchestratorService_Sql:
         elif new_status == launcher_interfaces.ContainerStatus.PENDING:
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.PENDING
+                    container_statuses.ContainerExecutionStatus.PENDING
                 )
             # ? Should we reset `started_at` or keep it?
             container_execution.started_at = None
@@ -949,11 +950,11 @@ def _mark_all_downstream_executions_as_skipped(
         return
     seen_execution_ids.add(execution.id)
     if execution.container_execution_status in {
-        bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+        container_statuses.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
         # A downstream ExecutionNode can be in "Queued" state when it's been "woken up" by one of its upstreams.
-        bts.ContainerExecutionStatus.QUEUED,
+        container_statuses.ContainerExecutionStatus.QUEUED,
     }:
-        execution.container_execution_status = bts.ContainerExecutionStatus.SKIPPED
+        execution.container_execution_status = container_statuses.ContainerExecutionStatus.SKIPPED
 
     # for artifact_node in execution.output_artifact_nodes:
     #     for downstream_execution in artifact_node.downstream_executions:
