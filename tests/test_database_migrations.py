@@ -1929,3 +1929,99 @@ class TestMigrateDbBackfillFlag:
             _count_annotations(session_factory=session_factory, key=pipeline_name_key)
             == 0
         )
+
+
+# ---------------------------------------------------------------------------
+# secret_value column migration
+# ---------------------------------------------------------------------------
+
+
+def _create_secret_table_varchar(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> None:
+    """Create the secret table with VARCHAR(255) for secret_value."""
+    with db_engine.connect() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "CREATE TABLE secret ("
+                "  user_id VARCHAR(255) NOT NULL,"
+                "  secret_name VARCHAR(255) NOT NULL,"
+                "  secret_value VARCHAR(255) NOT NULL,"
+                "  created_at DATETIME NOT NULL,"
+                "  updated_at DATETIME NOT NULL,"
+                "  expires_at DATETIME,"
+                "  PRIMARY KEY (user_id, secret_name)"
+                ")"
+            )
+        )
+        conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO secret"
+                " (user_id, secret_name, secret_value, created_at, updated_at)"
+                " VALUES ('u1', 'key1', 'my-secret-value',"
+                " '2025-01-01', '2025-01-01')"
+            )
+        )
+        conn.commit()
+
+
+def _get_secret_value_column_type(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> sqlalchemy.types.TypeEngine:
+    """Return the SQLAlchemy type of secret.secret_value from the DB."""
+    inspector = sqlalchemy.inspect(db_engine)
+    columns = {c["name"]: c for c in inspector.get_columns("secret")}
+    return columns["secret_value"]["type"]
+
+
+def test_migrate_secret_value_column(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Migration widens secret_value from VARCHAR to TEXT and preserves data."""
+    db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+    _create_secret_table_varchar(db_engine=db_engine)
+
+    col_type_before = _get_secret_value_column_type(db_engine=db_engine)
+    assert isinstance(col_type_before, sqlalchemy.types.VARCHAR)
+
+    with caplog.at_level(logging.INFO):
+        database_migrations.migrate_secret_value_column(db_engine=db_engine)
+
+    col_type_after = _get_secret_value_column_type(db_engine=db_engine)
+    assert isinstance(col_type_after, sqlalchemy.types.TEXT)
+
+    with db_engine.connect() as conn:
+        row = conn.execute(
+            sqlalchemy.text(
+                "SELECT secret_value FROM secret"
+                " WHERE user_id = 'u1' AND secret_name = 'key1'"
+            )
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "my-secret-value"
+    assert "migrate column to TEXT: complete" in caplog.messages
+
+
+def test_migrate_secret_value_column_idempotent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Second call is a no-op when secret_value is already TEXT."""
+    db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+    _create_secret_table_varchar(db_engine=db_engine)
+
+    with caplog.at_level(logging.INFO):
+        database_migrations.migrate_secret_value_column(db_engine=db_engine)
+        database_migrations.migrate_secret_value_column(db_engine=db_engine)
+
+    col_type_after = _get_secret_value_column_type(db_engine=db_engine)
+    assert isinstance(col_type_after, sqlalchemy.types.TEXT)
+
+    our_msgs = [
+        m
+        for m in caplog.messages
+        if m.startswith("migrate column to TEXT:")
+    ]
+    assert our_msgs[-2] == "migrate column to TEXT: complete"
+    assert our_msgs[-1] == "migrate column to TEXT: skipped (already TEXT)"

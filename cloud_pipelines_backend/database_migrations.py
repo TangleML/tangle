@@ -3,6 +3,8 @@ import enum
 import logging
 from typing import Any
 
+from alembic import migration as alembic_migration
+from alembic import operations as alembic_operations
 import sqlalchemy
 from sqlalchemy import orm
 
@@ -722,3 +724,72 @@ def run_all_annotation_backfills(
 
     _logger.info("Exit backfill for annotations table")
     return result
+
+
+def migrate_secret_value_column(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> None:
+    """Widen secret.secret_value to TEXT.
+
+    Idempotent: inspects the actual DB column and skips if already TEXT.
+
+    Uses Alembic's batch_alter_table so that one code path covers every
+    dialect: MySQL (MODIFY COLUMN), PostgreSQL (ALTER COLUMN … TYPE), and
+    SQLite (transparent table-recreation).
+    """
+    table = bts.Secret.__table__
+    column = table.c.secret_value
+    type_sql = column.type.compile(dialect=db_engine.dialect)
+
+    inspector = sqlalchemy.inspect(db_engine)
+    db_columns = {c["name"]: c for c in inspector.get_columns(table.name)}
+    curr_col_type = db_columns[column.name]["type"]
+    dialect = db_engine.dialect.name
+
+    if isinstance(curr_col_type, sqlalchemy.types.Text):
+        _logger.info(f"migrate column to TEXT: skipped (already TEXT)")
+        return
+
+    current_length = curr_col_type.length if isinstance(curr_col_type.length, int) else 0
+
+    _logger.info(
+        f"migrate column to TEXT: {table.name}.{column.name}"
+        f" — current_type={curr_col_type}, current_length={current_length},"
+        f" target_type={type_sql}, dialect={dialect}"
+    )
+
+    try:
+        with db_engine.connect() as conn:
+            ctx = alembic_migration.MigrationContext.configure(conn)
+            op = alembic_operations.Operations(ctx)
+            # batch_alter_table handles dialect differences automatically:
+            # - MySQL: emits ALTER TABLE ... MODIFY COLUMN
+            # - PostgreSQL: emits ALTER TABLE ... ALTER COLUMN ... TYPE
+            # - SQLite: recreates the table (create new, copy data, drop old, rename)
+            with op.batch_alter_table(table.name) as batch_op:
+                batch_op.alter_column(
+                    column.name,
+                    type_=column.type,
+                    # existing_* params tell Alembic the column's current attributes.
+                    # MySQL requires these because MODIFY COLUMN needs the full column
+                    # spec — without them, MySQL may silently reset nullability or drop
+                    # the server default. Other dialects safely ignore these params.
+                    #
+                    # existing_type: the column's current DB type (inspected at runtime).
+                    # existing_nullable: False = column is NOT NULL (cannot contain
+                    #   NULL values)
+                    # existing_server_default: None = column has no server-side default;
+                    #   explicit None tells MySQL "don't add a default".
+                    existing_type=curr_col_type,
+                    existing_nullable=False,
+                    existing_server_default=None,
+                )
+            conn.commit()
+        _logger.info("migrate column to TEXT: complete")
+    except Exception:
+        _logger.exception(
+            f"migrate column to TEXT failed: table={table.name},"
+            f" column={column.name}, current_type={curr_col_type},"
+            f" target_type={type_sql}, dialect={dialect}"
+        )
