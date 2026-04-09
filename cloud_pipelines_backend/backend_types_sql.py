@@ -327,8 +327,6 @@ class ExecutionNode(_TableBase):
         repr=False,
     )
 
-    # updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
-
     # execution_kind = orm.Mapped[typing.Literal["CONTAINER", "GRAPH"]]
 
     # Graph nodes only
@@ -393,7 +391,75 @@ class ExecutionNode(_TableBase):
         repr=False,
     )
 
+    def stage_status_history_entry(
+        self,
+        *,
+        value: container_statuses.ContainerExecutionStatus,
+    ) -> None:
+        """Stage a status-history entry to be applied at flush time."""
+        entry = {
+            "status": value.value,
+            "first_observed_at": datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        }
+        pending: dict[str, list] = getattr(self, "_pending_extra_data", None) or {}
+        pending[EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY] = pending.get(
+            EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY, []
+        ) + [entry]
+        self._pending_extra_data = pending
 
+    def apply_status_history_entries(self) -> None:
+        """Apply pending status-history entries to extra_data and emit transition events."""
+        pending: dict[str, list] | None = getattr(self, "_pending_extra_data", None)
+        if not pending:
+            return
+        entries = pending.get(EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY, [])
+        if not entries:
+            return
+        if self.extra_data is None:
+            self.extra_data = {}
+        existing: list = self.extra_data.get(
+            EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY, []
+        )
+        self._emit_status_transition_events(
+            existing_history=existing,
+            pending_entries=entries,
+        )
+        self.extra_data[EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY] = (
+            existing + entries
+        )
+        self._pending_extra_data = None
+
+    def handle_before_flush(self) -> None:
+        """Handle the SQLAlchemy before_flush event for this ExecutionNode."""
+        self.apply_status_history_entries()
+
+    def _emit_status_transition_events(
+        self,
+        *,
+        existing_history: list[dict],
+        pending_entries: list[dict],
+    ) -> None:
+        from . import event_listeners
+
+        for entry in pending_entries:
+            if existing_history:
+                prev = existing_history[-1]
+                prev_time = datetime.datetime.fromisoformat(prev["first_observed_at"])
+                curr_time = datetime.datetime.fromisoformat(entry["first_observed_at"])
+                event_listeners.emit(
+                    event=event_listeners.StatusTransitionEvent(
+                        from_status=container_statuses.ContainerExecutionStatus(prev["status"]),
+                        to_status=container_statuses.ContainerExecutionStatus(entry["status"]),
+                        duration_seconds=(curr_time - prev_time).total_seconds(),
+                    ),
+                )
+            existing_history = existing_history + [entry]
+
+
+
+EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY = "container_execution_status_history"
 EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY = (
     "system_error_exception_message"
 )

@@ -76,6 +76,10 @@ def setup(
         )
         otel_metrics.set_meter_provider(meter_provider)
 
+        from .. import metrics as app_metrics
+
+        app_metrics.register_listener()
+
         _logger.info("OpenTelemetry metrics configured successfully.")
     except Exception as e:
         _logger.exception("Failed to configure OpenTelemetry metrics")

@@ -2,12 +2,21 @@ import dataclasses
 import threading
 import typing
 
+from . import container_statuses
+
 _CallbackEntry: typing.TypeAlias = tuple[typing.Callable[..., None], bool]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Event:
     """Marker base class for all event types."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class StatusTransitionEvent(Event):
+    from_status: container_statuses.ContainerExecutionStatus
+    to_status: container_statuses.ContainerExecutionStatus
+    duration_seconds: float
 
 
 _EventType = typing.TypeVar("_EventType", bound=Event)
