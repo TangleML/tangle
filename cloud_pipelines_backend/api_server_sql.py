@@ -9,6 +9,7 @@ from sqlalchemy import orm
 
 from . import backend_types_sql as bts
 from . import component_structures as structures
+from . import container_statuses
 from . import errors
 from . import filter_query_sql
 
@@ -183,10 +184,10 @@ class PipelineRunsApiService_Sql:
             for execution_node in pipeline_run.root_execution.descendants
             if execution_node.container_execution_status
             in (
-                bts.ContainerExecutionStatus.QUEUED,
-                bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
-                bts.ContainerExecutionStatus.PENDING,
-                bts.ContainerExecutionStatus.RUNNING,
+                container_statuses.ContainerExecutionStatus.QUEUED,
+                container_statuses.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+                container_statuses.ContainerExecutionStatus.PENDING,
+                container_statuses.ContainerExecutionStatus.RUNNING,
             )
         ]
         for execution_node in running_execution_nodes:
@@ -276,7 +277,7 @@ class PipelineRunsApiService_Sql:
 
     def _calculate_execution_status_stats(
         self, session: orm.Session, root_execution_id: bts.IdType
-    ) -> dict[bts.ContainerExecutionStatus, int]:
+    ) -> dict[container_statuses.ContainerExecutionStatus, int]:
         query = (
             sql.select(
                 bts.ExecutionNode.container_execution_status,
@@ -476,10 +477,10 @@ class ExecutionStatusSummary:
     has_ended: bool = False
 
     def count_execution_status(
-        self, *, status: bts.ContainerExecutionStatus, count: int
+        self, *, status: container_statuses.ContainerExecutionStatus, count: int
     ) -> None:
         self.total_executions += count
-        if status in bts.CONTAINER_STATUSES_ENDED:
+        if status in container_statuses.CONTAINER_STATUSES_ENDED:
             self.ended_executions += count
 
         self.has_ended = self.ended_executions == self.total_executions
@@ -505,7 +506,7 @@ class ExecutionNodeReference:
 
 @dataclasses.dataclass
 class GetContainerExecutionStateResponse:
-    status: bts.ContainerExecutionStatus
+    status: container_statuses.ContainerExecutionStatus
     exit_code: int | None = None
     started_at: datetime.datetime | None = None
     ended_at: datetime.datetime | None = None
@@ -810,7 +811,7 @@ class ExecutionNodesApiService_Sql:
         if not container_execution:
             if (
                 execution.container_execution_status
-                == bts.ContainerExecutionStatus.SYSTEM_ERROR
+                == container_statuses.ContainerExecutionStatus.SYSTEM_ERROR
             ):
                 return GetContainerExecutionLogResponse(
                     system_error_exception_full=system_error_exception_full,
@@ -821,10 +822,10 @@ class ExecutionNodesApiService_Sql:
             )
         log_text: str | None = None
         if container_execution.status in (
-            bts.ContainerExecutionStatus.SUCCEEDED,
-            bts.ContainerExecutionStatus.FAILED,
-            bts.ContainerExecutionStatus.SYSTEM_ERROR,
-            bts.ContainerExecutionStatus.CANCELLED,
+            container_statuses.ContainerExecutionStatus.SUCCEEDED,
+            container_statuses.ContainerExecutionStatus.FAILED,
+            container_statuses.ContainerExecutionStatus.SYSTEM_ERROR,
+            container_statuses.ContainerExecutionStatus.CANCELLED,
         ):
             try:
                 # Returning completed log
@@ -848,10 +849,10 @@ class ExecutionNodesApiService_Sql:
                 # We want to return the system error exception.
                 if (
                     container_execution.status
-                    != bts.ContainerExecutionStatus.SYSTEM_ERROR
+                    != container_statuses.ContainerExecutionStatus.SYSTEM_ERROR
                 ):
                     raise
-        elif container_execution.status == bts.ContainerExecutionStatus.RUNNING:
+        elif container_execution.status == container_statuses.ContainerExecutionStatus.RUNNING:
             if not container_launcher:
                 raise ApiServiceError(
                     "Reading log of an unfinished container requires `container_launcher`."
@@ -894,7 +895,7 @@ class ExecutionNodesApiService_Sql:
             raise ApiServiceError(
                 "Execution does not have container launcher information."
             )
-        if container_execution.status == bts.ContainerExecutionStatus.RUNNING:
+        if container_execution.status == container_statuses.ContainerExecutionStatus.RUNNING:
             launched_container = (
                 container_launcher.deserialize_launched_container_from_dict(
                     container_execution.launcher_data
@@ -1567,13 +1568,13 @@ def _recursively_create_all_executions_and_artifacts(
         # root_execution_node.container_execution_id = container_execution_node.id
         # Done: Maybe set WAITING_FOR_UPSTREAM ourselves.
         root_execution_node.container_execution_status = (
-            bts.ContainerExecutionStatus.QUEUED
+            container_statuses.ContainerExecutionStatus.QUEUED
             if all(
                 not isinstance(artifact_node, bts.ArtifactNode)
                 or artifact_node.artifact_data
                 for artifact_node in input_artifact_nodes.values()
             )
-            else bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+            else container_statuses.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
         )
     elif isinstance(implementation, structures.GraphImplementation):
         # Processing child tasks

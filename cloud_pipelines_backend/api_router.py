@@ -12,6 +12,7 @@ import starlette.types
 
 from . import api_server_sql
 from . import backend_types_sql
+from . import container_statuses
 from . import component_library_api_server as components_api
 from . import database_ops
 from . import errors
@@ -595,7 +596,7 @@ def _setup_routes_internal(
     )
     def admin_set_execution_node_status(
         id: backend_types_sql.IdType,
-        status: backend_types_sql.ContainerExecutionStatus,
+        status: container_statuses.ContainerExecutionStatus,
         session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
     ):
         with session.begin():
