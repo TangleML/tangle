@@ -212,6 +212,13 @@ run_configured_orchestrator = lambda: run_orchestrator(
 # endregion
 
 
+# region: Metrics poller initialization
+
+from cloud_pipelines_backend.instrumentation import metrics_polling
+
+# endregion
+
+
 # region: API Server initialization
 import contextlib
 import threading
@@ -229,9 +236,9 @@ from cloud_pipelines_backend.instrumentation import contextual_logging
 @contextlib.asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
     database_ops.initialize_and_migrate_db(db_engine=db_engine)
+    threading.Thread(target=run_configured_orchestrator, daemon=True).start()
     threading.Thread(
-        target=run_configured_orchestrator,
-        daemon=True,
+        target=metrics_polling.run, kwargs={"db_engine": db_engine}, daemon=True
     ).start()
     if os.environ.get("GOOGLE_CLOUD_SHELL") == "true":
         # TODO: Find a way to get fastapi/starlette/uvicorn port
