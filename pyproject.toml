@@ -20,6 +20,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "black>=26.1.0",
+    "kubernetes-stubs-elephant-fork>=35.0.0.post1",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.25.2",
 ]

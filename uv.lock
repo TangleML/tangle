@@ -333,6 +333,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "black" },
+    { name = "kubernetes-stubs-elephant-fork" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -357,6 +358,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "black", specifier = ">=26.1.0" },
+    { name = "kubernetes-stubs-elephant-fork", specifier = ">=35.0.0.post1" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=0.25.2" },
 ]
@@ -1024,6 +1026,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/2c/8f/85bf51ad4150f64e8c665daf0d9dfe9787ae92005efb9a4d1cba592bd79d/kubernetes-35.0.0.tar.gz", hash = "sha256:3d00d344944239821458b9efd484d6df9f011da367ecb155dadf9513f05f09ee", size = 1094642, upload-time = "2026-01-16T01:05:27.76Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0c/70/05b685ea2dffcb2adbf3cdcea5d8865b7bc66f67249084cf845012a0ff13/kubernetes-35.0.0-py2.py3-none-any.whl", hash = "sha256:39e2b33b46e5834ef6c3985ebfe2047ab39135d41de51ce7641a7ca5b372a13d", size = 2017602, upload-time = "2026-01-16T01:05:25.991Z" },
+]
+
+[[package]]
+name = "kubernetes-stubs-elephant-fork"
+version = "35.0.0.post1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/e6/9ad81ca708b584406710736b2877935767ed9e9e9c0b0d89dec1edd2fb73/kubernetes_stubs_elephant_fork-35.0.0.post1.tar.gz", hash = "sha256:fdd59fcb774b507650b1fc77d2810d4755614f03f2b23c1acd5551b5223cf510", size = 151178, upload-time = "2026-02-25T03:56:07.905Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/27/dd/2a764af5455ee940484bc00de1c5f54285ceeb5bcccd800031a50e4f2c1b/kubernetes_stubs_elephant_fork-35.0.0.post1-py2.py3-none-any.whl", hash = "sha256:4b73b3380e3b9c53af26d7423533f90c3d221eb1c1b692fb852412cb989bba42", size = 460296, upload-time = "2026-02-25T03:56:06.807Z" },
 ]
 
 [[package]]
