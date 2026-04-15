@@ -1452,7 +1452,15 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         )
         pod_map: dict[str, k8s_client_lib.V1Pod] = {}
         if job.spec.completion_mode == "Indexed":
-            for pod in pod_list_response.items:
+            # There can be multiple pods for each index.
+            # This can happen when Job gets suspended and resumed multiple times and Pods can get stuck in "Terminating" phase.
+            # In this case we want to get the latest Pods.
+            # Alternatively, we could store all pods, but this can complicate the routines that determine status and get logs.
+            pods_sorted_by_creation_time = sorted(
+                pod_list_response.items,
+                key=lambda pod: pod.metadata.creation_timestamp or "",
+            )
+            for pod in pods_sorted_by_creation_time:
                 index_str = (
                     pod.metadata.annotations.get(
                         "batch.kubernetes.io/job-completion-index"
