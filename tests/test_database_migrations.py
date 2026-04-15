@@ -2018,10 +2018,6 @@ def test_migrate_secret_value_column_idempotent(
     col_type_after = _get_secret_value_column_type(db_engine=db_engine)
     assert isinstance(col_type_after, sqlalchemy.types.TEXT)
 
-    our_msgs = [
-        m
-        for m in caplog.messages
-        if m.startswith("migrate column to TEXT:")
-    ]
+    our_msgs = [m for m in caplog.messages if m.startswith("migrate column to TEXT:")]
     assert our_msgs[-2] == "migrate column to TEXT: complete"
     assert our_msgs[-1] == "migrate column to TEXT: skipped (already TEXT)"

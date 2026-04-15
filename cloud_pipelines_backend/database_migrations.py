@@ -751,7 +751,9 @@ def migrate_secret_value_column(
         _logger.info(f"migrate column to TEXT: skipped (already TEXT)")
         return
 
-    current_length = curr_col_type.length if isinstance(curr_col_type.length, int) else 0
+    current_length = (
+        curr_col_type.length if isinstance(curr_col_type.length, int) else 0
+    )
 
     _logger.info(
         f"migrate column to TEXT: {table.name}.{column.name}"

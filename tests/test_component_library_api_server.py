@@ -264,9 +264,7 @@ def test_component_library_service():
         user_name=user_name
     )
     with session_factory() as session:
-        library_8 = component_library_service.get(
-            session=session, id=user_library_id
-        )
+        library_8 = component_library_service.get(session=session, id=user_library_id)
         assert library_8.id == user_library_id
         assert library_8.hide_from_search
         assert user_name in library_8.name

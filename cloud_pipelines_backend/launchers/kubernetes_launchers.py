@@ -1384,7 +1384,9 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         pod_dicts = None
         if self._debug_pods is not None:
             pod_dicts = {
-                pod_name: _serialize_kubernetes_object_to_compact_dict(pod) if pod else None
+                pod_name: (
+                    _serialize_kubernetes_object_to_compact_dict(pod) if pod else None
+                )
                 for pod_name, pod in self._debug_pods.items()
             }
         result = {
@@ -1407,7 +1409,9 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     ) -> LaunchedKubernetesJob:
         d = d[cls.SERIALIZATION_ROOT_KEY]
         debug_job = _kubernetes_deserialize(d["debug_job"], cls=k8s_client_lib.V1Job)
-        debug_pod_dicts: dict[str, dict] | list[dict] | None = d.get("debug_pods") or d.get("debug_pod")
+        debug_pod_dicts: dict[str, dict] | list[dict] | None = d.get(
+            "debug_pods"
+        ) or d.get("debug_pod")
         debug_pods = None
         if debug_pod_dicts is not None:
             # Legacy compat.

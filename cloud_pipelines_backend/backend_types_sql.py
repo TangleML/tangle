@@ -63,8 +63,8 @@ id_column = orm.mapped_column(
 )
 
 # # Needed to put a union type into DB
-# class SqlIOTypeStruct(_BaseModel):
-#     type: structures.TypeSpecType
+# # class SqlIOTypeStruct(_BaseModel):
+# #     type: structures.TypeSpecType
 # No. We'll represent TypeSpecType as name:str + properties:dict
 # Supported cases:
 # * type: "name"
