@@ -142,6 +142,7 @@ class PipelineRunsApiService_Sql:
                 pipeline_run_id=pipeline_run.id,
                 created_by=created_by,
                 pipeline_name=pipeline_name,
+                annotations=annotations,
             )
             session.commit()
 
@@ -338,10 +339,12 @@ class PipelineRunsApiService_Sql:
             raise errors.PermissionError(
                 f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be changed by {user_name}"
             )
-        pipeline_run_annotation = bts.PipelineRunAnnotation(
-            pipeline_run_id=id, key=key, value=value
+        _mirror_single_pipeline_run_annotation(
+            session=session,
+            pipeline_run_id=id,
+            key=key,
+            value=value,
         )
-        session.merge(pipeline_run_annotation)
         session.commit()
 
     def delete_annotation(
@@ -1339,18 +1342,76 @@ def _truncate_for_annotation(
     return value[:max_len]
 
 
+def _mirror_single_pipeline_run_annotation(
+    *,
+    session: orm.Session,
+    pipeline_run_id: bts.IdType,
+    key: str,
+    value: str | None,
+) -> None:
+    """Write a single user annotation to the PipelineRunAnnotation table.
+
+    Applies defense-in-depth system-key guard, None-to-empty-string coercion,
+    and VARCHAR truncation before upserting the row.
+    """
+    if key.startswith(filter_query_sql.SYSTEM_KEY_PREFIX):
+        _logger.warning(
+            f"Skipping annotation key {key!r} for pipeline run {pipeline_run_id}: "
+            f"keys starting with {filter_query_sql.SYSTEM_KEY_PREFIX!r} are reserved."
+        )
+        return
+
+    if value is None:
+        value = ""
+
+    value = _truncate_for_annotation(
+        value=value,
+        field_name=key,
+        pipeline_run_id=pipeline_run_id,
+    )
+    session.merge(
+        bts.PipelineRunAnnotation(
+            pipeline_run_id=pipeline_run_id,
+            key=key,
+            value=value,
+        )
+    )
+
+
+def _mirror_pipeline_run_annotations(
+    *,
+    session: orm.Session,
+    pipeline_run_id: bts.IdType,
+    annotations: dict[str, Any] | None,
+) -> None:
+    """Mirror user-provided annotations into the PipelineRunAnnotation table."""
+    if not annotations:
+        return
+    for key, value in annotations.items():
+        str_value = str(value) if value is not None else None
+        _mirror_single_pipeline_run_annotation(
+            session=session,
+            pipeline_run_id=pipeline_run_id,
+            key=key,
+            value=str_value,
+        )
+
+
 def _mirror_system_annotations(
     *,
     session: orm.Session,
     pipeline_run_id: bts.IdType,
     created_by: str | None,
     pipeline_name: str | None,
+    annotations: dict[str, Any] | None = None,
 ) -> None:
     """Mirror pipeline run fields as system annotations for filter_query search.
 
     Always creates an annotation for every run, even when the source value is
     None or empty (stored as ""). This ensures data parity so every run has a
     row for each system key.
+
+    Also mirrors user-provided annotations via _mirror_pipeline_run_annotations.
     """
 
     # TODO: The original pipeline_run.created_by and the pipeline name stored in
@@ -1401,6 +1462,12 @@ def _mirror_system_annotations(
             key=filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
             value=pipeline_name_value,
         )
+    )
+
+    _mirror_pipeline_run_annotations(
+        session=session,
+        pipeline_run_id=pipeline_run_id,
+        annotations=annotations,
     )
 
 
