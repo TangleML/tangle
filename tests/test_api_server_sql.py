@@ -438,6 +438,122 @@ class TestPipelineRunServiceCreate:
         )
 
 
+class TestCreateMirrorsUserAnnotations:
+    def test_create_mirrors_user_annotations(
+        self,
+        session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        annotations = {"team": "ml-ops", "project": "search"}
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec("my-pipeline"),
+            annotations=annotations,
+        )
+        with session_factory() as session:
+            mirrored = service.list_annotations(session=session, id=run.id)
+        assert mirrored["team"] == "ml-ops"
+        assert mirrored["project"] == "search"
+
+    def test_create_mirrors_user_annotations_empty_dict(
+        self,
+        session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec("my-pipeline"),
+            annotations={},
+        )
+        with session_factory() as session:
+            mirrored = service.list_annotations(session=session, id=run.id)
+        assert set(mirrored.keys()) == {
+            filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY,
+            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
+        }
+
+    def test_create_mirrors_user_annotations_none(
+        self,
+        session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec("my-pipeline"),
+            annotations=None,
+        )
+        with session_factory() as session:
+            mirrored = service.list_annotations(session=session, id=run.id)
+        assert set(mirrored.keys()) == {
+            filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY,
+            filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME,
+        }
+
+    def test_create_skips_system_prefix_in_user_annotations(
+        self,
+        session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        annotations = {"system/foo": "bar", "valid": "ok"}
+        with caplog.at_level("WARNING"):
+            run = _create_run(
+                session_factory,
+                service,
+                root_task=_make_task_spec("my-pipeline"),
+                annotations=annotations,
+            )
+        with session_factory() as session:
+            mirrored = service.list_annotations(session=session, id=run.id)
+        assert "valid" in mirrored
+        assert mirrored["valid"] == "ok"
+        assert "system/foo" not in mirrored
+        assert any("system/foo" in r.message for r in caplog.records)
+
+    def test_create_mirrors_user_annotations_none_value_as_empty_string(
+        self,
+        session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        annotations = {"tag": None}
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec("my-pipeline"),
+            annotations=annotations,
+        )
+        with session_factory() as session:
+            mirrored = service.list_annotations(session=session, id=run.id)
+        assert mirrored["tag"] == ""
+
+    def test_create_user_annotations_coexist_with_system(
+        self,
+        session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec("my-pipeline"),
+            created_by="alice",
+            annotations={"team": "a"},
+        )
+        with session_factory() as session:
+            mirrored = service.list_annotations(session=session, id=run.id)
+        assert mirrored["team"] == "a"
+        assert (
+            mirrored[filter_query_sql.PipelineRunAnnotationSystemKey.CREATED_BY]
+            == "alice"
+        )
+        assert (
+            mirrored[filter_query_sql.PipelineRunAnnotationSystemKey.PIPELINE_NAME]
+            == "my-pipeline"
+        )
+
+
 class TestPipelineRunAnnotationCrud:
     def test_system_annotations_coexist_with_user_annotations(
         self, session_factory, service
@@ -625,18 +741,13 @@ class TestAnnotationValueOverflow:
     - create() via _mirror_system_annotations(): long pipeline_name, long created_by
     """
 
-    # TODO: set_annotation() currently has no truncation guard for the
-    # VARCHAR(255) limit on annotation key/value columns. These tests
-    # document the failure. Fix deferred to a separate PR to avoid
-    # convoluting the backfill + _mirror_system_annotations fix.
-
-    def test_set_annotation_long_value_raises_on_overflow(
+    def test_set_annotation_long_value_truncated(
         self,
         mysql_varchar_limit_session_factory: orm.sessionmaker,
         service: api_server_sql.PipelineRunsApiService_Sql,
     ) -> None:
-        """set_annotation() with a 300-char value overflows the
-        VARCHAR(255) column and triggers IntegrityError."""
+        """set_annotation() with a 300-char value is truncated to 255
+        via _mirror_single_annotation()."""
         run = _create_run(
             mysql_varchar_limit_session_factory,
             service,
@@ -644,16 +755,16 @@ class TestAnnotationValueOverflow:
             created_by="user1",
         )
         with mysql_varchar_limit_session_factory() as session:
-            with pytest.raises(
-                sqlalchemy.exc.IntegrityError, match="Data too long.*value"
-            ):
-                service.set_annotation(
-                    session=session,
-                    id=run.id,
-                    key="team",
-                    value="v" * 300,
-                    user_name="user1",
-                )
+            service.set_annotation(
+                session=session,
+                id=run.id,
+                key="team",
+                value="v" * 300,
+                user_name="user1",
+            )
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations["team"] == "v" * bts._STR_MAX_LENGTH
 
     def test_set_annotation_long_key_raises_on_overflow(
         self,
@@ -714,6 +825,48 @@ class TestAnnotationValueOverflow:
         with mysql_varchar_limit_session_factory() as session:
             annotations = service.list_annotations(session=session, id=run.id)
         assert annotations[key] == "u" * bts._STR_MAX_LENGTH
+
+    def test_create_truncates_long_user_annotation_value(
+        self,
+        mysql_varchar_limit_session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        """create() with a 300-char user annotation value is truncated to 255
+        via _mirror_pipeline_run_annotations()."""
+        run = _create_run(
+            mysql_varchar_limit_session_factory,
+            service,
+            root_task=_make_task_spec(),
+            annotations={"long_val": "x" * 300},
+        )
+        with mysql_varchar_limit_session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations["long_val"] == "x" * bts._STR_MAX_LENGTH
+
+
+class TestSetAnnotationBehavior:
+    def test_set_annotation_none_value_stored_as_empty_string(
+        self,
+        session_factory: orm.sessionmaker,
+        service: api_server_sql.PipelineRunsApiService_Sql,
+    ) -> None:
+        run = _create_run(
+            session_factory,
+            service,
+            root_task=_make_task_spec(),
+            created_by="user1",
+        )
+        with session_factory() as session:
+            service.set_annotation(
+                session=session,
+                id=run.id,
+                key="tag",
+                value=None,
+                user_name="user1",
+            )
+        with session_factory() as session:
+            annotations = service.list_annotations(session=session, id=run.id)
+        assert annotations["tag"] == ""
 
 
 class TestFilterQueryApiWiring:
