@@ -519,10 +519,10 @@ class ArtifactNodeIdResponse:
     id: bts.IdType
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(kw_only=True)
 class GetGraphExecutionStateResponse:
     child_execution_status_stats: dict[bts.IdType, dict[str, int]]
-    pass
+    child_execution_status_summary: ExecutionStatusSummary
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -697,15 +697,31 @@ class ExecutionNodesApiService_Sql:
             child_descendants_execution_stat_rows
         ) + tuple(child_container_execution_stat_rows)
         child_execution_status_stats: dict[bts.IdType, dict[str, int]] = {}
-
+        total_execution_count = 0
+        ended_execution_count = 0
         for row in child_execution_stat_rows:
+            # TODO: Rename this to be _tuple() per version 2.0.19
+            # https://docs.sqlalchemy.org/en/20/changelog/changelog_20.html#change-801784234240fc9d4879723c412e74e2
+            #
+            # TODO: If upgrading to SQLAlchemy version 2.1, function tuple() not needed anymore
+            # https://github.com/sqlalchemy/sqlalchemy/blob/deb949fe05ed8ff0f72f01d53f08f21ba8776aef/lib/sqlalchemy/engine/row.py#L76
             child_execution_id, status, count = row.tuple()
             status_stats = child_execution_status_stats.setdefault(
                 child_execution_id, {}
             )
             status_stats[status.value] = count
+            total_execution_count += count
+            if status in bts.CONTAINER_STATUSES_ENDED:
+                ended_execution_count += count
+
+        summary = ExecutionStatusSummary(
+            total_executions=total_execution_count,
+            ended_executions=ended_execution_count,
+            has_ended=(ended_execution_count == total_execution_count),
+        )
         return GetGraphExecutionStateResponse(
             child_execution_status_stats=child_execution_status_stats,
+            child_execution_status_summary=summary,
         )
 
     def get_container_execution_state(
