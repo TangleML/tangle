@@ -159,6 +159,7 @@ from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_interfaces,
 )
 from cloud_pipelines_backend import orchestrator_sql
+from cloud_pipelines_backend import sql_event_listeners
 
 
 def run_orchestrator(
