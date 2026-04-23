@@ -1228,6 +1228,166 @@ class SecretsApiService:
         )
 
 
+# region: UserSettingsService
+# /api/user/me/pipelines
+
+
+@dataclasses.dataclass(kw_only=True)
+class UserPipelineResponse:
+    file_path: str
+    pipeline_name: str | None = None
+    created_at: datetime.datetime
+    modified_at: datetime.datetime
+    root_pipeline_task: structures.TaskSpec
+    pipeline_run_annotations: dict[str, Any] | None = None
+
+    @classmethod
+    def from_db(cls, pipeline_row: bts.UserPipeline) -> "UserPipelineResponse":
+        return UserPipelineResponse(
+            file_path=pipeline_row.file_path,
+            pipeline_name=(pipeline_row.extra_data or {}).get("pipeline_name"),
+            created_at=pipeline_row.created_at,
+            modified_at=pipeline_row.modified_at,
+            root_pipeline_task=structures.TaskSpec.from_json_dict(
+                pipeline_row.root_pipeline_task
+            ),
+            pipeline_run_annotations=pipeline_row.pipeline_run_annotations,
+        )
+
+
+@dataclasses.dataclass(kw_only=True)
+class UserPipelineShortResponse:
+    file_path: str
+    pipeline_name: str | None = None
+    created_at: datetime.datetime
+    modified_at: datetime.datetime
+
+
+@dataclasses.dataclass(kw_only=True)
+class ListUserPipelinesResponse:
+    pipelines: list[UserPipelineShortResponse]
+
+
+class UserPipelineApiService:
+
+    def get_pipeline(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        file_path: str,
+    ) -> UserPipelineResponse:
+        pipeline_row = session.scalar(
+            sql.select(bts.UserPipeline).where(
+                bts.UserPipeline.user_id == user_id,
+                bts.UserPipeline.file_path == file_path,
+            )
+        )
+        if pipeline_row is None:
+            raise errors.ItemNotFoundError(
+                f"Pipeline with file path {file_path} not found."
+            )
+        return UserPipelineResponse.from_db(pipeline_row)
+
+    def list_pipelines(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+    ) -> ListUserPipelinesResponse:
+        pipelines = [
+            UserPipelineShortResponse(
+                file_path=file_path,
+                created_at=created_at,
+                modified_at=modified_at,
+                pipeline_name=(extra_data or {}).get("pipeline_name"),
+            )
+            for file_path, created_at, modified_at, extra_data in session.execute(
+                sql.select(
+                    bts.UserPipeline.file_path,
+                    bts.UserPipeline.created_at,
+                    bts.UserPipeline.modified_at,
+                    bts.UserPipeline.extra_data,
+                )
+                .where(bts.UserPipeline.user_id == user_id)
+                .order_by(bts.UserPipeline.modified_at.desc())
+            ).tuples()
+        ]
+        return ListUserPipelinesResponse(pipelines=pipelines)
+
+    def set_pipeline(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        file_path: str,
+        root_pipeline_task: structures.TaskSpec,
+        pipeline_run_annotations: dict[str, str] | None = None,
+    ) -> None:
+        file_path = file_path.strip()
+        if not (0 < len(file_path) <= bts.UserPipeline.MAX_FILE_PATH_LENGTH):
+            raise ApiServiceError(
+                f"Pipeline file path must be between 1 and {bts.UserPipeline.MAX_FILE_PATH_LENGTH} characters."
+            )
+        # Note: It's OK if the pipeline is not fully valid (e.g. required inputs without arguments)
+        pipeline_row = session.scalar(
+            sql.select(bts.UserPipeline).where(
+                bts.UserPipeline.user_id == user_id,
+                bts.UserPipeline.file_path == file_path,
+            )
+        )
+        current_time = _get_current_time()
+        if pipeline_row is None:
+            pipeline_row = bts.UserPipeline(
+                user_id=user_id,
+                file_path=file_path,
+                created_at=current_time,
+                modified_at=current_time,
+                root_pipeline_task=root_pipeline_task.to_json_dict(),
+                pipeline_run_annotations=pipeline_run_annotations,
+            )
+            session.add(pipeline_row)
+        else:
+            pipeline_row.modified_at = current_time
+            pipeline_row.root_pipeline_task = root_pipeline_task.to_json_dict()
+            pipeline_row.pipeline_run_annotations = pipeline_run_annotations
+        # Storing pipeline name. Storing it in extra_data instead of a column to avoid issues with long pipeline names
+        # TODO: Hydrate pipeline from text if needed.
+        pipeline_name = (
+            root_pipeline_task.component_ref.spec.name
+            if root_pipeline_task.component_ref.spec
+            else None
+        )
+        if pipeline_name:
+            if not pipeline_row.extra_data:
+                pipeline_row.extra_data = {}
+            pipeline_row.extra_data["pipeline_name"] = pipeline_name
+        session.commit()
+
+    def delete_pipeline(
+        self,
+        *,
+        session: orm.Session,
+        user_id: str,
+        file_path: str,
+    ) -> None:
+        pipeline_row = session.scalar(
+            sql.select(bts.UserPipeline).where(
+                bts.UserPipeline.user_id == user_id,
+                bts.UserPipeline.file_path == file_path,
+            )
+        )
+        if pipeline_row is None:
+            raise errors.ItemNotFoundError(
+                f"Pipeline with file path {file_path} not found."
+            )
+        session.delete(pipeline_row)
+        session.commit()
+
+
+# endregion
+
+
 # region: User Settings API Service
 # /api/user/me/settings
 
