@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.applications import Starlette
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from cloud_pipelines_backend.instrumentation import contextual_logging
@@ -78,12 +79,8 @@ class TestRequestContextMiddleware:
 
     def test_middleware_generates_request_id(self):
         """Test that middleware generates a request_id for each request."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
         request_ids_seen = []
 
-        @app.route("/test")
         def test_route(request):
             # Capture the request_id during request processing
             request_ids_seen.append(
@@ -91,6 +88,8 @@ class TestRequestContextMiddleware:
             )
             return Response("ok")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
         response = client.get("/test")
 
@@ -101,13 +100,11 @@ class TestRequestContextMiddleware:
 
     def test_middleware_adds_request_id_to_response_headers(self):
         """Test that middleware adds request_id to response headers."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
-        @app.route("/test")
         def test_route(request):
             return Response("ok")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
         response = client.get("/test")
 
@@ -118,14 +115,12 @@ class TestRequestContextMiddleware:
 
     def test_middleware_clears_request_id_after_request(self):
         """Test that middleware clears request_id after request completes."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
-        @app.route("/test")
         def test_route(request):
             assert contextual_logging.get_context_metadata("request_id") is not None
             return Response("ok")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
 
         # Before request
@@ -140,13 +135,11 @@ class TestRequestContextMiddleware:
 
     def test_middleware_generates_unique_request_ids(self):
         """Test that middleware generates unique request_ids for each request."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
-        @app.route("/test")
         def test_route(request):
             return Response("ok")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
 
         # Make multiple requests
@@ -160,17 +153,15 @@ class TestRequestContextMiddleware:
 
     def test_middleware_request_id_available_in_route(self):
         """Test that request_id set by middleware is available in route handler."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
         captured_request_id = None
 
-        @app.route("/test")
         def test_route(request):
             nonlocal captured_request_id
             captured_request_id = contextual_logging.get_context_metadata("request_id")
             return Response(f"request_id: {captured_request_id}")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
         response = client.get("/test")
 
@@ -180,10 +171,6 @@ class TestRequestContextMiddleware:
 
     def test_middleware_handles_exception_in_route(self):
         """Test that middleware clears request_id even when route raises exception."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
-        @app.route("/test")
         def test_route(request):
             request_id_during_exception = contextual_logging.get_context_metadata(
                 "request_id"
@@ -191,6 +178,8 @@ class TestRequestContextMiddleware:
             assert request_id_during_exception is not None
             raise ValueError("Test exception")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/test")
 
@@ -200,25 +189,22 @@ class TestRequestContextMiddleware:
 
     def test_middleware_with_multiple_routes(self):
         """Test middleware works correctly with multiple routes."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
         request_ids_by_route = {}
 
-        @app.route("/route1")
         def route1(request):
             request_ids_by_route["route1"] = contextual_logging.get_context_metadata(
                 "request_id"
             )
             return Response("route1")
 
-        @app.route("/route2")
         def route2(request):
             request_ids_by_route["route2"] = contextual_logging.get_context_metadata(
                 "request_id"
             )
             return Response("route2")
 
+        app = Starlette(routes=[Route("/route1", route1), Route("/route2", route2)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
 
         response1 = client.get("/route1")
@@ -255,9 +241,6 @@ class TestRequestContextMiddlewareIntegration:
         """Test that middleware enables request_id to be used in logging."""
         import logging
 
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
         logged_request_ids = []
 
         # Create a custom handler to capture log records
@@ -275,11 +258,12 @@ class TestRequestContextMiddlewareIntegration:
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 
-        @app.route("/test")
         def test_route(request):
             logger.info("Processing request")
             return Response("ok")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
         response = client.get("/test")
 
@@ -292,9 +276,6 @@ class TestRequestContextMiddlewareIntegration:
 
     def test_middleware_request_id_persists_across_function_calls(self):
         """Test that request_id persists across function calls within a request."""
-        app = Starlette()
-        app.add_middleware(RequestContextMiddleware)
-
         request_ids_collected = []
 
         def helper_function():
@@ -303,7 +284,6 @@ class TestRequestContextMiddlewareIntegration:
                 contextual_logging.get_context_metadata("request_id")
             )
 
-        @app.route("/test")
         def test_route(request):
             request_ids_collected.append(
                 contextual_logging.get_context_metadata("request_id")
@@ -314,6 +294,8 @@ class TestRequestContextMiddlewareIntegration:
             )
             return Response("ok")
 
+        app = Starlette(routes=[Route("/test", test_route)])
+        app.add_middleware(RequestContextMiddleware)
         client = TestClient(app)
         response = client.get("/test")
 
