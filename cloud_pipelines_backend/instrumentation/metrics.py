@@ -40,6 +40,7 @@ class MetricUnit(str, enum.Enum):
 
     SECONDS = "s"
     ERRORS = "{error}"
+    EXECUTIONS = "{execution}"
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +58,13 @@ execution_status_transition_duration = orchestrator_meter.create_histogram(
     name="execution.status_transition.duration",
     description="Duration an execution spent in a status before transitioning to the next status",
     unit=MetricUnit.SECONDS,
+)
+
+execution_status_count = orchestrator_meter.create_observable_gauge(
+    name="execution.status.count",
+    callbacks=[],
+    description="Number of execution nodes in each active (non-terminal) status",
+    unit=MetricUnit.EXECUTIONS,
 )
 
 
