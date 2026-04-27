@@ -568,6 +568,67 @@ def test_accelerators_sky_string_format_still_works():
     assert task.resources.kwargs["accelerators"] == "H100:8"
 
 
+def test_input_local_uri_raises_actionable_error():
+    """A non-cloud (local) URI for an input is rejected up front with an
+    actionable message (vs. letting sky.Task validation fail with a generic
+    'file does not exist' error). Surfaced during E2E testing with Tangle's
+    LocalStorageProvider."""
+    from cloud_pipelines_backend import component_structures as structures
+    from cloud_pipelines_backend.launchers import interfaces
+    from cloud_pipelines_backend.launchers.skypilot_launchers import (
+        SkyPilotKubernetesLauncher,
+    )
+
+    component = _make_component(
+        command=["cat"],
+        args=[structures.InputPathPlaceholder("dataset")],
+        inputs=["dataset"],
+    )
+    input_arguments = {
+        "dataset": interfaces.InputArgument(
+            total_size=10**6, is_dir=False,
+            uri="data/artifacts/by_execution/abc/inputs/dataset/data",  # local
+            staging_uri="",
+        ),
+    }
+    launcher = SkyPilotKubernetesLauncher()
+    with pytest.raises(interfaces.LauncherError, match="cloud storage URI"):
+        launcher._build_task(
+            component_spec=component,
+            container_spec=component.implementation.container,
+            input_arguments=input_arguments,
+            output_uris={},
+            annotations={},
+        )
+
+
+def test_output_local_uri_skipped_no_mount():
+    """A non-cloud (local) output URI is skipped with a warning. The container
+    can still write to its own /tmp/outputs/ inside the pod; the artifact just
+    won't be persisted to Tangle's local storage. Surfaced during E2E testing."""
+    from cloud_pipelines_backend import component_structures as structures
+    from cloud_pipelines_backend.launchers.skypilot_launchers import (
+        SkyPilotKubernetesLauncher,
+    )
+
+    component = _make_component(
+        command=["sh", "-c", "echo hi"],
+        args=[structures.OutputPathPlaceholder("greeting")],
+    )
+    launcher = SkyPilotKubernetesLauncher()
+    task = launcher._build_task(
+        component_spec=component,
+        container_spec=component.implementation.container,
+        input_arguments={},
+        output_uris={"greeting": "data/artifacts/by_execution/abc/outputs/greeting/data"},
+        annotations={},
+    )
+    # No file_mounts entry for the local output URI.
+    assert task.file_mounts is None or all(
+        not v.startswith("data/") for v in (task.file_mounts or {}).values()
+    )
+
+
 def test_end_to_end_lifecycle_through_stubbed_sky():
     """End-to-end exercise: launch -> refresh status -> stream logs -> terminate.
 
