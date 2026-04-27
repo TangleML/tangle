@@ -22,7 +22,25 @@ Bad example:
 - Instrument: orchestrator_execution_system_errors
 """
 
+import datetime
+import enum
+import logging
+
 from opentelemetry import metrics as otel_metrics
+from sqlalchemy import event as sql_event
+from sqlalchemy import orm
+
+from .. import backend_types_sql
+
+_logger = logging.getLogger(__name__)
+
+
+class MetricUnit(str, enum.Enum):
+    """UCUM-style unit strings accepted by the OTel SDK."""
+
+    SECONDS = "s"
+    ERRORS = "{error}"
+
 
 # ---------------------------------------------------------------------------
 # tangle.orchestrator
@@ -32,5 +50,47 @@ orchestrator_meter = otel_metrics.get_meter("tangle.orchestrator")
 execution_system_errors = orchestrator_meter.create_counter(
     name="execution.system_errors",
     description="Number of execution nodes that ended in SYSTEM_ERROR status",
-    unit="{error}",
+    unit=MetricUnit.ERRORS,
 )
+
+execution_status_transition_duration = orchestrator_meter.create_histogram(
+    name="execution.status_transition.duration",
+    description="Duration an execution spent in a status before transitioning to the next status",
+    unit=MetricUnit.SECONDS,
+)
+
+
+# ---------------------------------------------------------------------------
+# SQLAlchemy event listeners
+# ---------------------------------------------------------------------------
+
+_HISTORY_KEY = backend_types_sql.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
+
+
+@sql_event.listens_for(orm.Session, "before_commit")
+def _handle_before_commit(session: orm.Session) -> None:
+    for obj in list(session.new) + list(session.dirty):
+        if not isinstance(obj, backend_types_sql.ExecutionNode):
+            continue
+        if not obj._status_changed:
+            continue
+        history: list = (obj.extra_data or {}).get(_HISTORY_KEY, [])
+        if len(history) >= 2:
+            prev = history[-2]
+            curr = history[-1]
+            prev_time = datetime.datetime.fromisoformat(prev["first_observed_at"])
+            curr_time = datetime.datetime.fromisoformat(curr["first_observed_at"])
+            try:
+                execution_status_transition_duration.record(
+                    (curr_time - prev_time).total_seconds(),
+                    attributes={
+                        "execution.status.from": prev["status"],
+                        "execution.status.to": curr["status"],
+                    },
+                )
+            except Exception:
+                _logger.warning(
+                    f"Failed to record status transition metric for execution {obj.id!r}",
+                    exc_info=True,
+                )
+        obj._status_changed = False

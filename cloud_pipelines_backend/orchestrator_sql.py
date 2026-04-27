@@ -9,6 +9,7 @@ from typing import Any
 
 
 import sqlalchemy as sql
+from sqlalchemy import event as sql_event
 from sqlalchemy import orm
 
 from cloud_pipelines.orchestration.storage_providers import (
@@ -1101,3 +1102,35 @@ def _maybe_get_small_artifact_value(
             return text
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# SQLAlchemy event listeners
+# ---------------------------------------------------------------------------
+
+_HISTORY_KEY = bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
+
+
+@sql_event.listens_for(bts.ExecutionNode.container_execution_status, "set")
+def _handle_container_execution_status_set(
+    execution: bts.ExecutionNode,
+    value: bts.ContainerExecutionStatus | None,
+    _old_value: object,
+    _initiator: object,
+) -> None:
+    if value is None:
+        return
+    if execution.extra_data is None:
+        execution.extra_data = {}
+    history: list = execution.extra_data.get(_HISTORY_KEY, [])
+    if history and history[-1]["status"] == value.value:
+        return
+    entry = {
+        "status": value.value,
+        "first_observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    execution.extra_data = {
+        **execution.extra_data,
+        _HISTORY_KEY: history + [entry],
+    }
+    execution._status_changed = True
