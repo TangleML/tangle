@@ -7,6 +7,41 @@ streaming, and cancellation.
 
 Layout follows the existing launchers in cloud_pipelines_backend/launchers/
 (local_docker_launchers.py, kubernetes_launchers.py).
+
+Storage provider compatibility
+==============================
+
+This launcher relies on SkyPilot's ``file_mounts`` for input/output artifact
+transfer, which can mount cloud-storage URIs (``gs://``, ``s3://``, ``abfs://``,
+``r2://``, ``https://``) directly into the container but cannot represent the
+relative-local-path artifact URIs produced by Tangle's
+``LocalStorageProvider``.
+
+Practical consequences:
+
+  * Single-component pipelines run end-to-end on any storage provider — the
+    container's stdout/stderr is captured by SkyPilot regardless. Components
+    with file outputs that target a local URI will simply have those outputs
+    discarded with a warning (the container still executes).
+
+  * Multi-component (graph) pipelines require a cloud StorageProvider. With
+    ``LocalStorageProvider``, downstream tasks cannot read the upstream
+    output (the SkyPilot pod can't write back to the orchestrator's local
+    filesystem), so step 2 fails to find its input.
+
+To run multi-step pipelines, configure Tangle with a cloud storage provider,
+for example::
+
+    from cloud_pipelines.orchestration.storage_providers.google_cloud_storage \\
+        import GoogleCloudStorageProvider
+
+    orchestrator = orchestrator_sql.OrchestratorService_Sql(
+        ...,
+        launcher=SkyPilotKubernetesLauncher(infra="kubernetes/<context>"),
+        storage_provider=GoogleCloudStorageProvider(),
+        data_root_uri="gs://my-tangle-bucket/artifacts",
+        logs_root_uri="gs://my-tangle-bucket/logs",
+    )
 """
 
 from __future__ import annotations

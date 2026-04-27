@@ -568,6 +568,55 @@ def test_accelerators_sky_string_format_still_works():
     assert task.resources.kwargs["accelerators"] == "H100:8"
 
 
+def test_multistep_with_cloud_uris_passes_through():
+    """Two-step pipelines work when the storage provider produces cloud URIs.
+    The upstream task's output URI (e.g. gs://bucket/.../output/data) is
+    handed to the downstream task as InputArgument.uri, and our launcher
+    mounts both via SkyPilot's file_mounts — the same URI on both sides
+    means the downstream container reads what the upstream wrote."""
+    from cloud_pipelines_backend import component_structures as structures
+    from cloud_pipelines_backend.launchers import interfaces
+    from cloud_pipelines_backend.launchers.skypilot_launchers import (
+        SkyPilotKubernetesLauncher,
+    )
+
+    # Step 2's component reads `message_file` and writes `shouted`.
+    component = _make_component(
+        command=["sh", "-c", 'tr "[:lower:]" "[:upper:]" < "$0" > "$1"'],
+        args=[
+            structures.InputPathPlaceholder("message_file"),
+            structures.OutputPathPlaceholder("shouted"),
+        ],
+        inputs=["message_file"],
+    )
+    # Storage provider has put step 1's output at this gs:// URI; Tangle hands
+    # it to step 2 verbatim as InputArgument.uri:
+    upstream_uri = "gs://tangle-test/by_execution/abc123/outputs/message_file/data"
+    downstream_output_uri = (
+        "gs://tangle-test/by_execution/def456/outputs/shouted/data"
+    )
+    input_arguments = {
+        "message_file": interfaces.InputArgument(
+            total_size=10**6, is_dir=False,
+            uri=upstream_uri, staging_uri="",
+        ),
+    }
+    launcher = SkyPilotKubernetesLauncher(infra="kubernetes")
+    task = launcher._build_task(
+        component_spec=component,
+        container_spec=component.implementation.container,
+        input_arguments=input_arguments,
+        output_uris={"shouted": downstream_output_uri},
+        annotations={},
+    )
+    # Both URIs registered as SkyPilot file_mounts so the container reads/writes
+    # through cloud storage.
+    assert task.file_mounts is not None
+    mount_values = list(task.file_mounts.values())
+    assert upstream_uri in mount_values
+    assert downstream_output_uri in mount_values
+
+
 def test_input_local_uri_raises_actionable_error():
     """A non-cloud (local) URI for an input is rejected up front with an
     actionable message (vs. letting sky.Task validation fail with a generic
