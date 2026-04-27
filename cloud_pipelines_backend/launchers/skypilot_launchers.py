@@ -366,6 +366,12 @@ class SkyPilotKubernetesLauncher(
                 )
             return ia.value
 
+        def _is_cloud_uri(uri: str) -> bool:
+            return any(
+                uri.startswith(s)
+                for s in ("gs://", "s3://", "abfs://", "https://", "http://", "r2://")
+            )
+
         def get_input_path(input_name: str) -> str:
             ia = input_arguments[input_name]
             if ia.uri is None:
@@ -380,7 +386,19 @@ class SkyPilotKubernetesLauncher(
                 + "/"
                 + _CONTAINER_FILE_NAME
             )
-            file_mounts[container_path] = ia.uri
+            if _is_cloud_uri(ia.uri):
+                file_mounts[container_path] = ia.uri
+            else:
+                # Non-cloud URI (e.g. Tangle's LocalStorageProvider relative path):
+                # SkyPilot's file_mounts can't represent this. Surface it clearly
+                # rather than letting sky.Task validation fail with a generic
+                # "file does not exist" error.
+                raise interfaces.LauncherError(
+                    f"Input '{input_name}' uri={ia.uri!r} is not a cloud storage URI. "
+                    "The SkyPilot launcher requires gs://, s3://, abfs://, https://, or "
+                    "r2:// for inputs. Configure Tangle with a cloud StorageProvider "
+                    "(e.g. GoogleCloudStorageProvider) for cloud-based runs."
+                )
             return container_path
 
         def get_output_path(output_name: str) -> str:
@@ -391,7 +409,23 @@ class SkyPilotKubernetesLauncher(
                 + "/"
                 + _CONTAINER_FILE_NAME
             )
-            file_mounts[container_path] = uri
+            if _is_cloud_uri(uri):
+                # Bidirectional mount via SkyPilot Storage — the container's writes
+                # land at the cloud URI directly.
+                file_mounts[container_path] = uri
+            else:
+                # Non-cloud (local) output URI. SkyPilot can't sync a remote pod's
+                # writes back to a local relative path. We let the container write to
+                # /tmp/outputs/ (which is ephemeral — the pod terminates after the
+                # job) and log a warning so callers know the artifact won't be
+                # persisted via Tangle's LocalStorageProvider. To persist outputs,
+                # configure a cloud StorageProvider in Tangle.
+                _logger.warning(
+                    "Output '%s' uri=%r is not a cloud URI; the SkyPilot launcher "
+                    "will not persist it back to Tangle's storage. Use a cloud "
+                    "StorageProvider (gs://, s3://, ...) to persist outputs.",
+                    output_name, uri,
+                )
             return container_path
 
         resolved = container_component_utils.resolve_container_command_line(
