@@ -129,7 +129,8 @@ fi
 
 ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
 pipeline_spec = {
-    "name": f"multinode-pipeline-{ts}",
+    # Surfaces "skypilot" prominently in the Tangle Pipelines list.
+    "name": f"skypilot-multinode-pipeline-{ts}",
     "outputs": [{"name": "result", "type": "String"}],
     "implementation": {
         "graph": {
