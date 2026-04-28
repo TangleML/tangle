@@ -276,18 +276,28 @@ class SkyPilotKubernetesLauncher(
         job_name = task.name or self._job_name_prefix + "task"
 
         # Submit. sky.jobs.launch returns a RequestId; await it via sky.get().
+        # Result shape changed across sky versions: older returns (List[int], Handle),
+        # newer (>=0.12) returns (Optional[int], Handle). Handle both.
         with self._lock:
             launch_kwargs: dict[str, Any] = {}
             if self._pool is not None:
                 launch_kwargs["pool"] = self._pool
             request_id = sky_jobs.launch(task, name=job_name, **launch_kwargs)
-            job_ids, _handle = sky.get(request_id)
+            result = sky.get(request_id)
 
-        if not job_ids:
+        job_id_or_ids, _handle = result
+        if job_id_or_ids is None:
             raise interfaces.LauncherError(
-                f"sky.jobs.launch returned no job ids for {job_name}"
+                f"sky.jobs.launch returned no job id for {job_name}"
             )
-        job_id = int(job_ids[0])
+        if isinstance(job_id_or_ids, (list, tuple)):
+            if not job_id_or_ids:
+                raise interfaces.LauncherError(
+                    f"sky.jobs.launch returned empty job-id list for {job_name}"
+                )
+            job_id = int(job_id_or_ids[0])
+        else:
+            job_id = int(job_id_or_ids)
         _logger.info(
             "Submitted SkyPilot managed job %s (job_id=%d)", job_name, job_id
         )
@@ -407,6 +417,26 @@ class SkyPilotKubernetesLauncher(
                 for s in ("gs://", "s3://", "abfs://", "https://", "http://", "r2://")
             )
 
+        # SkyPilot's MOUNT mode requires the source to be a bucket root (not a
+        # sub-path within a bucket — sky/data/storage.py:_validate_source raises
+        # StorageModeError otherwise). We mount each unique bucket once at a
+        # stable container path and use sub-paths inside.
+        bucket_mount_root = "/mnt/skypilot"
+
+        def _bucket_and_subpath(uri: str) -> tuple[str, str]:
+            # gs://bucket/sub/path -> ("gs://bucket", "sub/path")
+            scheme, _, rest = uri.partition("://")
+            bucket, _, sub = rest.partition("/")
+            return f"{scheme}://{bucket}", sub
+
+        def _container_path_for(uri: str) -> str:
+            bucket_uri, sub_path = _bucket_and_subpath(uri)
+            scheme = bucket_uri.split("://", 1)[0]
+            bucket_name = bucket_uri.split("://", 1)[1]
+            mount_point = f"{bucket_mount_root}/{scheme}/{bucket_name}"
+            file_mounts[mount_point] = {"source": bucket_uri, "mode": "MOUNT"}
+            return f"{mount_point}/{sub_path}"
+
         def get_input_path(input_name: str) -> str:
             ia = input_arguments[input_name]
             if ia.uri is None:
@@ -415,53 +445,27 @@ class SkyPilotKubernetesLauncher(
                     "storage (gs://, s3://, ...) before submitting through the "
                     "SkyPilot launcher."
                 )
-            container_path = (
-                "/tmp/inputs/"
-                + naming_utils.sanitize_file_name(input_name)
-                + "/"
-                + _CONTAINER_FILE_NAME
-            )
-            if _is_cloud_uri(ia.uri):
-                file_mounts[container_path] = ia.uri
-            else:
-                # Non-cloud URI (e.g. Tangle's LocalStorageProvider relative path):
-                # SkyPilot's file_mounts can't represent this. Surface it clearly
-                # rather than letting sky.Task validation fail with a generic
-                # "file does not exist" error.
+            if not _is_cloud_uri(ia.uri):
                 raise interfaces.LauncherError(
                     f"Input '{input_name}' uri={ia.uri!r} is not a cloud storage URI. "
                     "The SkyPilot launcher requires gs://, s3://, abfs://, https://, or "
                     "r2:// for inputs. Configure Tangle with a cloud StorageProvider "
                     "(e.g. GoogleCloudStorageProvider) for cloud-based runs."
                 )
-            return container_path
+            return _container_path_for(ia.uri)
 
         def get_output_path(output_name: str) -> str:
             uri = output_uris[output_name]
-            container_path = (
-                "/tmp/outputs/"
-                + naming_utils.sanitize_file_name(output_name)
-                + "/"
-                + _CONTAINER_FILE_NAME
-            )
             if _is_cloud_uri(uri):
-                # Bidirectional mount via SkyPilot Storage — the container's writes
-                # land at the cloud URI directly.
-                file_mounts[container_path] = uri
-            else:
-                # Non-cloud (local) output URI. SkyPilot can't sync a remote pod's
-                # writes back to a local relative path. We let the container write to
-                # /tmp/outputs/ (which is ephemeral — the pod terminates after the
-                # job) and log a warning so callers know the artifact won't be
-                # persisted via Tangle's LocalStorageProvider. To persist outputs,
-                # configure a cloud StorageProvider in Tangle.
-                _logger.warning(
-                    "Output '%s' uri=%r is not a cloud URI; the SkyPilot launcher "
-                    "will not persist it back to Tangle's storage. Use a cloud "
-                    "StorageProvider (gs://, s3://, ...) to persist outputs.",
-                    output_name, uri,
-                )
-            return container_path
+                return _container_path_for(uri)
+            _logger.warning(
+                "Output '%s' uri=%r is not a cloud URI; the SkyPilot launcher "
+                "will not persist it back to Tangle's storage. Use a cloud "
+                "StorageProvider (gs://, s3://, ...) to persist outputs.",
+                output_name, uri,
+            )
+            sanitized = naming_utils.sanitize_file_name(output_name)
+            return f"/tmp/outputs/{sanitized}/{_CONTAINER_FILE_NAME}"
 
         resolved = container_component_utils.resolve_container_command_line(
             component_spec=component_spec,
@@ -534,14 +538,22 @@ class SkyPilotKubernetesLauncher(
         elif self._default_use_spot is not None:
             resources_kwargs["use_spot"] = self._default_use_spot
 
-        task = sky.Task(
-            name=job_name,
-            run=run_script,
-            envs=envs,
-            num_nodes=num_nodes,
-            file_mounts=file_mounts or None,
-        )
-        task.set_resources(sky.Resources(**resources_kwargs))
+        # Build a sky YAML-shaped dict and let Task.from_yaml_config parse it.
+        # The YAML parser auto-promotes cloud-URI entries in file_mounts into
+        # sky.Storage MOUNT mounts (sky/task.py:660-688), which is the path that
+        # works under consolidation mode. Constructing sky.Task() directly with
+        # cloud-URI file_mounts goes through translate_local_file_mounts_to_two_hop
+        # which rejects them.
+        task_config: dict[str, Any] = {
+            "name": job_name,
+            "run": run_script,
+            "envs": envs,
+            "num_nodes": num_nodes,
+            "resources": resources_kwargs,
+        }
+        if file_mounts:
+            task_config["file_mounts"] = file_mounts
+        task = sky.Task.from_yaml_config(task_config)
         return task
 
 
@@ -706,8 +718,23 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
 
     def get_refreshed(self) -> "SkyPilotLaunchedJob":
         request_id = sky_jobs.queue(refresh=True, job_ids=[self._handle.job_id])
-        records = sky.get(request_id)
-        if not records:
+        result = sky.get(request_id)
+        # Sky's queue() return shape varied across versions. Newer (nightly):
+        # tuple[list[dict], ...]; older: list[dict] directly. Unwrap to the
+        # list of records.
+        if isinstance(result, tuple):
+            records = result[0] if result else []
+        else:
+            records = result or []
+        # Find the record matching our job_id (queue may ignore the filter
+        # and return all jobs).
+        rec = None
+        for r in records:
+            jid = r.get("job_id") if isinstance(r, dict) else getattr(r, "job_id", None)
+            if jid == self._handle.job_id:
+                rec = r
+                break
+        if rec is None:
             return SkyPilotLaunchedJob(
                 handle=dataclasses.replace(
                     self._handle,
@@ -715,7 +742,6 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
                     cached_failure_reason="job not found in sky.jobs.queue",
                 )
             )
-        rec = records[0]
         get = (lambda k: rec.get(k)) if isinstance(rec, dict) else (
             lambda k: getattr(rec, k, None)
         )

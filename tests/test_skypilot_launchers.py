@@ -36,6 +36,20 @@ def _stub_sky(monkeypatch):
             self.file_mounts = fm
             return self
 
+        @classmethod
+        def from_yaml_config(cls, cfg):
+            # Mirror sky.Task.from_yaml_config: build the task and apply Resources.
+            t = cls(
+                name=cfg.get("name"),
+                run=cfg.get("run"),
+                envs=cfg.get("envs", {}),
+                num_nodes=cfg.get("num_nodes", 1),
+                file_mounts=cfg.get("file_mounts"),
+            )
+            if "resources" in cfg:
+                t.set_resources(_FakeResources(**cfg["resources"]))
+            return t
+
     class _FakeResources:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
@@ -220,10 +234,16 @@ def test_input_path_uri_becomes_file_mount():
         annotations={},
     )
     assert task.file_mounts is not None
-    container_path = next(iter(task.file_mounts))
-    assert container_path.startswith("/tmp/inputs/dataset/")
-    assert task.file_mounts[container_path] == "gs://example-bucket/datasets/foo.parquet"
-    assert container_path in task.run
+    # SkyPilot MOUNT mode requires source to be a bucket root, not a sub-path.
+    # Launcher mounts each unique bucket once at /mnt/skypilot/<scheme>/<bucket>
+    # and uses sub-paths inside the container.
+    mount_point = "/mnt/skypilot/gs/example-bucket"
+    assert mount_point in task.file_mounts
+    fm_value = task.file_mounts[mount_point]
+    assert isinstance(fm_value, dict)
+    assert fm_value["source"] == "gs://example-bucket"
+    assert fm_value["mode"] == "MOUNT"
+    assert f"{mount_point}/datasets/foo.parquet" in task.run
 
 
 def test_priority_class_annotation_overrides_default():
@@ -498,7 +518,11 @@ def test_skypilot_only_s3_file_mount_accepted():
         output_uris={},
         annotations={},
     )
-    assert any(uri.startswith("s3://") for uri in task.file_mounts.values())
+    # Cloud URIs are wrapped in dicts (source: ...) for storage_mount promotion.
+    assert any(
+        isinstance(v, dict) and v.get("source", "").startswith("s3://")
+        for v in task.file_mounts.values()
+    )
 
 
 def test_skypilot_only_first_class_priority_class():
@@ -609,12 +633,14 @@ def test_multistep_with_cloud_uris_passes_through():
         output_uris={"shouted": downstream_output_uri},
         annotations={},
     )
-    # Both URIs registered as SkyPilot file_mounts so the container reads/writes
-    # through cloud storage.
+    # MOUNT mode mounts the parent dir of each artifact file (gcsfuse can't
+    # mount individual files). The launcher rpartitions on '/'.
     assert task.file_mounts is not None
-    mount_values = list(task.file_mounts.values())
-    assert upstream_uri in mount_values
-    assert downstream_output_uri in mount_values
+    mount_sources = [
+        v.get("source") for v in task.file_mounts.values() if isinstance(v, dict)
+    ]
+    # The launcher dedups by bucket, so both URIs share the same mount.
+    assert "gs://tangle-test" in mount_sources
 
 
 def test_input_local_uri_raises_actionable_error():
