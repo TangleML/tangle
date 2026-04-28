@@ -53,7 +53,9 @@ def get(path):
 #   TANGLE_MULTI_NODE_NODE_0_ADDRESS
 #   TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES
 multinode_spec = {
-    "name": "multinode-peer-check",
+    # "skypilot-" prefix makes the launcher visible in the Tangle UI / dashboard
+    # without changing any launcher defaults.
+    "name": "skypilot-multinode-peer-check",
     "outputs": [{"name": "report", "type": "String"}],
     "implementation": {
         "container": {
