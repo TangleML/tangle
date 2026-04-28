@@ -210,11 +210,7 @@ class SkyPilotKubernetesLauncher(
         annotation_to_label_keys: Optional[list[str]] = None,
         priority_class: Optional[str] = None,
         use_spot: Optional[bool] = None,
-        # Default prefix encodes both the orchestrator (Tangle) and the
-        # launcher (SkyPilot). Surfaces in the SkyPilot dashboard, `sky jobs
-        # queue`, and Tangle's debug_info.skypilot.job_name pane — making it
-        # obvious at a glance which launcher ran a given task.
-        job_name_prefix: str = "tangle-skypilot-",
+        job_name_prefix: str = "tangle-",
         storage_provider: Optional[
             storage_provider_interfaces.StorageProvider
         ] = None,
