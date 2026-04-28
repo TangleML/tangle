@@ -56,6 +56,9 @@ import threading
 from typing import Any, Iterator, Optional
 
 from cloud_pipelines.orchestration.launchers import naming_utils
+from cloud_pipelines.orchestration.storage_providers import (
+    interfaces as storage_provider_interfaces,
+)
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend.launchers import (
     container_component_utils,
@@ -208,6 +211,9 @@ class SkyPilotKubernetesLauncher(
         priority_class: Optional[str] = None,
         use_spot: Optional[bool] = None,
         job_name_prefix: str = "tangle-",
+        storage_provider: Optional[
+            storage_provider_interfaces.StorageProvider
+        ] = None,
     ):
         """
         Args:
@@ -231,6 +237,10 @@ class SkyPilotKubernetesLauncher(
             use_spot: Default spot-instance preference. Per-task override via
                 ``SPOT_ANNOTATION_KEY``.
             job_name_prefix: Prefix for SkyPilot managed job names.
+            storage_provider: Used by ``upload_log()`` to mirror the SkyPilot
+                managed-job logs to ``log_uri`` so the Tangle UI can display
+                them. If ``None``, ``upload_log()`` is a no-op (sky logs are
+                still available via ``sky jobs logs <id>``).
         """
         self._infra = infra
         self._pool = pool
@@ -241,6 +251,7 @@ class SkyPilotKubernetesLauncher(
         self._default_priority_class = priority_class
         self._default_use_spot = use_spot
         self._job_name_prefix = job_name_prefix
+        self._storage_provider = storage_provider
         # Serialize submissions; sky's SDK is safe to call concurrently but the
         # orchestrator may invoke launch_container_task from many workers, and
         # serializing keeps log_uri / file_mount conflict checks deterministic.
@@ -308,18 +319,23 @@ class SkyPilotKubernetesLauncher(
                 job_name=job_name,
                 output_uris=dict(output_uris),
                 log_uri=log_uri,
-            )
+            ),
+            storage_provider=self._storage_provider,
         )
 
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
     ) -> "SkyPilotLaunchedJob":
-        return SkyPilotLaunchedJob.from_dict(launched_container_dict)
+        return SkyPilotLaunchedJob.from_dict(
+            launched_container_dict, storage_provider=self._storage_provider
+        )
 
     def get_refreshed_launched_container_from_dict(
         self, launched_container_dict: dict
     ) -> "SkyPilotLaunchedJob":
-        return SkyPilotLaunchedJob.from_dict(launched_container_dict).get_refreshed()
+        return SkyPilotLaunchedJob.from_dict(
+            launched_container_dict, storage_provider=self._storage_provider
+        ).get_refreshed()
 
     # ----------------- ComponentSpec -> sky.Task translation -----------------
 
@@ -565,8 +581,16 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
     in the request DB and reload across restarts.
     """
 
-    def __init__(self, handle: _SkyPilotJobHandle):
+    def __init__(
+        self,
+        handle: _SkyPilotJobHandle,
+        *,
+        storage_provider: Optional[
+            storage_provider_interfaces.StorageProvider
+        ] = None,
+    ):
         self._handle = handle
+        self._storage_provider = storage_provider
 
     @property
     def id(self) -> str:
@@ -620,22 +644,49 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
     def launcher_error_message(self) -> Optional[str]:
         return self._handle.cached_failure_reason
 
+    # Sky returns only the "Job N is already in terminal state ..." message
+    # when tail_logs is called immediately after a job ends — the user-job
+    # log file may not yet be flushed/visible on the controller. Detect this
+    # so callers can retry.
+    _SKY_TERMINAL_STATE_HINT = "is already in terminal state"
+
     def get_log(self) -> str:
-        buf = io.StringIO()
-        sky_jobs.tail_logs(
-            job_id=self._handle.job_id, follow=False, output_stream=buf
-        )
-        return buf.getvalue()
+        import time as _time
+        # Retry briefly: when the job has just ended, sky's tail_logs returns
+        # the terminal-state hint instead of the real log file. The actual
+        # logs become available after the controller finalizes them.
+        attempts, delay = 6, 2.0
+        out = ""
+        for i in range(attempts):
+            buf = io.StringIO()
+            sky_jobs.tail_logs(
+                job_id=self._handle.job_id, follow=False, output_stream=buf
+            )
+            out = buf.getvalue()
+            if self._SKY_TERMINAL_STATE_HINT not in out or len(out) > 500:
+                # Real log content: either the hint is absent, or there's
+                # enough content that the hint is just the trailing footer.
+                return out
+            if i + 1 < attempts:
+                _time.sleep(delay)
+                delay = min(delay * 1.5, 8.0)
+        return out
 
     def upload_log(self) -> None:
-        # SkyPilot already persists logs on its controller and exposes them via
-        # sky.jobs.tail_logs(). Mirroring them to log_uri requires a Tangle
-        # storage_provider, which the first cut leaves to subclasses.
-        _logger.debug(
-            "upload_log() is a no-op; use sky.jobs.tail_logs(job_id=%d) "
-            "or pass a storage_provider to a subclass.",
-            self._handle.job_id,
-        )
+        # Mirror the SkyPilot managed-job logs to log_uri via the orchestrator's
+        # storage provider so the Tangle UI can display them. Without this,
+        # logs are still available via ``sky jobs logs <id>`` but the UI's
+        # /api/.../log endpoint reads from log_uri and returns nothing.
+        if self._storage_provider is None:
+            _logger.debug(
+                "upload_log: no storage_provider configured; skipping mirror "
+                "(sky.jobs.tail_logs(job_id=%d) is still available).",
+                self._handle.job_id,
+            )
+            return
+        log_text = self.get_log()
+        writer = self._storage_provider.make_uri(self._handle.log_uri).get_writer()
+        writer.upload_from_text(log_text)
 
     def stream_log_lines(self) -> Iterator[str]:
         # Bridge sky.jobs.tail_logs(follow=True) into a generator of lines.
@@ -701,7 +752,14 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "SkyPilotLaunchedJob":
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        *,
+        storage_provider: Optional[
+            storage_provider_interfaces.StorageProvider
+        ] = None,
+    ) -> "SkyPilotLaunchedJob":
         sk = d["skypilot"]
         return cls(
             handle=_SkyPilotJobHandle(
@@ -713,7 +771,8 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
                 cached_failure_reason=sk.get("cached_failure_reason"),
                 cached_started_at=sk.get("cached_started_at"),
                 cached_ended_at=sk.get("cached_ended_at"),
-            )
+            ),
+            storage_provider=storage_provider,
         )
 
     def get_refreshed(self) -> "SkyPilotLaunchedJob":
@@ -740,7 +799,8 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
                     self._handle,
                     cached_status="FAILED_CONTROLLER",
                     cached_failure_reason="job not found in sky.jobs.queue",
-                )
+                ),
+                storage_provider=self._storage_provider,
             )
         get = (lambda k: rec.get(k)) if isinstance(rec, dict) else (
             lambda k: getattr(rec, k, None)
@@ -755,5 +815,6 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
                 cached_failure_reason=get("failure_reason"),
                 cached_started_at=float(started_at) if started_at else None,
                 cached_ended_at=float(ended_at) if ended_at else None,
-            )
+            ),
+            storage_provider=self._storage_provider,
         )
