@@ -1,20 +1,15 @@
-"""End-to-end multi-node test for the SkyPilot launcher.
+"""Real GPU PyTorch DDP multi-node test on CoreWeave H100s.
 
-Demonstrates a capability that Tangle's stock kubernetes_launchers cannot
-do straightforwardly: a single Tangle ComponentSpec annotated with
-`tangleml.com/launchers/kubernetes/multi_node/number_of_nodes: 2` runs as
-a 2-pod SkyPilot job with peer addressing and intra-job networking.
+Two pods, one H100 each, NCCL backend. Trains a small MLP with synthetic
+data via DistributedDataParallel and prints per-epoch loss.
 
-Each node:
-  - Prints its rank (TANGLE_MULTI_NODE_NODE_INDEX) and peer-0 address
-    (bridged from $SKYPILOT_NODE_RANK / $SKYPILOT_NODE_IPS by the launcher).
-  - Confirms the launcher's TANGLE_MULTI_NODE_* env-var prelude actually
-    fires inside the pod.
-  - Node 1 opens a TCP connection to node 0 to prove peer addressing
-    works end-to-end (not just env vars).
+The launcher's run-script prelude exports TANGLE_MULTI_NODE_* from
+SkyPilot's runtime values; we map those onto torch.distributed's
+MASTER_ADDR / RANK / WORLD_SIZE so torch can rendez-vous across pods.
 
-Only rank 0 writes the report file (its MOUNT path is shared across pods,
-so concurrent writes would race).
+No file/storage mounts are configured — the training writes only to
+stdout, which sky captures and Tangle's `/container_log` endpoint
+serves. This avoids needing GCS credentials inside the worker pods.
 """
 from __future__ import annotations
 import datetime, json, time, urllib.request, urllib.error
@@ -41,131 +36,136 @@ def get(path):
         return {"_error": e.code, "_body": e.read().decode()[:200]}
 
 
-# Single multi-node component.
-#
-# `python:3.11-slim` is Debian-based — it has /bin/bash, which SkyPilot's
-# setup commands require. Alpine/distroless images don't work here.
-#
-# The launcher's run-script prelude exports these env vars on every pod
-# from $SKYPILOT_NUM_NODES / $SKYPILOT_NODE_RANK / $SKYPILOT_NODE_IPS:
-#   TANGLE_MULTI_NODE_NUMBER_OF_NODES
-#   TANGLE_MULTI_NODE_NODE_INDEX
-#   TANGLE_MULTI_NODE_NODE_0_ADDRESS
-#   TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES
-multinode_spec = {
-    # "skypilot-" prefix makes the launcher visible in the Tangle UI / dashboard
-    # without changing any launcher defaults.
-    "name": "skypilot-multinode-peer-check",
-    "outputs": [{"name": "report", "type": "String"}],
+_TRAIN_PY = r"""
+import json, os, socket, time
+import torch, torch.nn as nn
+import torch.distributed as dist
+from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+rank = int(os.environ["RANK"])
+world = int(os.environ["WORLD_SIZE"])
+torch.manual_seed(42 + rank)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+print(f"[rank {rank}/{world}] host={socket.gethostname()} torch={torch.__version__} "
+      f"device={device} gpu={gpu_name} master={os.environ['MASTER_ADDR']}:{os.environ['MASTER_PORT']}",
+      flush=True)
+
+if device.type == "cuda":
+    torch.cuda.set_device(0)
+
+backend = "nccl" if device.type == "cuda" else "gloo"
+dist.init_process_group(backend=backend, rank=rank, world_size=world,
+                        timeout=__import__("datetime").timedelta(seconds=180))
+print(f"[rank {rank}] process group initialized (backend={backend})", flush=True)
+
+# Synthetic regression — a small MLP that gives the GPU something to do.
+N, D, H = 32768, 256, 512
+torch.manual_seed(0)
+X = torch.randn(N, D)
+W_true = torch.randn(D, 1) * 0.5
+y = X @ W_true + 0.1 + 0.05 * torch.randn(N, 1)
+ds = TensorDataset(X, y)
+
+batch = int(os.environ.get("BATCH_SIZE", "128"))
+epochs = int(os.environ.get("EPOCHS", "5"))
+lr = float(os.environ.get("LR", "0.01"))
+
+sampler = DistributedSampler(ds, num_replicas=world, rank=rank, shuffle=True)
+loader = DataLoader(ds, batch_size=batch, sampler=sampler)
+
+model = nn.Sequential(nn.Linear(D, H), nn.ReLU(),
+                     nn.Linear(H, H), nn.ReLU(),
+                     nn.Linear(H, 1)).to(device)
+ddp = DDP(model, device_ids=[0] if device.type == "cuda" else None)
+opt = torch.optim.Adam(ddp.parameters(), lr=lr)
+loss_fn = nn.MSELoss()
+
+t0 = time.time()
+for epoch in range(epochs):
+    sampler.set_epoch(epoch)
+    epoch_loss, n_batches = 0.0, 0
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
+        pred = ddp(xb)
+        loss = loss_fn(pred, yb)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        epoch_loss += loss.item()
+        n_batches += 1
+    t = torch.tensor([epoch_loss, float(n_batches)], device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    avg = (t[0] / t[1]).item()
+    msg = {"epoch": epoch + 1, "rank": rank, "avg_loss": round(avg, 6),
+           "elapsed_s": round(time.time() - t0, 2), "device": str(device)}
+    print(f"[rank {rank}] {msg}", flush=True)
+
+dist.barrier()
+dist.destroy_process_group()
+print(f"[rank {rank}] done", flush=True)
+"""
+
+ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+training_spec = {
+    # The "skypilot-" prefix surfaces the launcher in Tangle's UI / sky
+    # dashboard — both display the component name unchanged.
+    "name": f"skypilot-pytorch-ddp-h100-{ts}",
+    # No outputs declared: the launcher would otherwise add a storage_mount
+    # for each, which requires the worker pods to authenticate to the
+    # storage backend. CoreWeave pods don't have GCS creds, so we drop the
+    # mount and rely on sky's stdout capture instead.
     "implementation": {
         "container": {
-            "image": "python:3.11-slim",
+            "image": "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime",
+            "env": {"PIPELINE_RUN_TS": ts},
             "command": [
                 "bash", "-c",
-                # `bash -c CMD ARG` makes $0 == ARG. $0 is the output path.
-                r'''
-set -euo pipefail
-RANK="${TANGLE_MULTI_NODE_NODE_INDEX:-?}"
-NNODES="${TANGLE_MULTI_NODE_NUMBER_OF_NODES:-?}"
-PEER0="${TANGLE_MULTI_NODE_NODE_0_ADDRESS:-?}"
-ALL="${TANGLE_MULTI_NODE_ALL_NODE_ADDRESSES:-?}"
-HOST="$(hostname)"
-TS="$(date -u +%FT%TZ)"
-echo "[$HOST rank=$RANK/$NNODES] peer0=$PEER0 all=$ALL ts=$TS"
-echo "[$HOST rank=$RANK] SKYPILOT_NODE_RANK=${SKYPILOT_NODE_RANK:-unset} \
-SKYPILOT_NUM_NODES=${SKYPILOT_NUM_NODES:-unset} \
-SKYPILOT_NODE_IPS=${SKYPILOT_NODE_IPS:-unset}"
-
-if [ "$RANK" = "0" ]; then
-  python3 -u <<PYEOF
-import socket, time
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("0.0.0.0", 12321))
-s.listen(1)
-s.settimeout(60)
-print("[rank 0] listening on :12321 for peer", flush=True)
-try:
-    conn, addr = s.accept()
-    payload = conn.recv(2048).decode()
-    print(f"[rank 0] received from {addr}: {payload!r}", flush=True)
-    conn.close()
-except socket.timeout:
-    print("[rank 0] timed out waiting for peer", flush=True)
-PYEOF
-  mkdir -p "$(dirname "$0")"
-  cat > "$0" <<EOF
-multinode SUCCESS  rank0=$HOST  peer0=$PEER0  ts=$TS
-all_addrs=$ALL
-EOF
-  echo "[rank 0] wrote report to $0"
-else
-  # Worker rank: send a message to rank 0.
-  sleep 8  # give rank-0 a moment to start listening
-  python3 -u <<PYEOF
-import socket, os, time
-peer = os.environ["TANGLE_MULTI_NODE_NODE_0_ADDRESS"]
-rank = os.environ["TANGLE_MULTI_NODE_NODE_INDEX"]
-host = socket.gethostname()
-for attempt in range(5):
-    try:
-        with socket.create_connection((peer, 12321), timeout=10) as s:
-            s.sendall(f"hello from rank {rank} ({host})".encode())
-            print(f"[rank {rank}] sent message to {peer}:12321", flush=True)
-            break
-    except Exception as e:
-        print(f"[rank {rank}] attempt {attempt+1} failed: {e}", flush=True)
-        time.sleep(3)
-else:
-    raise SystemExit(f"[rank {rank}] could not reach rank 0 after 5 attempts")
-PYEOF
-fi
-                ''',
-                {"outputPath": "report"},
+                'set -euo pipefail; '
+                'export MASTER_ADDR="${TANGLE_MULTI_NODE_NODE_0_ADDRESS:-localhost}"; '
+                'export MASTER_PORT="29500"; '
+                'export RANK="${TANGLE_MULTI_NODE_NODE_INDEX:-0}"; '
+                'export WORLD_SIZE="${TANGLE_MULTI_NODE_NUMBER_OF_NODES:-1}"; '
+                'export EPOCHS="5"; export BATCH_SIZE="128"; export LR="0.01"; '
+                'echo "[$(hostname)] rank=$RANK/$WORLD_SIZE master=$MASTER_ADDR:$MASTER_PORT"; '
+                'nvidia-smi -L 2>/dev/null || echo "nvidia-smi unavailable"; '
+                f'python3 -u <<\'PYEOF\'\n{_TRAIN_PY}\nPYEOF',
             ],
         }
     },
 }
 
-ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
 pipeline_spec = {
-    # Surfaces "skypilot" prominently in the Tangle Pipelines list.
-    "name": f"skypilot-multinode-pipeline-{ts}",
-    "outputs": [{"name": "result", "type": "String"}],
+    "name": f"skypilot-pytorch-ddp-h100-pipeline-{ts}",
     "implementation": {
         "graph": {
             "tasks": {
-                # Annotations live on the TaskSpec — orchestrator_sql.py forwards
-                # task_spec.annotations to launcher.launch_container_task(), but
-                # NOT component_spec.metadata.annotations.
-                "multinode": {
-                    "componentRef": {"spec": multinode_spec},
+                "train": {
+                    "componentRef": {"spec": training_spec},
                     "annotations": {
                         "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes": "2",
-                        "cloud-pipelines.net/launchers/generic/resources.cpu": "1",
-                        "cloud-pipelines.net/launchers/generic/resources.memory": "1",
+                        "cloud-pipelines.net/launchers/generic/resources.cpu": "4",
+                        "cloud-pipelines.net/launchers/generic/resources.memory": "16",
+                        "cloud-pipelines.net/launchers/generic/resources.accelerators": "H100:1",
                     },
                 },
-            },
-            "outputValues": {
-                "result": {
-                    "taskOutput": {"taskId": "multinode", "outputName": "report"}
-                }
             },
         }
     },
 }
 
-print(f"=== submit multinode pipeline (ts={ts}) ===")
+print(f"=== submit pytorch-ddp pipeline (ts={ts}) ===")
 body = {"root_task": {"componentRef": {"spec": pipeline_spec}, "arguments": {}}}
 run = post("/api/pipeline_runs/", body)
 print(json.dumps(run, indent=2))
 root_exec = run["root_execution_id"]
 
 print(f"\n=== poll graph_execution_state for {root_exec} ===")
-deadline = time.time() + 1800  # 30 min cap
+deadline = time.time() + 1800
 last = None
-final_done = False
 while time.time() < deadline:
     state = get(f"/api/executions/{root_exec}/graph_execution_state")
     line = json.dumps(state.get("child_execution_status_stats", {})) if state else "<no state>"
@@ -178,13 +178,11 @@ while time.time() < deadline:
         for status, count in status_dict.items():
             summary[status] = summary.get(status, 0) + count
     if any(summary.get(k, 0) > 0 for k in ("FAILED", "SYSTEM_ERROR", "INVALID", "CANCELLED")):
-        final_done = True
         break
     if (summary.get("SUCCEEDED", 0) >= 1 and
             not any(summary.get(k, 0) > 0
                     for k in ("PENDING", "QUEUED", "RUNNING", "WAITING_FOR_UPSTREAM",
                               "STARTING"))):
-        final_done = True
         break
     time.sleep(15)
 
