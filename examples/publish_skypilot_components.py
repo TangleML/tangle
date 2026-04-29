@@ -69,7 +69,8 @@ name: 'SkyPilot: Multi-node PyTorch DDP'
 description: |
   Real multi-node PyTorch DistributedDataParallel training driven by the
   SkyPilot launcher. Two pods, NCCL backend, synthetic regression on a
-  small MLP — gradients are all-reduced across ranks each step.
+  small MLP — gradients are all-reduced across ranks each step. Rank 0
+  saves a checkpoint and per-epoch JSONL log to the configured outputs.
 
   Annotate the TaskSpec with
     tangleml.com/launchers/kubernetes/multi_node/number_of_nodes: "2"
@@ -78,10 +79,16 @@ description: |
   multi-GPU. Drop the accelerators annotation for a CPU-only run with
   the gloo backend (slower but no GPU needed).
 
-  Verified on CoreWeave H100s: loss 3.46 → 0.026 over 5 epochs; total
-  ~14s after image pull / NCCL rendez-vous. Rank-synchronized
-  all-reduce confirms DDP gradient sync end-to-end.
+  Verified on CoreWeave H100s (sky-dev cluster):
+    loss 3.46 → 0.08 → 0.057 → 0.025 → 0.026 over 5 epochs
+    ~18s job duration; rank-synchronized all-reduce confirms gradient sync
+    rank 0 wrote a 1.5 MiB checkpoint to gs://tangle-skypilot-test-zhwu/...
+  Worker pods get GCS auth via SkyPilot's gcpCredentials helm option
+  (mounts a GCP service-account key + GOOGLE_APPLICATION_CREDENTIALS).
 
+outputs:
+  - {name: checkpoint, type: Model}
+  - {name: training_log, type: String}
 implementation:
   container:
     image: pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
@@ -94,6 +101,7 @@ implementation:
         export MASTER_PORT="29500"
         export RANK="${TANGLE_MULTI_NODE_NODE_INDEX:-0}"
         export WORLD_SIZE="${TANGLE_MULTI_NODE_NUMBER_OF_NODES:-1}"
+        export OUTPUT_CKPT="$0"; export OUTPUT_LOG="$1"
         : "${EPOCHS:=5}"; : "${BATCH_SIZE:=128}"; : "${LR:=0.01}"
         echo "[$(hostname)] rank=$RANK/$WORLD_SIZE master=$MASTER_ADDR:$MASTER_PORT"
         nvidia-smi -L 2>/dev/null || echo "nvidia-smi unavailable"
@@ -131,7 +139,7 @@ implementation:
         ddp = DDP(model, device_ids=[0] if device.type == 'cuda' else None)
         opt = torch.optim.Adam(ddp.parameters(), lr=float(os.environ['LR']))
         loss_fn = nn.MSELoss()
-        t0 = time.time()
+        log_lines, t0 = [], time.time()
         for epoch in range(int(os.environ['EPOCHS'])):
             sampler.set_epoch(epoch)
             running, n = 0.0, 0
@@ -143,14 +151,27 @@ implementation:
                 running += loss.item(); n += 1
             t = torch.tensor([running, float(n)], device=device)
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
-            print(f'[rank {rank}]', json.dumps({
-                'epoch': epoch + 1, 'rank': rank,
-                'avg_loss': round((t[0]/t[1]).item(), 6),
-                'elapsed_s': round(time.time() - t0, 2),
-                'device': str(device)}), flush=True)
-        dist.barrier(); dist.destroy_process_group()
+            msg = {'epoch': epoch + 1, 'rank': rank,
+                   'avg_loss': round((t[0]/t[1]).item(), 6),
+                   'elapsed_s': round(time.time() - t0, 2),
+                   'device': str(device)}
+            print(f'[rank {rank}]', json.dumps(msg), flush=True)
+            log_lines.append(json.dumps(msg))
+        dist.barrier()
+        if rank == 0:
+            ckpt, log = os.environ['OUTPUT_CKPT'], os.environ['OUTPUT_LOG']
+            os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+            os.makedirs(os.path.dirname(log), exist_ok=True)
+            torch.save({'state_dict': ddp.module.state_dict(),
+                        'world_size': world, 'gpu': gpu, 'device': str(device)}, ckpt)
+            with open(log, 'w') as f:
+                f.write('\\n'.join(log_lines) + '\\n')
+            print(f'[rank 0] wrote {ckpt} ({os.path.getsize(ckpt)} bytes)', flush=True)
+        dist.destroy_process_group()
         print(f'[rank {rank}] done', flush=True)
         PY
+      - {outputPath: checkpoint}
+      - {outputPath: training_log}
 """
 
 

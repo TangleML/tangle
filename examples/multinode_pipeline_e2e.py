@@ -1,15 +1,16 @@
 """Real GPU PyTorch DDP multi-node test on CoreWeave H100s.
 
 Two pods, one H100 each, NCCL backend. Trains a small MLP with synthetic
-data via DistributedDataParallel and prints per-epoch loss.
+data via DistributedDataParallel, writes a checkpoint and per-epoch
+JSONL log to GCS.
 
 The launcher's run-script prelude exports TANGLE_MULTI_NODE_* from
 SkyPilot's runtime values; we map those onto torch.distributed's
 MASTER_ADDR / RANK / WORLD_SIZE so torch can rendez-vous across pods.
 
-No file/storage mounts are configured — the training writes only to
-stdout, which sky captures and Tangle's `/container_log` endpoint
-serves. This avoids needing GCS credentials inside the worker pods.
+Worker pods authenticate to GCS via a GCP service-account key mounted
+by SkyPilot's helm chart (gcpCredentials.enabled=true), so storage
+mounts work outside GKE.
 """
 from __future__ import annotations
 import datetime, json, time, urllib.request, urllib.error
@@ -84,6 +85,7 @@ ddp = DDP(model, device_ids=[0] if device.type == "cuda" else None)
 opt = torch.optim.Adam(ddp.parameters(), lr=lr)
 loss_fn = nn.MSELoss()
 
+log_lines = []
 t0 = time.time()
 for epoch in range(epochs):
     sampler.set_epoch(epoch)
@@ -103,8 +105,21 @@ for epoch in range(epochs):
     msg = {"epoch": epoch + 1, "rank": rank, "avg_loss": round(avg, 6),
            "elapsed_s": round(time.time() - t0, 2), "device": str(device)}
     print(f"[rank {rank}] {msg}", flush=True)
+    log_lines.append(json.dumps(msg))
 
 dist.barrier()
+if rank == 0:
+    ckpt_path = os.environ["OUTPUT_CKPT"]
+    log_path = os.environ["OUTPUT_LOG"]
+    os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    torch.save({"state_dict": ddp.module.state_dict(),
+                "world_size": world, "epochs": epochs,
+                "device": str(device), "gpu": gpu_name}, ckpt_path)
+    with open(log_path, "w") as f:
+        f.write("\n".join(log_lines) + "\n")
+    print(f"[rank 0] wrote {ckpt_path} ({os.path.getsize(ckpt_path)} bytes) "
+          f"and {log_path}", flush=True)
 dist.destroy_process_group()
 print(f"[rank {rank}] done", flush=True)
 """
@@ -114,10 +129,10 @@ training_spec = {
     # The "skypilot-" prefix surfaces the launcher in Tangle's UI / sky
     # dashboard — both display the component name unchanged.
     "name": f"skypilot-pytorch-ddp-h100-{ts}",
-    # No outputs declared: the launcher would otherwise add a storage_mount
-    # for each, which requires the worker pods to authenticate to the
-    # storage backend. CoreWeave pods don't have GCS creds, so we drop the
-    # mount and rely on sky's stdout capture instead.
+    "outputs": [
+        {"name": "checkpoint", "type": "Model"},
+        {"name": "training_log", "type": "String"},
+    ],
     "implementation": {
         "container": {
             "image": "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime",
@@ -129,10 +144,14 @@ training_spec = {
                 'export MASTER_PORT="29500"; '
                 'export RANK="${TANGLE_MULTI_NODE_NODE_INDEX:-0}"; '
                 'export WORLD_SIZE="${TANGLE_MULTI_NODE_NUMBER_OF_NODES:-1}"; '
+                'export OUTPUT_CKPT="$0"; '
+                'export OUTPUT_LOG="$1"; '
                 'export EPOCHS="5"; export BATCH_SIZE="128"; export LR="0.01"; '
                 'echo "[$(hostname)] rank=$RANK/$WORLD_SIZE master=$MASTER_ADDR:$MASTER_PORT"; '
                 'nvidia-smi -L 2>/dev/null || echo "nvidia-smi unavailable"; '
                 f'python3 -u <<\'PYEOF\'\n{_TRAIN_PY}\nPYEOF',
+                {"outputPath": "checkpoint"},
+                {"outputPath": "training_log"},
             ],
         }
     },
@@ -140,6 +159,7 @@ training_spec = {
 
 pipeline_spec = {
     "name": f"skypilot-pytorch-ddp-h100-pipeline-{ts}",
+    "outputs": [{"name": "checkpoint", "type": "Model"}],
     "implementation": {
         "graph": {
             "tasks": {
@@ -152,6 +172,11 @@ pipeline_spec = {
                         "cloud-pipelines.net/launchers/generic/resources.accelerators": "H100:1",
                     },
                 },
+            },
+            "outputValues": {
+                "checkpoint": {
+                    "taskOutput": {"taskId": "train", "outputName": "checkpoint"}
+                }
             },
         }
     },
