@@ -25,7 +25,7 @@ dev = [
     "pytest-asyncio>=0.25.2",
 ]
 huggingface = [
-    "huggingface-hub[oauth]>=0.35.3",
+    "huggingface-hub[oauth]>=1.13.0",
 ]
 
 [tool.pytest.ini_options]
