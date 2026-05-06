@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from cloud_pipelines_backend.instrumentation import contextual_logging
@@ -12,16 +13,12 @@ from cloud_pipelines_backend.instrumentation.api_tracing import RequestContextMi
 
 def test_request_id_isolation_with_concurrent_requests():
     """Test that each concurrent request gets its own isolated request_id."""
-    app = Starlette()
-    app.add_middleware(RequestContextMiddleware)
-
     # Store request_ids seen by each endpoint
     request_ids_seen = {
         "endpoint1": [],
         "endpoint2": [],
     }
 
-    @app.route("/endpoint1")
     async def endpoint1(request):
         request_id = contextual_logging.get_context_metadata("request_id")
         request_ids_seen["endpoint1"].append(request_id)
@@ -31,7 +28,6 @@ def test_request_id_isolation_with_concurrent_requests():
         assert contextual_logging.get_context_metadata("request_id") == request_id
         return JSONResponse({"request_id": request_id})
 
-    @app.route("/endpoint2")
     async def endpoint2(request):
         request_id = contextual_logging.get_context_metadata("request_id")
         request_ids_seen["endpoint2"].append(request_id)
@@ -41,6 +37,8 @@ def test_request_id_isolation_with_concurrent_requests():
         assert contextual_logging.get_context_metadata("request_id") == request_id
         return JSONResponse({"request_id": request_id})
 
+    app = Starlette(routes=[Route("/endpoint1", endpoint1), Route("/endpoint2", endpoint2)])
+    app.add_middleware(RequestContextMiddleware)
     client = TestClient(app)
 
     # Make concurrent requests
@@ -71,9 +69,6 @@ def test_request_id_isolation_with_concurrent_requests():
 
 def test_request_id_isolation_with_nested_async_calls():
     """Test that request_id persists correctly through nested async function calls."""
-    app = Starlette()
-    app.add_middleware(RequestContextMiddleware)
-
     request_ids_collected = []
 
     async def helper_function_1():
@@ -97,7 +92,6 @@ def test_request_id_isolation_with_nested_async_calls():
             ("helper2_after", contextual_logging.get_context_metadata("request_id"))
         )
 
-    @app.route("/test")
     async def test_route(request):
         request_ids_collected.append(
             ("start", contextual_logging.get_context_metadata("request_id"))
@@ -108,6 +102,8 @@ def test_request_id_isolation_with_nested_async_calls():
         )
         return JSONResponse({"ok": True})
 
+    app = Starlette(routes=[Route("/test", test_route)])
+    app.add_middleware(RequestContextMiddleware)
     client = TestClient(app)
     response = client.get("/test")
 
@@ -124,12 +120,8 @@ def test_request_id_isolation_with_nested_async_calls():
 
 def test_request_id_does_not_leak_between_requests():
     """Test that request_id from one request doesn't leak into another."""
-    app = Starlette()
-    app.add_middleware(RequestContextMiddleware)
-
     request_ids_per_request = []
 
-    @app.route("/test")
     async def test_route(request):
         # Capture request_id at start
         start_request_id = contextual_logging.get_context_metadata("request_id")
@@ -144,6 +136,8 @@ def test_request_id_does_not_leak_between_requests():
 
         return JSONResponse({"request_id": end_request_id})
 
+    app = Starlette(routes=[Route("/test", test_route)])
+    app.add_middleware(RequestContextMiddleware)
     client = TestClient(app)
 
     # Make multiple sequential requests
