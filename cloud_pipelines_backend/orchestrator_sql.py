@@ -131,8 +131,9 @@ class OrchestratorService_Sql:
             return False
 
     def internal_process_running_executions_queue(self, session: orm.Session):
-        query = (
-            sql.select(bts.ContainerExecution)
+        # Select only the ID to avoid loading large JSON columns into the sort buffer.
+        id_query = (
+            sql.select(bts.ContainerExecution.id)
             .where(
                 bts.ContainerExecution.status.in_(
                     (
@@ -144,7 +145,10 @@ class OrchestratorService_Sql:
             .order_by(bts.ContainerExecution.last_processed_at)
             .limit(1)
         )
-        running_container_execution = session.scalar(query)
+        execution_id = session.scalar(id_query)
+        running_container_execution = (
+            session.get(bts.ContainerExecution, execution_id) if execution_id else None
+        )
         if running_container_execution:
             self._running_executions_queue_idle = False
             start_timestamp = time.monotonic_ns()
