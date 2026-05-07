@@ -11,6 +11,7 @@ from typing import Any
 import sqlalchemy as sql
 from sqlalchemy import event as sql_event
 from sqlalchemy import orm
+from sqlalchemy.orm import load_only
 
 from cloud_pipelines.orchestration.storage_providers import (
     interfaces as storage_provider_interfaces,
@@ -133,6 +134,13 @@ class OrchestratorService_Sql:
     def internal_process_running_executions_queue(self, session: orm.Session):
         query = (
             sql.select(bts.ContainerExecution)
+            .options(
+                load_only(
+                    bts.ContainerExecution.id,
+                    bts.ContainerExecution.status,
+                    bts.ContainerExecution.last_processed_at,
+                )
+            )
             .where(
                 bts.ContainerExecution.status.in_(
                     (
