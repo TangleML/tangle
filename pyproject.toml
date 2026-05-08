@@ -28,6 +28,9 @@ huggingface = [
     "huggingface-hub[oauth]>=0.35.3",
 ]
 
+[tool.uv]
+exclude-newer = "7 days"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib"

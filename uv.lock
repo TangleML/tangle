@@ -7,6 +7,10 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 
+[options]
+exclude-newer = "2026-05-01T21:43:53.304008Z"
+exclude-newer-span = "P7D"
+
 [[package]]
 name = "alembic"
 version = "1.18.4"
