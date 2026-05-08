@@ -21,6 +21,7 @@ from . import backend_types_sql as bts
 from . import component_structures as structures
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
+from .instrumentation import bugsnag_instrumentation
 from .instrumentation import contextual_logging
 from .instrumentation import metrics as app_metrics
 
@@ -66,8 +67,9 @@ class OrchestratorService_Sql:
             try:
                 self.process_each_queue_once()
                 time.sleep(self._sleep_seconds_between_queue_sweeps)
-            except Exception:
+            except Exception as exc:
                 _logger.exception("Error while calling `process_each_queue_once`")
+                bugsnag_instrumentation.notify(exception=exc)
 
     def process_each_queue_once(self):
         queue_handlers = [
@@ -78,8 +80,9 @@ class OrchestratorService_Sql:
             try:
                 with self._session_factory() as session:
                     queue_handler(session=session)
-            except Exception:
+            except Exception as exc:
                 _logger.exception(f"Error while executing {queue_handler=}")
+                bugsnag_instrumentation.notify(exception=exc)
 
     def internal_process_queued_executions_queue(self, session: orm.Session):
         query = (
@@ -1064,6 +1067,7 @@ def _retry(
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):
     app_metrics.execution_system_errors.add(1)
+    bugsnag_instrumentation.notify(exception=exception, execution_id=str(execution.id))
 
     if execution.extra_data is None:
         execution.extra_data = {}
