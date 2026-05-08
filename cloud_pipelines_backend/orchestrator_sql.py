@@ -279,6 +279,15 @@ class OrchestratorService_Sql:
             # TODO: It might be better to search for ContainerExecutions rather than ExecutionNodes.
             execution_candidates = session.scalars(
                 sql.select(bts.ExecutionNode)
+                .options(
+                    # Defer JSON column `task_spec` to reduce filesort sort buffer usage during ORDER BY.
+                    # `extra_data` JSON will be called later so not deferring to prevent N + 1 queries.
+                    #
+                    # Reference:
+                    # "unloaded columns by default will load themselves when accessed using lazy loading"
+                    # https://docs.sqlalchemy.org/en/20/orm/queryguide/columns.html#using-defer-to-omit-specific-columns
+                    orm.defer(bts.ExecutionNode.task_spec),
+                )
                 .where(bts.ExecutionNode.container_execution_cache_key == cache_key)
                 .where(
                     bts.ExecutionNode.container_execution_status.in_(
