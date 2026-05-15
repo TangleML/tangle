@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "alembic>=1.18.4",
+    "bugsnag>=4.9.0,<5",
     "cloud-pipelines>=0.23.2.4",
     "fastapi[standard]>=0.115.12",
     "kubernetes>=33.1.0",
