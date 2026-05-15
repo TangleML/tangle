@@ -6,6 +6,7 @@ import sqlalchemy
 from sqlalchemy import orm
 
 from cloud_pipelines_backend import orchestrator_sql
+from cloud_pipelines_backend.instrumentation import bugsnag_instrumentation
 from cloud_pipelines_backend.launchers import kubernetes_launchers
 from cloud_pipelines.orchestration.storage_providers import local_storage
 
@@ -32,6 +33,7 @@ def main():
     logger.addHandler(stderr_handler)
 
     logger.info("Starting the orchestrator")
+    bugsnag_instrumentation.setup(service_name="tangle-orchestrator")
 
     DEFAULT_DATABASE_URI = "sqlite:///db.sqlite"
     database_uri = os.environ.get("DATABASE_URI", DEFAULT_DATABASE_URI)
