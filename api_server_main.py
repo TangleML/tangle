@@ -35,7 +35,7 @@ def handle_error(request: fastapi.Request, exc: BaseException):
     bugsnag_instrumentation.notify(exception=exc)
     response = fastapi.responses.JSONResponse(
         status_code=503,
-        content={"exception": exception_str},
+        content={"error": "An unexpected error occurred. Please try again later."},
     )
     request_id = contextual_logging.get_context_metadata("request_id")
     if request_id:
