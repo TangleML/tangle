@@ -1,11 +1,13 @@
 import os
 import traceback
 
+import bugsnag.middleware as bugsnag_middleware
 import fastapi
 
 from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend.instrumentation import api_tracing
+from cloud_pipelines_backend.instrumentation import bugsnag_instrumentation
 from cloud_pipelines_backend.instrumentation import contextual_logging
 from cloud_pipelines_backend.instrumentation import opentelemetry as otel
 
@@ -18,13 +20,19 @@ app = fastapi.FastAPI(
 otel.setup_providers()
 otel.instrument_fastapi(app)
 
+bugsnag_instrumentation.setup(service_name="tangle-api")
+
 # Add request context middleware for automatic request_id generation
 app.add_middleware(api_tracing.RequestContextMiddleware)
+
+if bugsnag_instrumentation.IS_BUGSNAG_ENABLED:
+    app.add_middleware(bugsnag_middleware.BugsnagMiddleware)
 
 
 @app.exception_handler(Exception)
 def handle_error(request: fastapi.Request, exc: BaseException):
     exception_str = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    bugsnag_instrumentation.notify(exception=exc)
     response = fastapi.responses.JSONResponse(
         status_code=503,
         content={"exception": exception_str},
