@@ -192,6 +192,85 @@ def test_before_notify_attaches_context_metadata(monkeypatch):
     )
 
 
+def test_before_notify_prefixes_error_class_when_grouping_prefix_set(monkeypatch):
+    monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
+    monkeypatch.setenv("TANGLE_ENV", "staging")
+    monkeypatch.setenv("TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY", "my_key")
+
+    import importlib
+    import cloud_pipelines_backend.instrumentation.bugsnag_instrumentation as bugsnag_module
+
+    importlib.reload(bugsnag_module)
+
+    from cloud_pipelines_backend.instrumentation import contextual_logging
+    from bugsnag.error import Error
+
+    contextual_logging.clear_context_metadata()
+
+    error = Error("ValueError", "boom", [])
+    mock_event = mock.MagicMock()
+    mock_event.original_error = ValueError("boom")
+    mock_event.metadata = {"extra": {"grouping_prefix": "SYSTEM_ERROR"}}
+    mock_event.errors = [error]
+
+    bugsnag_module._before_notify(mock_event)
+
+    assert error.error_class == "SYSTEM_ERROR: ValueError"
+
+
+def test_before_notify_skips_error_class_prefix_when_no_grouping_prefix(monkeypatch):
+    monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
+    monkeypatch.setenv("TANGLE_ENV", "staging")
+    monkeypatch.setenv("TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY", "my_key")
+
+    import importlib
+    import cloud_pipelines_backend.instrumentation.bugsnag_instrumentation as bugsnag_module
+
+    importlib.reload(bugsnag_module)
+
+    from cloud_pipelines_backend.instrumentation import contextual_logging
+    from bugsnag.error import Error
+
+    contextual_logging.clear_context_metadata()
+
+    error = Error("ValueError", "boom", [])
+    mock_event = mock.MagicMock()
+    mock_event.original_error = ValueError("boom")
+    mock_event.metadata = {"extra": {}}
+    mock_event.errors = [error]
+
+    bugsnag_module._before_notify(mock_event)
+
+    assert error.error_class == "ValueError"
+
+
+def test_before_notify_skips_error_class_prefix_gracefully_on_bad_errors_structure(
+    monkeypatch,
+):
+    monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
+    monkeypatch.setenv("TANGLE_ENV", "staging")
+    monkeypatch.setenv("TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY", "my_key")
+
+    import importlib
+    import cloud_pipelines_backend.instrumentation.bugsnag_instrumentation as bugsnag_module
+
+    importlib.reload(bugsnag_module)
+
+    from cloud_pipelines_backend.instrumentation import contextual_logging
+
+    contextual_logging.clear_context_metadata()
+
+    mock_event = mock.MagicMock()
+    mock_event.original_error = ValueError("boom")
+    mock_event.metadata = {"extra": {"grouping_prefix": "SYSTEM_ERROR"}}
+    mock_event.errors = (
+        "unexpected"  # SDK structure changed — not a list of Error objects
+    )
+
+    # Should not raise
+    bugsnag_module._before_notify(mock_event)
+
+
 def test_before_notify_skips_empty_context(monkeypatch):
     monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
     monkeypatch.setenv("TANGLE_ENV", "staging")

@@ -1067,7 +1067,11 @@ def _retry(
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):
     app_metrics.execution_system_errors.add(1)
-    bugsnag_instrumentation.notify(exception=exception, execution_id=str(execution.id))
+    bugsnag_instrumentation.notify(
+        exception=exception,
+        execution_id=str(execution.id),
+        grouping_prefix="SYSTEM_ERROR",
+    )
 
     if execution.extra_data is None:
         execution.extra_data = {}

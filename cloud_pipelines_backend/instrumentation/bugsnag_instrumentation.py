@@ -6,11 +6,12 @@ Provides entry points to configure Bugsnag and report exceptions.
 No-op if TANGLE_BUGSNAG_API_KEY is not set.
 
 Environment variables:
-    TANGLE_BUGSNAG_API_KEY        Required to enable Bugsnag reporting.
-    TANGLE_ENV                    Release stage (e.g. "staging", "production").
-    TANGLE_SERVICE_VERSION        App version tag (e.g. git SHA). Optional.
-    TANGLE_BUGSNAG_NOTIFY_ENDPOINT   Custom notify URL. Optional.
-    TANGLE_BUGSNAG_SESSIONS_ENDPOINT Custom sessions URL. Optional.
+    TANGLE_BUGSNAG_API_KEY             Required to enable Bugsnag reporting.
+    TANGLE_ENV                         Release stage (e.g. "staging", "production").
+    TANGLE_SERVICE_VERSION             App version tag (e.g. git SHA). Optional.
+    TANGLE_BUGSNAG_NOTIFY_ENDPOINT     Custom notify URL. Optional.
+    TANGLE_BUGSNAG_SESSIONS_ENDPOINT   Custom sessions URL. Optional.
+    TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY Metadata key for normalized error grouping. Optional.
 """
 
 import logging
@@ -21,6 +22,7 @@ import bugsnag as bugsnag_sdk
 import bugsnag.event as bugsnag_event
 
 from . import contextual_logging
+from . import error_normalization
 
 _logger = logging.getLogger(__name__)
 
@@ -29,6 +31,7 @@ _TANGLE_ENV = os.environ.get("TANGLE_ENV")
 _SERVICE_VERSION = os.environ.get("TANGLE_SERVICE_VERSION")
 _NOTIFY_ENDPOINT = os.environ.get("TANGLE_BUGSNAG_NOTIFY_ENDPOINT")
 _SESSIONS_ENDPOINT = os.environ.get("TANGLE_BUGSNAG_SESSIONS_ENDPOINT")
+_CUSTOM_GROUPING_KEY = os.environ.get("TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY")
 
 IS_BUGSNAG_ENABLED: bool = bool(_BUGSNAG_API_KEY)
 _setup_called: bool = False
@@ -39,6 +42,21 @@ def _before_notify(event: bugsnag_event.Event) -> None:
     context = contextual_logging.get_all_context_metadata()
     if context:
         event.add_tab("tangle_context", context)
+    if _CUSTOM_GROUPING_KEY and event.original_error:
+        normalized = error_normalization.normalize_error_message(
+            exception=event.original_error
+        )
+        prefix = (event.metadata.get("extra") or {}).get("grouping_prefix")
+        key_value = f"{prefix}: {normalized}" if prefix else normalized
+        event.add_tab("custom", {_CUSTOM_GROUPING_KEY: key_value})
+        if prefix and event.errors:
+            try:
+                for error in event.errors:
+                    error.error_class = f"{prefix}: {error.error_class}"
+            except Exception:
+                _logger.debug(
+                    "Could not prepend grouping prefix to errorClass", exc_info=True
+                )
 
 
 def setup(*, service_name: str | None = None) -> None:
