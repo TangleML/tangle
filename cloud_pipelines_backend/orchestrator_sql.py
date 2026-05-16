@@ -707,13 +707,19 @@ class OrchestratorService_Sql:
                 container_execution.status = bts.ContainerExecutionStatus.CANCELLED
                 terminated = True
 
+                # Marking the execution nodes as cancelled only after the launched container is successfully terminated
+                for execution_node in votes_to_terminate:
+                    _logger.info(
+                        f"Marking the execution node {execution_node.id} as CANCELLED."
+                    )
+                    execution_node.container_execution_status = (
+                        bts.ContainerExecutionStatus.CANCELLED
+                    )
+
             # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
             for execution_node in votes_to_terminate:
                 _logger.info(
-                    f"Cancelling execution {execution_node.id} and skipping all downstream executions."
-                )
-                execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.CANCELLED
+                    f"Skipping all downstream executions of cancelled execution node {execution_node.id}."
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
