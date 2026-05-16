@@ -31,6 +31,8 @@ huggingface = [
 
 [tool.uv]
 exclude-newer = "7 days"
+index-url = "https://pypi.org/simple"
+extra-index-url = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
