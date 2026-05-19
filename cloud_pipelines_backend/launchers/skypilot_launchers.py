@@ -53,6 +53,7 @@ import json
 import logging
 import shlex
 import threading
+import time
 from typing import Any, Iterator, Optional
 
 from cloud_pipelines.orchestration.launchers import naming_utils
@@ -166,6 +167,9 @@ class _SkyPilotJobHandle:
     cached_ended_at: Optional[float] = None
 
 
+_DEFAULT_DISK_SIZE_GB = 8
+
+
 def _coerce_disk_size_gb(spec: Any) -> int:
     """Best-effort parse of an ephemeral-storage annotation into GiB."""
     if isinstance(spec, (int, float)):
@@ -184,7 +188,11 @@ def _coerce_disk_size_gb(spec: Any) -> int:
     try:
         return max(1, int(float(s)))
     except ValueError:
-        return 8
+        _logger.warning(
+            "Could not parse ephemeral-storage spec %r; defaulting to %d GiB.",
+            spec, _DEFAULT_DISK_SIZE_GB,
+        )
+        return _DEFAULT_DISK_SIZE_GB
 
 
 class SkyPilotKubernetesLauncher(
@@ -192,9 +200,9 @@ class SkyPilotKubernetesLauncher(
 ):
     """Launches Tangle container tasks via SkyPilot managed jobs.
 
-    Designed for Kubernetes-only deployments (the Shopify use case) but works
-    against any infra SkyPilot supports. Set ``infra="kubernetes"`` (or
-    ``"kubernetes/<context>"``) to keep behavior aligned with the existing
+    Defaults to Kubernetes-only dispatch but works against any infra SkyPilot
+    supports. Set ``infra="kubernetes"`` (or ``"kubernetes/<context>"``) to
+    keep behavior aligned with the existing
     KubernetesWithGcsFuseContainerLauncher; pass ``infra=None`` to let
     SkyPilot's optimizer pick across any clouds the user has configured.
     """
@@ -207,7 +215,7 @@ class SkyPilotKubernetesLauncher(
         default_image: Optional[str] = None,
         default_labels: Optional[dict[str, str]] = None,
         default_envs: Optional[dict[str, str]] = None,
-        annotation_to_label_keys: Optional[list[str]] = None,
+        annotation_to_label_keys: Optional[dict[str, str]] = None,
         priority_class: Optional[str] = None,
         use_spot: Optional[bool] = None,
         job_name_prefix: str = "tangle-",
@@ -227,10 +235,13 @@ class SkyPilotKubernetesLauncher(
             default_labels: Labels applied to every Sky resource (propagated to
                 K8s pod labels under the kubernetes infra).
             default_envs: Env vars injected into every container.
-            annotation_to_label_keys: Tangle annotation keys whose values are
-                copied into Sky labels. Useful for passing through things like
-                ``ml.shopify.io/priority-class`` so the K8s pod ends up with the
-                same label kueue is configured to read.
+            annotation_to_label_keys: Map of Tangle annotation key -> Sky label
+                key. For each entry, when the Tangle component annotation is
+                present its value is copied to the named Sky label (and onward
+                to the K8s pod label). Useful for passing through scheduler-
+                relevant hints such as a queue/priority annotation so the K8s
+                pod ends up with the label Kueue (or another admission
+                controller) is configured to read.
             priority_class: Default SkyPilot priority class (Kueue-compatible).
                 Can be overridden per-task via the ``PRIORITY_CLASS_ANNOTATION_KEY``
                 annotation on a ComponentSpec.
@@ -247,7 +258,7 @@ class SkyPilotKubernetesLauncher(
         self._default_image = default_image
         self._default_labels = dict(default_labels or {})
         self._default_envs = dict(default_envs or {})
-        self._annotation_to_label_keys = list(annotation_to_label_keys or [])
+        self._annotation_to_label_keys = dict(annotation_to_label_keys or {})
         self._default_priority_class = priority_class
         self._default_use_spot = use_spot
         self._job_name_prefix = job_name_prefix
@@ -372,11 +383,8 @@ class SkyPilotKubernetesLauncher(
 
         # Labels: defaults, plus selected annotations propagated as labels.
         labels = dict(self._default_labels)
-        for ann_key in self._annotation_to_label_keys:
+        for ann_key, sky_label_key in self._annotation_to_label_keys.items():
             if ann_key in annotations:
-                sky_label_key = (
-                    ann_key.replace("/", "_").replace(".", "_").replace(":", "_")
-                )
                 labels[sky_label_key] = str(annotations[ann_key])
 
         # Pre-resolve multi-node dynamic-data inputs to shell expansions of the
@@ -651,7 +659,6 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
     _SKY_TERMINAL_STATE_HINT = "is already in terminal state"
 
     def get_log(self) -> str:
-        import time as _time
         # Retry briefly: when the job has just ended, sky's tail_logs returns
         # the terminal-state hint instead of the real log file. The actual
         # logs become available after the controller finalizes them.
@@ -668,7 +675,7 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
                 # enough content that the hint is just the trailing footer.
                 return out
             if i + 1 < attempts:
-                _time.sleep(delay)
+                time.sleep(delay)
                 delay = min(delay * 1.5, 8.0)
         return out
 

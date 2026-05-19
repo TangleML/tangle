@@ -13,9 +13,9 @@ by SkyPilot's helm chart (gcpCredentials.enabled=true), so storage
 mounts work outside GKE.
 """
 from __future__ import annotations
-import datetime, json, time, urllib.request, urllib.error
+import datetime, json, os, time, urllib.request, urllib.error
 
-BASE = "http://localhost:9091"
+BASE = os.environ.get("TANGLE_API_URL", "http://localhost:8000")
 
 
 def post(path, body):

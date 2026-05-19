@@ -5,17 +5,18 @@ will appear in the UI's component picker when building pipelines. Each
 component name is prefixed with "SkyPilot:" so they're easy to spot.
 
 Usage:
-    python examples/publish_skypilot_components.py
+    python examples/skypilot/publish_skypilot_components.py
 
 Idempotent — already-published components return 409 and are skipped.
 """
 from __future__ import annotations
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
-BASE = "http://localhost:9091"
+BASE = os.environ.get("TANGLE_API_URL", "http://localhost:8000")
 
 
 _GPU_SANITY_CHECK = """\

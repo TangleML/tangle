@@ -19,9 +19,9 @@ contexts and the launcher to be initialized with `infra=None` so the
 optimizer can pick per task.
 """
 from __future__ import annotations
-import datetime, json, time, urllib.request, urllib.error
+import datetime, json, os, time, urllib.request, urllib.error
 
-BASE = "http://localhost:9091"
+BASE = os.environ.get("TANGLE_API_URL", "http://localhost:8000")
 
 
 def post(path, body):

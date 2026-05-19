@@ -270,7 +270,9 @@ def test_annotation_to_label_propagation():
     )
 
     launcher = SkyPilotKubernetesLauncher(
-        annotation_to_label_keys=["ml.shopify.io/priority-class"],
+        annotation_to_label_keys={
+            "ml.shopify.io/priority-class": "ml.shopify.io/priority-class",
+        },
     )
     component = _make_component(command=["true"])
     task = launcher._build_task(
@@ -281,7 +283,7 @@ def test_annotation_to_label_propagation():
         annotations={"ml.shopify.io/priority-class": "interactive"},
     )
     labels = task.resources.kwargs["labels"]
-    assert labels["ml_shopify_io_priority-class"] == "interactive"
+    assert labels["ml.shopify.io/priority-class"] == "interactive"
 
 
 def test_serialize_round_trip():
@@ -723,7 +725,9 @@ def test_end_to_end_lifecycle_through_stubbed_sky():
     launcher = SkyPilotKubernetesLauncher(
         infra="kubernetes",
         priority_class="batch",
-        annotation_to_label_keys=["ml.shopify.io/priority-class"],
+        annotation_to_label_keys={
+            "ml.shopify.io/priority-class": "ml.shopify.io/priority-class",
+        },
         default_labels={"managed-by": "tangle"},
     )
 

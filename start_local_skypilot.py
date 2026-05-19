@@ -54,17 +54,32 @@ print(f"{database_uri=}")
 # endregion
 
 # region: Storage
-# Choose between LocalStorageProvider (default) and GoogleCloudStorageProvider
-# via TANGLE_STORAGE_BUCKET env var. SkyPilot's file_mounts can mount cloud
-# URIs (gs://, s3://, abfs://) but cannot represent relative local paths, so
-# multi-step pipelines need a cloud StorageProvider.
+# Choose between LocalStorageProvider (default) and a cloud StorageProvider
+# via the TANGLE_STORAGE_BUCKET env var. SkyPilot's file_mounts can mount
+# cloud URIs (gs://, s3://, abfs://) but cannot represent relative local
+# paths, so multi-step pipelines need a cloud StorageProvider.
+#
+# TANGLE_STORAGE_BUCKET must include a URI scheme so we can pick the
+# matching StorageProvider (e.g. "gs://my-bucket", "s3://my-bucket").
 storage_bucket = os.environ.get("TANGLE_STORAGE_BUCKET")
 if storage_bucket:
-    from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
-    storage_provider = google_cloud_storage.GoogleCloudStorageProvider()
     bucket_uri = storage_bucket.rstrip("/")
-    if not bucket_uri.startswith("gs://"):
-        bucket_uri = "gs://" + bucket_uri
+    if "://" not in bucket_uri:
+        raise ValueError(
+            f"TANGLE_STORAGE_BUCKET={storage_bucket!r} must include a URI "
+            "scheme so the storage provider can be deduced (e.g. "
+            "'gs://my-bucket', 's3://my-bucket')."
+        )
+    scheme = bucket_uri.split("://", 1)[0]
+    if scheme == "gs":
+        from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
+        storage_provider = google_cloud_storage.GoogleCloudStorageProvider()
+    else:
+        raise ValueError(
+            f"TANGLE_STORAGE_BUCKET scheme {scheme!r} is not supported by "
+            f"start_local_skypilot.py yet (got {storage_bucket!r}). Supported: "
+            "'gs://'."
+        )
     artifacts_root_uri = bucket_uri + "/artifacts"
     logs_root_uri = bucket_uri + "/logs"
 else:
@@ -88,7 +103,11 @@ launcher = SkyPilotKubernetesLauncher(
         "DEFAULT_CONTAINER_IMAGE", "python:3.11-slim"
     ),
     default_labels={"managed-by": "tangle"},
-    annotation_to_label_keys=["ml.shopify.io/priority-class"],
+    annotation_to_label_keys={
+        # Propagate the priority-class annotation through as a K8s pod label
+        # so Kueue (or another admission controller) can route accordingly.
+        "ml.shopify.io/priority-class": "ml.shopify.io/priority-class",
+    },
     priority_class=os.environ.get("DEFAULT_PRIORITY_CLASS"),
     # Pass the storage provider so upload_log() can mirror SkyPilot logs to
     # log_uri and the Tangle UI's /api/.../log endpoint serves them.
@@ -229,6 +248,7 @@ this_dir = pathlib.Path(__file__).parent
 web_app_search_dirs = [
     this_dir / "ui_build",
     this_dir / ".." / "ui_build",
+    this_dir / ".." / "tangle-ui" / "dist",
 ]
 mounted = False
 for web_app_dir in web_app_search_dirs:

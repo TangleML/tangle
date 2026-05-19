@@ -6,7 +6,7 @@ Kubernetes cluster or SkyPilot controller. The sky.jobs SDK is stubbed inline
 so the script runs anywhere Tangle is installed.
 
 Run:
-    /home/sky/.venv/bin/python examples/run_pipeline_dryrun.py
+    python examples/skypilot/skypilot_launcher_dryrun.py
 
 Output sections:
   1. Translation (ComponentSpec -> sky.Task)
@@ -49,6 +49,20 @@ def _stub_sky() -> dict:
         def set_file_mounts(self, fm):
             self.file_mounts = fm
             return self
+
+        @classmethod
+        def from_yaml_config(cls, cfg):
+            # Mirror sky.Task.from_yaml_config: build the task and apply Resources.
+            t = cls(
+                name=cfg.get("name"),
+                run=cfg.get("run"),
+                envs=cfg.get("envs", {}),
+                num_nodes=cfg.get("num_nodes", 1),
+                file_mounts=cfg.get("file_mounts"),
+            )
+            if "resources" in cfg:
+                t.set_resources(_FakeResources(**cfg["resources"]))
+            return t
 
     class _FakeResources:
         def __init__(self, **kwargs):
@@ -162,9 +176,9 @@ def main() -> None:
         pool="ml-training",  # warm-pool reuse — no Tangle K8s equivalent
         priority_class="batch",  # first-class Kueue integration
         default_labels={"managed-by": "tangle"},
-        annotation_to_label_keys=[
-            "ml.shopify.io/priority-class",
-        ],
+        annotation_to_label_keys={
+            "ml.shopify.io/priority-class": "ml.shopify.io/priority-class",
+        },
     )
     print("  infra=kubernetes (single-cluster); set None for multi-cloud")
     print("  pool='ml-training'  (warm-pool reuse)")
