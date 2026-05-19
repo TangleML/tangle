@@ -28,6 +28,9 @@ dev = [
 huggingface = [
     "huggingface-hub[oauth]>=0.35.3",
 ]
+skypilot = [
+    "skypilot>=0.12.1",
+]
 
 [tool.uv]
 exclude-newer = "7 days"

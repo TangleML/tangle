@@ -11,6 +11,47 @@ from cloud_pipelines_backend.launchers import kubernetes_launchers
 from cloud_pipelines.orchestration.storage_providers import local_storage
 
 
+def _build_launcher():
+    """Select container launcher via TANGLE_LAUNCHER env var.
+
+    Values:
+      "kubernetes"      (default) — KubernetesWithHostPathContainerLauncher
+      "kubernetes_gcs"  — KubernetesWithGcsFuseContainerLauncher (GKE)
+      "skypilot"        — SkyPilotKubernetesLauncher (requires `skypilot` extra)
+    """
+    choice = os.environ.get("TANGLE_LAUNCHER", "kubernetes").strip().lower()
+
+    if choice == "skypilot":
+        # Lazy import so deployments without the [skypilot] extra don't pay for it.
+        from cloud_pipelines_backend.launchers.skypilot_launchers import (
+            SkyPilotKubernetesLauncher,
+        )
+        return SkyPilotKubernetesLauncher(
+            infra=os.environ.get("SKYPILOT_INFRA", "kubernetes"),
+            pool=os.environ.get("SKYPILOT_POOL"),
+            default_image=os.environ.get("DEFAULT_CONTAINER_IMAGE"),
+            priority_class=os.environ.get("DEFAULT_PRIORITY_CLASS"),
+            default_labels={"managed-by": "tangle"},
+        )
+
+    from kubernetes import config as k8s_config_lib
+    from kubernetes import client as k8s_client_lib
+    try:
+        k8s_config_lib.load_incluster_config()
+    except Exception:
+        k8s_config_lib.load_kube_config()
+    k8s_client = k8s_client_lib.ApiClient()
+    k8s_client_lib.VersionApi(k8s_client).get_code(_request_timeout=5)
+
+    if choice == "kubernetes_gcs":
+        return kubernetes_launchers.KubernetesWithGcsFuseContainerLauncher(
+            api_client=k8s_client,
+        )
+    return kubernetes_launchers.KubernetesWithHostPathContainerLauncher(
+        api_client=k8s_client,
+    )
+
+
 def main():
     logger = logging.getLogger(__name__)
     orchestrator_logger = logging.getLogger("cloud_pipelines_backend.orchestrator_sql")
@@ -48,27 +89,12 @@ def main():
     artifact_store_root_dir = (pathlib.Path.cwd() / "tmp" / "artifacts").as_posix()
     log_store_root_dir = (pathlib.Path.cwd() / "tmp" / "logs").as_posix()
 
-    from kubernetes import config as k8s_config_lib
-    from kubernetes import client as k8s_client_lib
-
-    try:
-        k8s_config_lib.load_incluster_config()
-    except Exception:
-        k8s_config_lib.load_kube_config()
-    k8s_client = k8s_client_lib.ApiClient()
-
-    k8s_client_lib.VersionApi(k8s_client).get_code(_request_timeout=5)
-    logger.info("Kubernetes works")
-
     default_task_annotations = {
         kubernetes_launchers.RESOURCES_CPU_ANNOTATION_KEY: "1",
         kubernetes_launchers.RESOURCES_MEMORY_ANNOTATION_KEY: "512Mi",
     }
 
-    # launcher = kubernetes_launchers.KubernetesWithGcsFuseContainerLauncher(
-    launcher = kubernetes_launchers.KubernetesWithHostPathContainerLauncher(
-        api_client=k8s_client,
-    )
+    launcher = _build_launcher()
 
     orchestrator = orchestrator_sql.OrchestratorService_Sql(
         session_factory=session_factory,
