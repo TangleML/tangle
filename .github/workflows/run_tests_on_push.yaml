@@ -19,6 +19,9 @@ on:
       - stable
       - dev
 
+permissions:
+  contents: read
+
 jobs:
   uv-pytest:
     name: python
