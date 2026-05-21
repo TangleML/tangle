@@ -70,7 +70,7 @@ def test_setup_noop_when_disabled(monkeypatch):
 def test_setup_calls_bugsnag_configure_when_enabled(monkeypatch):
     monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
     monkeypatch.setenv("TANGLE_ENV", "staging")
-    monkeypatch.delenv("TANGLE_SERVICE_VERSION", raising=False)
+    monkeypatch.delenv("TANGLE_REVISION", raising=False)
 
     import importlib
     import cloud_pipelines_backend.instrumentation.bugsnag_instrumentation as bugsnag_module
@@ -88,7 +88,7 @@ def test_setup_calls_bugsnag_configure_when_enabled(monkeypatch):
 def test_setup_includes_app_version_when_set(monkeypatch):
     monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
     monkeypatch.setenv("TANGLE_ENV", "production")
-    monkeypatch.setenv("TANGLE_SERVICE_VERSION", "abc123")
+    monkeypatch.setenv("TANGLE_REVISION", "abc123")
 
     import importlib
     import cloud_pipelines_backend.instrumentation.bugsnag_instrumentation as bugsnag_module
