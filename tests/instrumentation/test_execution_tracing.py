@@ -348,7 +348,7 @@ class TestCacheAttrs:
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         root = next(
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
@@ -362,7 +362,7 @@ class TestCacheAttrs:
             statuses=["QUEUED", "SUCCEEDED"],
             extra={"reused_from_execution_node_id": "source-execution-id"},
         )
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         root = next(
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
@@ -371,3 +371,28 @@ class TestCacheAttrs:
         assert (
             root.attributes["execution.cache.reused_from_id"] == "source-execution-id"
         )
+
+
+class TestPipelineAttrs:
+    def test_root_span_carries_parent_id(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution.parent_execution_id = "parent-exec-id"
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert root.attributes["execution.parent_id"] == "parent-exec-id"
+
+    def test_root_execution_omits_parent_id_when_absent(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert "execution.parent_id" not in (root.attributes or {})
