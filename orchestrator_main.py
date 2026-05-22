@@ -7,6 +7,7 @@ from sqlalchemy import orm
 
 from cloud_pipelines_backend import orchestrator_sql
 from cloud_pipelines_backend.instrumentation import bugsnag_instrumentation
+from cloud_pipelines_backend.instrumentation import opentelemetry as otel
 from cloud_pipelines_backend.launchers import kubernetes_launchers
 from cloud_pipelines.orchestration.storage_providers import local_storage
 
@@ -26,6 +27,7 @@ def _build_launcher():
         from cloud_pipelines_backend.launchers.skypilot_launchers import (
             SkyPilotKubernetesLauncher,
         )
+
         return SkyPilotKubernetesLauncher(
             infra=os.environ.get("SKYPILOT_INFRA", "kubernetes"),
             pool=os.environ.get("SKYPILOT_POOL"),
@@ -36,6 +38,7 @@ def _build_launcher():
 
     from kubernetes import config as k8s_config_lib
     from kubernetes import client as k8s_client_lib
+
     try:
         k8s_config_lib.load_incluster_config()
     except Exception:
@@ -75,6 +78,7 @@ def main():
 
     logger.info("Starting the orchestrator")
     bugsnag_instrumentation.setup(service_name="tangle-orchestrator")
+    otel.setup_providers()
 
     DEFAULT_DATABASE_URI = "sqlite:///db.sqlite"
     database_uri = os.environ.get("DATABASE_URI", DEFAULT_DATABASE_URI)

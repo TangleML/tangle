@@ -31,6 +31,7 @@ from sqlalchemy import event as sql_event
 from sqlalchemy import orm
 
 from .. import backend_types_sql
+from . import execution_tracing
 
 _logger = logging.getLogger(__name__)
 
@@ -102,3 +103,4 @@ def _handle_before_commit(session: orm.Session) -> None:
                     exc_info=True,
                 )
         obj._status_changed = False
+        execution_tracing.try_emit_execution_trace(execution=obj)
