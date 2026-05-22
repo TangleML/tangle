@@ -341,3 +341,33 @@ class TestLauncherTypeAttrs:
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
         )
         assert "execution.cloud_provider" not in (root.attributes or {})
+
+
+class TestCacheAttrs:
+    def test_cache_miss_sets_hit_false(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution_tracing.try_emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert root.attributes["execution.cache.hit"] is False
+
+    def test_cache_hit_sets_hit_true_and_reused_from_id(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(
+            statuses=["QUEUED", "SUCCEEDED"],
+            extra={"reused_from_execution_node_id": "source-execution-id"},
+        )
+        execution_tracing.try_emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert root.attributes["execution.cache.hit"] is True
+        assert (
+            root.attributes["execution.cache.reused_from_id"] == "source-execution-id"
+        )
