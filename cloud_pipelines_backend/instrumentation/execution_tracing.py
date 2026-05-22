@@ -55,6 +55,32 @@ def _error_attrs(*, execution: bts.ExecutionNode, status: str) -> dict[str, obje
     return attrs
 
 
+def _launcher_pod_attrs(
+    *, execution: bts.ExecutionNode, status: str
+) -> dict[str, object]:
+    """k8s pod/cluster attributes for the PENDING span."""
+    if status != bts.ContainerExecutionStatus.PENDING:
+        return {}
+    if execution.container_execution_id is None:
+        return {}
+    ce = execution.container_execution
+    if ce is None or ce.launcher_data is None:
+        return {}
+    k8s = (
+        ce.launcher_data.get("kubernetes")
+        or ce.launcher_data.get("kubernetes_job")
+        or {}
+    )
+    attrs: dict[str, object] = {}
+    if pod_name := k8s.get("pod_name") or k8s.get("job_name"):
+        attrs["k8s.pod.name"] = pod_name
+    if namespace := k8s.get("namespace"):
+        attrs["k8s.namespace.name"] = namespace
+    if cluster_url := k8s.get("cluster_server"):
+        attrs["k8s.cluster.url"] = cluster_url
+    return attrs
+
+
 def _ns(*, dt: datetime.datetime) -> int:
     """Return *dt* as nanoseconds since the Unix epoch (required by OTel SDK)."""
     if dt.tzinfo is None:
@@ -62,7 +88,7 @@ def _ns(*, dt: datetime.datetime) -> int:
     return int(dt.timestamp() * 1_000_000_000)
 
 
-def try_emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
+def emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
     """Emit a complete execution trace when *execution* reaches a terminal status.
 
     No-op for non-terminal executions.  All exceptions are caught and logged so
@@ -93,6 +119,7 @@ def try_emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
                 "execution.id": execution.id,
                 "execution.status": entry["status"],
                 **_error_attrs(execution=execution, status=entry["status"]),
+                **_launcher_pod_attrs(execution=execution, status=entry["status"]),
             }
             _tracer.start_span(
                 f"execution.status {entry['status']}",
