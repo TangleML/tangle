@@ -103,4 +103,4 @@ def _handle_before_commit(session: orm.Session) -> None:
                     exc_info=True,
                 )
         obj._status_changed = False
-        execution_tracing.try_emit_execution_trace(execution=obj)
+        execution_tracing.emit_execution_trace(execution=obj)

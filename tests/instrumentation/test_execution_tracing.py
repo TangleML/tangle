@@ -396,3 +396,68 @@ class TestPipelineAttrs:
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
         )
         assert "execution.parent_id" not in (root.attributes or {})
+
+
+class TestResourceAttrs:
+    def test_pending_span_carries_cpu_and_memory(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        from cloud_pipelines_backend.launchers import kubernetes_launchers
+
+        execution = _make_execution(
+            statuses=["QUEUED", "PENDING", "RUNNING", "SUCCEEDED"]
+        )
+        execution.task_spec = {
+            "annotations": {
+                kubernetes_launchers.RESOURCES_CPU_ANNOTATION_KEY: "4",
+                kubernetes_launchers.RESOURCES_MEMORY_ANNOTATION_KEY: "16Gi",
+            }
+        }
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        pending_span = next(
+            s
+            for s in span_exporter.get_finished_spans()
+            if s.attributes.get("execution.status") == "PENDING"
+        )
+        assert pending_span.attributes["execution.resources.cpu"] == "4"
+        assert pending_span.attributes["execution.resources.memory"] == "16Gi"
+
+    def test_pending_span_carries_accelerators_when_present(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        from cloud_pipelines_backend.launchers import kubernetes_launchers
+
+        execution = _make_execution(statuses=["QUEUED", "PENDING", "SUCCEEDED"])
+        execution.task_spec = {
+            "annotations": {
+                kubernetes_launchers.RESOURCES_ACCELERATORS_ANNOTATION_KEY: '{"H100": 1}',
+            }
+        }
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        pending_span = next(
+            s
+            for s in span_exporter.get_finished_spans()
+            if s.attributes.get("execution.status") == "PENDING"
+        )
+        assert (
+            pending_span.attributes["execution.resources.accelerators"] == '{"H100": 1}'
+        )
+
+    def test_non_pending_spans_have_no_resource_attrs(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        from cloud_pipelines_backend.launchers import kubernetes_launchers
+
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution.task_spec = {
+            "annotations": {
+                kubernetes_launchers.RESOURCES_ACCELERATORS_ANNOTATION_KEY: '{"H100": 1}',
+            }
+        }
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        for span in span_exporter.get_finished_spans():
+            assert "execution.resources.cpu" not in (span.attributes or {})
+            assert "execution.resources.accelerators" not in (span.attributes or {})
