@@ -20,14 +20,19 @@ def calculate_digest_for_component_text(text: str) -> str:
     return digest
 
 
-MAX_COMPONENT_SIZE = 300_000
+# Baseline: MySQL TEXT column maximum (65,535 bytes).
+MAX_COMPONENT_SIZE_BYTES = 65_535
 
 
 def load_component_spec_from_text_and_validate(
     text: str,
 ) -> component_structures.ComponentSpec:
-    if len(text) > MAX_COMPONENT_SIZE:
-        raise ValueError(f"Component size {len(text)} > {MAX_COMPONENT_SIZE=}.")
+    text_bytes = len(text.encode("utf-8"))
+    if text_bytes > MAX_COMPONENT_SIZE_BYTES:
+        raise errors.ApiValidationError(
+            f"Component text is too large: {text_bytes} bytes"
+            f" (maximum allowed: {MAX_COMPONENT_SIZE_BYTES} bytes)."
+        )
     component_dict = yaml.safe_load(text)
     return load_component_spec_from_dict_and_validate(component_dict)
 

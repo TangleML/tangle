@@ -1,4 +1,5 @@
 from sqlalchemy import orm
+import pydantic
 import yaml
 import pytest
 
@@ -312,6 +313,34 @@ def test_component_library_service():
             session=session, user_name=user_name
         ).component_library_ids
         assert pins_11b == pins_11
+
+
+def test_component_text_at_byte_limit_is_accepted():
+    """Component text of exactly MAX_COMPONENT_SIZE_BYTES bytes does not raise ApiValidationError."""
+    text = "a" * components_api.MAX_COMPONENT_SIZE_BYTES
+    assert len(text.encode("utf-8")) == components_api.MAX_COMPONENT_SIZE_BYTES
+    # Only assert that the size check does not reject the input; downstream
+    # yaml/pydantic parsing errors are expected because "a" * N is not a
+    # valid component spec.
+    try:
+        components_api.load_component_spec_from_text_and_validate(text)
+    except errors.ApiValidationError:
+        pytest.fail(
+            "ApiValidationError should not be raised for text at the byte limit"
+        )
+    except (yaml.YAMLError, pydantic.ValidationError):
+        pass  # Expected: synthetic text is not valid YAML / ComponentSpec
+    except Exception as exc:
+        pytest.fail(f"Unexpected exception raised: {type(exc).__name__}: {exc}")
+
+
+def test_component_text_one_byte_over_limit_raises_api_validation_error():
+    """Component text of MAX_COMPONENT_SIZE_BYTES + 1 bytes raises ApiValidationError."""
+    text = "a" * (components_api.MAX_COMPONENT_SIZE_BYTES + 1)
+    assert len(text.encode("utf-8")) == components_api.MAX_COMPONENT_SIZE_BYTES + 1
+    with pytest.raises(errors.ApiValidationError) as exc_info:
+        components_api.load_component_spec_from_text_and_validate(text)
+    assert str(components_api.MAX_COMPONENT_SIZE_BYTES) in str(exc_info.value)
 
 
 if __name__ == "__main__":
