@@ -1778,13 +1778,13 @@ def windows_path_to_docker_path(path: str) -> str:
 
 
 def _kubernetes_serialize(obj) -> dict[str, Any]:
-    shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
-    return shallow_client.sanitize_for_serialization(obj)
+    client = k8s_client_lib.ApiClient()
+    return client.sanitize_for_serialization(obj)
 
 
 def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: typing.Type[_T]) -> _T:
-    shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
-    return shallow_client._ApiClient__deserialize(obj_dict, cls)
+    client = k8s_client_lib.ApiClient()
+    return client._ApiClient__deserialize(obj_dict, cls)
 
 
 def _update_dict_recursively(d1: dict, d2: dict):
