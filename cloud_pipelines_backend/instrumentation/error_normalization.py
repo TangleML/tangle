@@ -9,6 +9,14 @@ regardless of which specific resource was involved.
 import json
 import re
 
+try:
+    from ..launchers.interfaces import LauncherError as _LauncherError
+
+    _LAUNCHER_ERROR_AVAILABLE = True
+except ImportError:
+    _LauncherError = None  # type: ignore[assignment,misc]
+    _LAUNCHER_ERROR_AVAILABLE = False
+
 _POD_NAME_PATTERN = re.compile(r"(?:task|tangle(?:-ce)?)-[a-zA-Z0-9]+-[a-zA-Z0-9]+")
 _OBJECT_REPR_PATTERN = re.compile(r"<[^>]+ object at 0x[0-9a-fA-F]+>")
 _HEX_ADDRESS_PATTERN = re.compile(r"\b0x[0-9a-fA-F]+\b")
@@ -16,9 +24,15 @@ _UUID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
 )
 _LONG_ALNUM_ID_PATTERN = re.compile(r"\b[a-zA-Z0-9]{16,}\b")
+# Matches from the first `{"`, `{'`, or `{ "` / `{ '` to end of string.
+# Both the embedded dict/JSON literal and any trailing message text are replaced
+# with `{...}` — the greedy match is intentional: anything after a runtime-data
+# dict in an error message is typically also variable and should not affect grouping.
+_JSON_OBJECT_PATTERN = re.compile(r"\{\s*['\"].*", re.DOTALL)
 
 
 def _strip_generic(*, message: str) -> str:
+    message = _JSON_OBJECT_PATTERN.sub("{...}", message)
     message = _OBJECT_REPR_PATTERN.sub("{object}", message)
     message = _HEX_ADDRESS_PATTERN.sub("{addr}", message)
     message = _UUID_PATTERN.sub("{uuid}", message)
@@ -85,6 +99,13 @@ def _normalize_orchestrator_error(*, exception: BaseException) -> str | None:
     return f"OrchestratorError: {message}"
 
 
+def _normalize_launcher_error(*, exception: BaseException) -> str | None:
+    if not _LAUNCHER_ERROR_AVAILABLE or not isinstance(exception, _LauncherError):
+        return None
+    message = _JSON_OBJECT_PATTERN.sub("{...}", str(exception))
+    return f"LauncherError: {message.strip()}"
+
+
 def normalize_error_message(*, exception: BaseException) -> str:
     """Return a stable normalized string for error grouping."""
     for normalizer in (
@@ -92,6 +113,7 @@ def normalize_error_message(*, exception: BaseException) -> str:
         _normalize_max_retry_error,
         _normalize_unicode_decode_error,
         _normalize_orchestrator_error,
+        _normalize_launcher_error,
     ):
         result = normalizer(exception=exception)
         if result is not None:
