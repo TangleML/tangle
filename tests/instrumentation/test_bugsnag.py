@@ -271,6 +271,31 @@ def test_before_notify_skips_error_class_prefix_gracefully_on_bad_errors_structu
     bugsnag_module._before_notify(mock_event)
 
 
+def test_before_notify_sets_slice_name_when_service_name_configured(monkeypatch):
+    monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
+    monkeypatch.setenv("TANGLE_ENV", "staging")
+
+    import importlib
+    import cloud_pipelines_backend.instrumentation.bugsnag_instrumentation as bugsnag_module
+
+    importlib.reload(bugsnag_module)
+
+    from cloud_pipelines_backend.instrumentation import contextual_logging
+
+    contextual_logging.clear_context_metadata()
+
+    with mock.patch("bugsnag.configure"), mock.patch("bugsnag.before_notify"):
+        bugsnag_module.setup(service_name="orchestrator")
+
+    mock_event = mock.MagicMock()
+    mock_event.original_error = None
+    mock_event.metadata = {}
+
+    bugsnag_module._before_notify(mock_event)
+
+    mock_event.add_tab.assert_called_once_with("custom", {"slice_name": "orchestrator"})
+
+
 def test_before_notify_skips_empty_context(monkeypatch):
     monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
     monkeypatch.setenv("TANGLE_ENV", "staging")
@@ -287,3 +312,33 @@ def test_before_notify_skips_empty_context(monkeypatch):
     mock_event = mock.MagicMock()
     bugsnag_module._before_notify(mock_event)
     mock_event.add_tab.assert_not_called()
+
+
+def test_before_notify_omits_custom_tab_when_no_service_name_and_no_grouping_key(
+    monkeypatch,
+):
+    monkeypatch.setenv("TANGLE_BUGSNAG_API_KEY", "test-api-key")
+    monkeypatch.delenv("TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY", raising=False)
+
+    import importlib
+
+    import cloud_pipelines_backend.instrumentation.bugsnag_instrumentation as bugsnag_module
+
+    importlib.reload(bugsnag_module)
+
+    from cloud_pipelines_backend.instrumentation import contextual_logging
+
+    contextual_logging.clear_context_metadata()
+
+    with mock.patch("bugsnag.configure"), mock.patch("bugsnag.before_notify"):
+        bugsnag_module.setup(service_name=None)
+
+    mock_event = mock.MagicMock()
+    mock_event.original_error = None
+    mock_event.metadata = {}
+    bugsnag_module._before_notify(mock_event)
+
+    custom_calls = [
+        c for c in mock_event.add_tab.call_args_list if c.args[0] == "custom"
+    ]
+    assert custom_calls == []
