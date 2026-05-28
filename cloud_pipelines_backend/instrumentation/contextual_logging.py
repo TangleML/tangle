@@ -9,6 +9,7 @@ Common metadata keys:
 - execution_id: From ExecutionNode.id - tracks individual execution nodes
 - container_execution_id: From ContainerExecution.id - tracks running containers
 - user_id: User who initiated the operation
+- cloud_provider: From task_spec annotations, set by execution_logging_context for orchestrated runs
 - Any other metadata you want to track in logs
 
 Usage:
@@ -23,7 +24,12 @@ Usage:
 
 import contextvars
 from contextlib import contextmanager
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from .. import backend_types_sql as bts
+
+_CLOUD_PROVIDER_ANNOTATION_KEY = "cloud-pipelines.net/orchestration/cloud_provider"
 
 # Single context variable to store all metadata as a dictionary
 _context_metadata: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
@@ -125,3 +131,19 @@ def logging_context(**metadata: Any):
     finally:
         # Restore previous metadata
         _context_metadata.set(prev_metadata)
+
+
+def execution_logging_context(execution: "bts.ExecutionNode"):
+    """Return a logging context populated with metadata for *execution*.
+
+    Always sets ``execution_id``.  Also sets ``cloud_provider`` when the
+    ``cloud-pipelines.net/orchestration/cloud_provider`` annotation is present
+    on the task spec.
+    """
+    ctx: dict[str, str] = {"execution_id": execution.id}
+    cloud_provider = ((execution.task_spec or {}).get("annotations") or {}).get(
+        _CLOUD_PROVIDER_ANNOTATION_KEY
+    )
+    if cloud_provider is not None:
+        ctx["cloud_provider"] = cloud_provider
+    return logging_context(**ctx)
