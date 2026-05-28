@@ -15,7 +15,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-05-21T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -660,7 +660,7 @@ requires-dist = [
     { name = "bugsnag", specifier = ">=4.9.0,<5" },
     { name = "cloud-pipelines", specifier = ">=0.23.2.4" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.115.12" },
-    { name = "kubernetes", specifier = ">=33.1.0" },
+    { name = "kubernetes", specifier = ">=33.1.0,<36" },
     { name = "opentelemetry-api", specifier = ">=1.41.1" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.41.1" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.39.1" },
