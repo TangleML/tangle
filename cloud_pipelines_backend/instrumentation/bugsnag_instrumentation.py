@@ -8,7 +8,7 @@ No-op if TANGLE_BUGSNAG_API_KEY is not set.
 Environment variables:
     TANGLE_BUGSNAG_API_KEY             Required to enable Bugsnag reporting.
     TANGLE_ENV                         Release stage (e.g. "staging", "production").
-    TANGLE_SERVICE_VERSION             App version tag (e.g. git SHA). Optional.
+    TANGLE_REVISION                    App version tag (e.g. git SHA). Optional.
     TANGLE_BUGSNAG_NOTIFY_ENDPOINT     Custom notify URL. Optional.
     TANGLE_BUGSNAG_SESSIONS_ENDPOINT   Custom sessions URL. Optional.
     TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY Metadata key for normalized error grouping. Optional.
@@ -28,7 +28,7 @@ _logger = logging.getLogger(__name__)
 
 _BUGSNAG_API_KEY = os.environ.get("TANGLE_BUGSNAG_API_KEY")
 _TANGLE_ENV = os.environ.get("TANGLE_ENV")
-_SERVICE_VERSION = os.environ.get("TANGLE_SERVICE_VERSION")
+_SERVICE_VERSION = os.environ.get("TANGLE_REVISION")
 _NOTIFY_ENDPOINT = os.environ.get("TANGLE_BUGSNAG_NOTIFY_ENDPOINT")
 _SESSIONS_ENDPOINT = os.environ.get("TANGLE_BUGSNAG_SESSIONS_ENDPOINT")
 _CUSTOM_GROUPING_KEY = os.environ.get("TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY")
