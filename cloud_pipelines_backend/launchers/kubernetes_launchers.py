@@ -717,7 +717,9 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             pod_postprocessors.append(pod_postprocessor)
         final_pod_postporocessor = _create_pod_postprocessor_stack(pod_postprocessors)
 
-        from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
+        from cloud_pipelines_backend.storage_providers import (
+            patched_google_cloud_storage,
+        )
 
         super().__init__(
             namespace=namespace,
@@ -725,7 +727,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             api_client=api_client,
             request_timeout=request_timeout,
             pod_name_prefix=pod_name_prefix,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
+            _storage_provider=patched_google_cloud_storage.PatchedGoogleCloudStorageProvider(
                 gcs_client
             ),
             pod_labels=pod_labels,
