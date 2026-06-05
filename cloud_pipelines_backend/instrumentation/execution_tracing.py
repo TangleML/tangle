@@ -125,6 +125,18 @@ def _cloud_provider_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
     return {"execution.cloud_provider": provider}
 
 
+def _cache_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
+    """Cache hit/miss attributes for the root execution span."""
+    attrs: dict[str, object] = {}
+    if execution.container_execution_cache_key is not None:
+        attrs["execution.cache_key"] = execution.container_execution_cache_key
+    reused_from = (execution.extra_data or {}).get("reused_from_execution_node_id")
+    attrs["execution.cache.hit"] = reused_from is not None
+    if reused_from is not None:
+        attrs["execution.cache.reused_from_id"] = reused_from
+    return attrs
+
+
 def _ns(*, dt: datetime.datetime) -> int:
     """Return *dt* as nanoseconds since the Unix epoch (required by OTel SDK)."""
     if dt.tzinfo is None:
@@ -151,6 +163,7 @@ def emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
                 "execution.id": execution.id,
                 **_launcher_type_attrs(execution=execution),
                 **_cloud_provider_attrs(execution=execution),
+                **_cache_attrs(execution=execution),
             },
             start_time=_ns(dt=first_time),
         )
