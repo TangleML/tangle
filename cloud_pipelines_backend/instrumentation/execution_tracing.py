@@ -14,6 +14,7 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from .. import backend_types_sql as bts
+from ..launchers import kubernetes_launchers
 
 _logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer("tangle.orchestrator")
@@ -144,6 +145,23 @@ def _pipeline_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
     return {"execution.parent_id": execution.parent_execution_id}
 
 
+def _resource_attrs(*, execution: bts.ExecutionNode, status: str) -> dict[str, object]:
+    """CPU, memory, and accelerator requests for the PENDING span."""
+    if status != bts.ContainerExecutionStatus.PENDING:
+        return {}
+    annotations: dict = (execution.task_spec or {}).get("annotations", {})
+    attrs: dict[str, object] = {}
+    if cpu := annotations.get(kubernetes_launchers.RESOURCES_CPU_ANNOTATION_KEY):
+        attrs["execution.resources.cpu"] = cpu
+    if memory := annotations.get(kubernetes_launchers.RESOURCES_MEMORY_ANNOTATION_KEY):
+        attrs["execution.resources.memory"] = memory
+    if accelerators := annotations.get(
+        kubernetes_launchers.RESOURCES_ACCELERATORS_ANNOTATION_KEY
+    ):
+        attrs["execution.resources.accelerators"] = accelerators
+    return attrs
+
+
 def _ns(*, dt: datetime.datetime) -> int:
     """Return *dt* as nanoseconds since the Unix epoch (required by OTel SDK)."""
     if dt.tzinfo is None:
@@ -189,13 +207,18 @@ def emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
                 "execution.status": entry["status"],
                 **_error_attrs(execution=execution, status=entry["status"]),
                 **_launcher_pod_attrs(execution=execution, status=entry["status"]),
+                **_resource_attrs(execution=execution, status=entry["status"]),
             }
+            start_ns = _ns(dt=t_start)
+            end_ns = _ns(dt=t_end)
+            if end_ns <= start_ns:
+                end_ns = start_ns + 1
             _tracer.start_span(
                 f"execution.status {entry['status']}",
                 context=root_ctx,
                 attributes=attrs,
-                start_time=_ns(dt=t_start),
-            ).end(end_time=_ns(dt=t_end))
+                start_time=start_ns,
+            ).end(end_time=end_ns)
 
         if history[-1]["status"] in _ERROR_TERMINAL_STATUSES:
             root.set_status(status=StatusCode.ERROR)
