@@ -137,6 +137,13 @@ def _cache_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
     return attrs
 
 
+def _pipeline_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
+    """Parent execution context for the root execution span."""
+    if execution.parent_execution_id is None:
+        return {}
+    return {"execution.parent_id": execution.parent_execution_id}
+
+
 def _ns(*, dt: datetime.datetime) -> int:
     """Return *dt* as nanoseconds since the Unix epoch (required by OTel SDK)."""
     if dt.tzinfo is None:
@@ -164,6 +171,7 @@ def emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
                 **_launcher_type_attrs(execution=execution),
                 **_cloud_provider_attrs(execution=execution),
                 **_cache_attrs(execution=execution),
+                **_pipeline_attrs(execution=execution),
             },
             start_time=_ns(dt=first_time),
         )
