@@ -61,21 +61,21 @@ class TestTryEmitExecutionTrace:
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "RUNNING"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
         assert span_exporter.get_finished_spans() == ()
 
     def test_no_spans_for_empty_history(
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=[])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
         assert span_exporter.get_finished_spans() == ()
 
     def test_emits_root_and_child_spans_on_terminal(
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "RUNNING", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         names = {s.name for s in span_exporter.get_finished_spans()}
         assert "execution" in names
@@ -85,7 +85,7 @@ class TestTryEmitExecutionTrace:
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "RUNNING", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         status_spans = [
             s
@@ -98,7 +98,7 @@ class TestTryEmitExecutionTrace:
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         root = next(
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
@@ -109,7 +109,7 @@ class TestTryEmitExecutionTrace:
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "RUNNING", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         finished = span_exporter.get_finished_spans()
         trace_ids = {s.context.trace_id for s in finished}
@@ -119,7 +119,7 @@ class TestTryEmitExecutionTrace:
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "RUNNING", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         root = next(
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
@@ -133,7 +133,7 @@ class TestTryEmitExecutionTrace:
         self, span_exporter: InMemorySpanExporter
     ) -> None:
         execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         status_spans = [
             s
@@ -156,7 +156,7 @@ class TestErrorDataAttrs:
                 bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY: "missing outputs"
             },
         )
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         failed_span = next(
             s
@@ -175,7 +175,7 @@ class TestErrorDataAttrs:
                 bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY: "Traceback...",
             },
         )
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         err_span = next(
             s
@@ -191,7 +191,7 @@ class TestErrorDataAttrs:
         from opentelemetry.trace import StatusCode
 
         execution = _make_execution(statuses=["QUEUED", "FAILED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         root = next(
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
@@ -204,9 +204,76 @@ class TestErrorDataAttrs:
         from opentelemetry.trace import StatusCode
 
         execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
-        execution_tracing.try_emit_execution_trace(execution=execution)
+        execution_tracing.emit_execution_trace(execution=execution)
 
         root = next(
             s for s in span_exporter.get_finished_spans() if s.name == "execution"
         )
         assert root.status.status_code != StatusCode.ERROR
+
+
+class TestLauncherPodAttrs:
+    def test_pending_span_has_k8s_attributes_when_launcher_data_present(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(
+            statuses=["QUEUED", "PENDING", "RUNNING", "SUCCEEDED"]
+        )
+        ce = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.SUCCEEDED,
+            launcher_data={
+                "kubernetes": {
+                    "pod_name": "exec-abc-pod",
+                    "namespace": "tangle",
+                    "cluster_server": "https://gke.example.com",
+                }
+            },
+        )
+        execution.container_execution = ce
+        execution.container_execution_id = "ce-test-id"
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        pending_span = next(
+            s
+            for s in span_exporter.get_finished_spans()
+            if s.attributes.get("execution.status") == "PENDING"
+        )
+        assert pending_span.attributes["k8s.pod.name"] == "exec-abc-pod"
+        assert pending_span.attributes["k8s.namespace.name"] == "tangle"
+        assert pending_span.attributes["k8s.cluster.url"] == "https://gke.example.com"
+
+    def test_pending_span_absent_when_no_container_execution(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(
+            statuses=["QUEUED", "PENDING", "RUNNING", "SUCCEEDED"]
+        )
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        pending_span = next(
+            s
+            for s in span_exporter.get_finished_spans()
+            if s.attributes.get("execution.status") == "PENDING"
+        )
+        assert "k8s.pod.name" not in (pending_span.attributes or {})
+
+    def test_non_pending_span_has_no_k8s_attributes(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        ce = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.SUCCEEDED,
+            launcher_data={
+                "kubernetes": {
+                    "pod_name": "exec-abc-pod",
+                    "namespace": "tangle",
+                    "cluster_server": "https://gke.example.com",
+                }
+            },
+        )
+        execution.container_execution = ce
+        execution.container_execution_id = "ce-test-id"
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        for span in span_exporter.get_finished_spans():
+            assert "k8s.pod.name" not in (span.attributes or {})
