@@ -11,6 +11,7 @@ import datetime
 import logging
 
 from opentelemetry import trace
+from opentelemetry.trace import StatusCode
 
 from .. import backend_types_sql as bts
 
@@ -19,6 +20,39 @@ _tracer = trace.get_tracer("tangle.orchestrator")
 
 _HISTORY_KEY = bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 _TERMINAL_STATUSES = frozenset(s.value for s in bts.CONTAINER_STATUSES_ENDED)
+_ERROR_TERMINAL_STATUSES = frozenset({
+    bts.ContainerExecutionStatus.FAILED,
+    bts.ContainerExecutionStatus.SYSTEM_ERROR,
+})
+
+
+def _error_attrs(*, execution: bts.ExecutionNode, status: str) -> dict[str, object]:
+    """Extra attributes for terminal error/success status spans."""
+    extra = execution.extra_data or {}
+    attrs: dict[str, object] = {}
+
+    def _set_exit_code() -> None:
+        if (ce := execution.container_execution) and ce.exit_code is not None:
+            attrs["execution.exit_code"] = ce.exit_code
+
+    if status == bts.ContainerExecutionStatus.FAILED:
+        msg = extra.get(bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY)
+        if msg is not None:
+            attrs["exception.message"] = msg
+        _set_exit_code()
+    elif status == bts.ContainerExecutionStatus.SYSTEM_ERROR:
+        msg = extra.get(
+            bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY
+        )
+        if msg is not None:
+            attrs["exception.message"] = msg
+        tb = extra.get(bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY)
+        if tb is not None:
+            attrs["exception.stacktrace"] = tb
+    elif status == bts.ContainerExecutionStatus.SUCCEEDED:
+        _set_exit_code()
+
+    return attrs
 
 
 def _ns(*, dt: datetime.datetime) -> int:
@@ -58,6 +92,7 @@ def try_emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
             attrs: dict[str, object] = {
                 "execution.id": execution.id,
                 "execution.status": entry["status"],
+                **_error_attrs(execution=execution, status=entry["status"]),
             }
             _tracer.start_span(
                 f"execution.status {entry['status']}",
@@ -66,6 +101,8 @@ def try_emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
                 start_time=_ns(dt=t_start),
             ).end(end_time=_ns(dt=t_end))
 
+        if history[-1]["status"] in _ERROR_TERMINAL_STATUSES:
+            root.set_status(status=StatusCode.ERROR)
         root.end(end_time=_ns(dt=last_time))
     except Exception:
         _logger.exception(f"Failed to emit execution trace for {execution.id!r}")

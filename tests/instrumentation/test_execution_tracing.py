@@ -144,3 +144,69 @@ class TestTryEmitExecutionTrace:
             "execution.status QUEUED",
             "execution.status SUCCEEDED",
         }
+
+
+class TestErrorDataAttrs:
+    def test_failed_span_carries_orchestration_error_message(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(
+            statuses=["QUEUED", "RUNNING", "FAILED"],
+            extra={
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY: "missing outputs"
+            },
+        )
+        execution_tracing.try_emit_execution_trace(execution=execution)
+
+        failed_span = next(
+            s
+            for s in span_exporter.get_finished_spans()
+            if s.attributes.get("execution.status") == "FAILED"
+        )
+        assert failed_span.attributes["exception.message"] == "missing outputs"
+
+    def test_system_error_span_carries_exception_message_and_stacktrace(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(
+            statuses=["QUEUED", "SYSTEM_ERROR"],
+            extra={
+                bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY: "RuntimeError",
+                bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY: "Traceback...",
+            },
+        )
+        execution_tracing.try_emit_execution_trace(execution=execution)
+
+        err_span = next(
+            s
+            for s in span_exporter.get_finished_spans()
+            if s.attributes.get("execution.status") == "SYSTEM_ERROR"
+        )
+        assert err_span.attributes["exception.message"] == "RuntimeError"
+        assert err_span.attributes["exception.stacktrace"] == "Traceback..."
+
+    def test_root_span_marked_error_on_failed(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        from opentelemetry.trace import StatusCode
+
+        execution = _make_execution(statuses=["QUEUED", "FAILED"])
+        execution_tracing.try_emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert root.status.status_code == StatusCode.ERROR
+
+    def test_root_span_not_marked_error_on_succeeded(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        from opentelemetry.trace import StatusCode
+
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution_tracing.try_emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert root.status.status_code != StatusCode.ERROR
