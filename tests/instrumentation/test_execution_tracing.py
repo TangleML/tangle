@@ -277,3 +277,67 @@ class TestLauncherPodAttrs:
 
         for span in span_exporter.get_finished_spans():
             assert "k8s.pod.name" not in (span.attributes or {})
+
+
+class TestLauncherTypeAttrs:
+    def test_root_span_carries_launcher_type_and_cluster_url(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        ce = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.SUCCEEDED,
+            launcher_data={
+                "kubernetes": {
+                    "pod_name": "exec-abc-pod",
+                    "namespace": "tangle",
+                    "cluster_server": "https://gke.example.com",
+                }
+            },
+        )
+        execution.container_execution = ce
+        execution.container_execution_id = "ce-test-id"
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert root.attributes["execution.launcher"] == "kubernetes"
+        assert root.attributes["k8s.cluster.url"] == "https://gke.example.com"
+
+    def test_root_span_omits_launcher_without_container_execution(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert "execution.launcher" not in (root.attributes or {})
+
+    def test_root_span_carries_cloud_provider_when_annotation_set(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution.task_spec = {
+            "annotations": {
+                "cloud-pipelines.net/orchestration/cloud_provider": "nebius"
+            }
+        }
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert root.attributes["execution.cloud_provider"] == "nebius"
+
+    def test_root_span_omits_cloud_provider_when_annotation_absent(
+        self, span_exporter: InMemorySpanExporter
+    ) -> None:
+        execution = _make_execution(statuses=["QUEUED", "SUCCEEDED"])
+        execution_tracing.emit_execution_trace(execution=execution)
+
+        root = next(
+            s for s in span_exporter.get_finished_spans() if s.name == "execution"
+        )
+        assert "execution.cloud_provider" not in (root.attributes or {})

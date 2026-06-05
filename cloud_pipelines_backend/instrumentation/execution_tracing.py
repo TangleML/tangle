@@ -18,12 +18,16 @@ from .. import backend_types_sql as bts
 _logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer("tangle.orchestrator")
 
+_CLOUD_PROVIDER_ANNOTATION_KEY = "cloud-pipelines.net/orchestration/cloud_provider"
+
 _HISTORY_KEY = bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 _TERMINAL_STATUSES = frozenset(s.value for s in bts.CONTAINER_STATUSES_ENDED)
-_ERROR_TERMINAL_STATUSES = frozenset({
-    bts.ContainerExecutionStatus.FAILED,
-    bts.ContainerExecutionStatus.SYSTEM_ERROR,
-})
+_ERROR_TERMINAL_STATUSES = frozenset(
+    {
+        bts.ContainerExecutionStatus.FAILED,
+        bts.ContainerExecutionStatus.SYSTEM_ERROR,
+    }
+)
 
 
 def _error_attrs(*, execution: bts.ExecutionNode, status: str) -> dict[str, object]:
@@ -81,6 +85,46 @@ def _launcher_pod_attrs(
     return attrs
 
 
+def _launcher_type_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
+    """Launcher type and cluster identity for the root execution span.
+
+    Uses the top-level key of launcher_data as the launcher type — forward-compatible
+    with any launcher implementation.  For k8s-family launchers adds cluster_server
+    so GKE and Nebius clusters (which share the same launcher class in oasis-backend)
+    can be distinguished by URL pattern.
+    """
+    if execution.container_execution_id is None:
+        return {}
+    ce = execution.container_execution
+    if ce is None or not ce.launcher_data:
+        return {}
+    launcher_key = next(iter(ce.launcher_data))
+    attrs: dict[str, object] = {"execution.launcher": launcher_key}
+    inner = ce.launcher_data[launcher_key]
+    if isinstance(inner, dict) and (cluster_url := inner.get("cluster_server")):
+        attrs["k8s.cluster.url"] = cluster_url
+    return attrs
+
+
+def _cloud_provider_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
+    """Cloud provider for the root execution span, read from task_spec annotations.
+
+    Returns ``{"execution.cloud_provider": value}`` when the
+    ``cloud-pipelines.net/orchestration/cloud_provider`` annotation is present,
+    otherwise an empty dict.  Callers (e.g. oasis-backend's MultiLauncherContainerLauncher)
+    set this annotation at routing time; tangle launchers with a fixed cloud affinity
+    can set it too.
+    """
+    provider = (
+        (execution.task_spec or {})
+        .get("annotations", {})
+        .get(_CLOUD_PROVIDER_ANNOTATION_KEY)
+    )
+    if provider is None:
+        return {}
+    return {"execution.cloud_provider": provider}
+
+
 def _ns(*, dt: datetime.datetime) -> int:
     """Return *dt* as nanoseconds since the Unix epoch (required by OTel SDK)."""
     if dt.tzinfo is None:
@@ -103,7 +147,11 @@ def emit_execution_trace(*, execution: bts.ExecutionNode) -> None:
 
         root = _tracer.start_span(
             "execution",
-            attributes={"execution.id": execution.id},
+            attributes={
+                "execution.id": execution.id,
+                **_launcher_type_attrs(execution=execution),
+                **_cloud_provider_attrs(execution=execution),
+            },
             start_time=_ns(dt=first_time),
         )
         root_ctx = trace.set_span_in_context(root)
