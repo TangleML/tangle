@@ -260,3 +260,76 @@ class TestFallback:
         exc = RuntimeError('operation failed: {"key": "value"}')
         result = error_normalization.normalize_error_message(exception=exc)
         assert result == "RuntimeError: operation failed: {...}"
+
+
+class TestNormalizeErrorChain:
+    def _chained(
+        self, outer_msg: str, inner: BaseException, outer_cls: type = RuntimeError
+    ) -> BaseException:
+        try:
+            raise outer_cls(outer_msg) from inner
+        except outer_cls as exc:
+            return exc
+
+    def test_single_exception_no_arrow(self):
+        exc = ValueError("something went wrong")
+        result = error_normalization.normalize_error_chain(exception=exc)
+        assert result == "ValueError: something went wrong"
+        assert " <- " not in result
+
+    def test_two_level_chain(self):
+        inner = TimeoutError("The read operation timed out")
+        outer = self._chained("Failed to create pod: {'apiVersion': 'v1'}", inner)
+        result = error_normalization.normalize_error_chain(exception=outer)
+        assert result == (
+            "RuntimeError: Failed to create pod: {...} <- TimeoutError: The read operation timed out"
+        )
+
+    def test_launcher_error_chain(self):
+        try:
+            from cloud_pipelines_backend.launchers.interfaces import LauncherError
+        except ImportError:
+            pytest.skip("LauncherError not importable")
+        inner = TimeoutError("The read operation timed out")
+        try:
+            raise LauncherError("Failed to create pod: {spec}") from inner
+        except LauncherError as outer:
+            result = error_normalization.normalize_error_chain(exception=outer)
+        assert result == (
+            "LauncherError: Failed to create pod: {spec} <- TimeoutError: The read operation timed out"
+        )
+
+    def test_caps_at_four_levels(self):
+        exc: BaseException = ValueError("level 4")
+        for i in range(3, 0, -1):
+            exc = self._chained(f"level {i}", exc)
+        # Chain is 4 deep; add a 5th
+        exc = self._chained("level 0", exc)
+        result = error_normalization.normalize_error_chain(exception=exc)
+        assert result.count(" <- ") == 3  # 4 parts max
+
+
+class TestBuildChainTitle:
+    def test_single_exception_returns_none(self):
+        exc = ValueError("nothing to chain")
+        assert error_normalization.build_chain_title(exception=exc) is None
+
+    def test_two_level_chain_returns_string(self):
+        inner = TimeoutError("The read operation timed out")
+        try:
+            raise RuntimeError("outer problem") from inner
+        except RuntimeError as outer:
+            result = error_normalization.build_chain_title(exception=outer)
+        assert result == (
+            "RuntimeError: outer problem <- TimeoutError: The read operation timed out"
+        )
+
+    def test_truncates_long_parts(self):
+        inner = ValueError("x" * 200)
+        try:
+            raise RuntimeError("outer") from inner
+        except RuntimeError as outer:
+            result = error_normalization.build_chain_title(exception=outer)
+        assert result is not None
+        inner_part = result.split(" <- ")[1]
+        assert len(inner_part) <= 83  # 80 + "..."

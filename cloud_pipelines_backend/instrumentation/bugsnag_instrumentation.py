@@ -43,19 +43,35 @@ def _before_notify(event: bugsnag_event.Event) -> None:
     if context:
         event.add_tab("tangle_context", context)
     if _CUSTOM_GROUPING_KEY and event.original_error:
-        normalized = error_normalization.normalize_error_message(
+        # Use the full chain for grouping so that "LauncherError <- TimeoutError"
+        # and "LauncherError <- ApiException" land in separate, stable groups.
+        chain = error_normalization.normalize_error_chain(
             exception=event.original_error
         )
         prefix = (event.metadata.get("extra") or {}).get("grouping_prefix")
-        key_value = f"{prefix}: {normalized}" if prefix else normalized
+        key_value = f"{prefix}: {chain}" if prefix else chain
         event.add_tab("custom", {_CUSTOM_GROUPING_KEY: key_value})
         if prefix and event.errors:
             try:
                 for error in event.errors:
                     error.error_class = f"{prefix}: {error.error_class}"
             except Exception:
-                _logger.debug(
+                _logger.warning(
                     "Could not prepend grouping prefix to errorClass", exc_info=True
+                )
+        # For chained exceptions, override the root-cause title (what Bugsnag
+        # displays in the error list) with the full chain so reviewers can see
+        # the complete raise path without opening the stacktrace.
+        chain_title = error_normalization.build_chain_title(
+            exception=event.original_error
+        )
+        if chain_title and event.errors:
+            try:
+                title = f"{prefix}: {chain_title}" if prefix else chain_title
+                event.errors[-1].error_class = title
+            except Exception:
+                _logger.warning(
+                    "Could not set chain title on errorClass", exc_info=True
                 )
 
 

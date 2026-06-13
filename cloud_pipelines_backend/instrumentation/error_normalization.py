@@ -107,7 +107,7 @@ def _normalize_launcher_error(*, exception: BaseException) -> str | None:
 
 
 def normalize_error_message(*, exception: BaseException) -> str:
-    """Return a stable normalized string for error grouping."""
+    """Return a stable normalized string for a single exception (no chain traversal)."""
     for normalizer in (
         _normalize_k8s_api_exception,
         _normalize_max_retry_error,
@@ -120,3 +120,53 @@ def normalize_error_message(*, exception: BaseException) -> str:
             return result
 
     return f"{type(exception).__name__}: {_strip_generic(message=str(exception))}"
+
+
+_CHAIN_PART_MAX_LEN = 80
+_CHAIN_GROUPING_KEY_MAX_PART_LEN = 200
+_CHAIN_MAX_DEPTH = 4
+
+
+def _walk_chain(exception: BaseException) -> list[BaseException]:
+    """Return the exception chain up to ``_CHAIN_MAX_DEPTH`` levels, cycle-safe."""
+    excs: list[BaseException] = []
+    seen: set[int] = set()
+    exc: BaseException | None = exception
+    while exc is not None and id(exc) not in seen and len(excs) < _CHAIN_MAX_DEPTH:
+        seen.add(id(exc))
+        excs.append(exc)
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+    return excs
+
+
+def normalize_error_chain(*, exception: BaseException) -> str:
+    """Return a stable normalized string covering the full exception chain.
+
+    Walks ``__cause__`` (and ``__context__`` when not suppressed) and joins
+    each level with `` <- ``.  Use this for grouping keys so that chained
+    exceptions like ``LauncherError <- TimeoutError`` produce one stable group
+    rather than one per root cause.
+    """
+    parts = [
+        normalize_error_message(exception=exc)[:_CHAIN_GROUPING_KEY_MAX_PART_LEN]
+        for exc in _walk_chain(exception)
+    ]
+    return " <- ".join(parts)
+
+
+def build_chain_title(*, exception: BaseException) -> str | None:
+    """Return a human-readable chain title for display, or ``None`` for single exceptions.
+
+    Like ``normalize_error_chain`` but truncates each level so the result fits
+    in a Bugsnag error list title.  Returns ``None`` when there is no
+    chain so callers can skip overriding the default title.
+    """
+    parts: list[str] = []
+    for exc in _walk_chain(exception):
+        part = normalize_error_message(exception=exc)
+        if len(part) > _CHAIN_PART_MAX_LEN:
+            part = part[:_CHAIN_PART_MAX_LEN].rstrip() + "..."
+        parts.append(part)
+    if len(parts) <= 1:
+        return None
+    return " <- ".join(parts)
