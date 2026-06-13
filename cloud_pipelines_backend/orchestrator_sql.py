@@ -131,7 +131,7 @@ class OrchestratorService_Sql:
             self._queued_executions_queue_idle = False
             start_timestamp = time.monotonic_ns()
 
-            with contextual_logging.logging_context(execution_id=queued_execution.id):
+            with contextual_logging.execution_logging_context(queued_execution):
                 _logger.info("Before processing queued execution")
                 try:
                     self.internal_process_one_queued_execution(
