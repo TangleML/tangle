@@ -184,6 +184,52 @@ class TestNormalizeOrchestratorError:
         )
 
 
+class TestNormalizeLauncherError:
+    def _make_launcher_error(
+        self, message: str, cause: BaseException | None = None
+    ) -> Exception:
+        try:
+            from cloud_pipelines_backend.launchers.interfaces import LauncherError
+        except ImportError:
+            pytest.skip("LauncherError not importable")
+        if cause:
+            try:
+                raise LauncherError(message) from cause
+            except LauncherError as exc:
+                return exc
+        return LauncherError(message)
+
+    def test_strips_pod_spec_json(self):
+        pod_spec = (
+            "{'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'task-abc-xyz'}}"
+        )
+        exc = self._make_launcher_error(f"Failed to create pod: {pod_spec}")
+        result = error_normalization.normalize_error_message(exception=exc)
+        assert result == "LauncherError: Failed to create pod: {...}"
+
+    def test_with_timeout_cause(self):
+        cause = TimeoutError("The read operation timed out")
+        exc = self._make_launcher_error(
+            "Failed to create pod: {'apiVersion': 'v1'}", cause=cause
+        )
+        result = error_normalization.normalize_error_message(exception=exc)
+        assert result == "LauncherError: Failed to create pod: {...}"
+
+    def test_no_colon_in_message(self):
+        exc = self._make_launcher_error("launch failed")
+        result = error_normalization.normalize_error_message(exception=exc)
+        assert result == "LauncherError: launch failed"
+
+    def test_multi_colon_diagnostic_preserved(self):
+        exc = self._make_launcher_error(
+            "creating pod: spec invalid: missing field 'name'"
+        )
+        result = error_normalization.normalize_error_message(exception=exc)
+        assert (
+            result == "LauncherError: creating pod: spec invalid: missing field 'name'"
+        )
+
+
 class TestFallback:
     def test_strips_hex_address(self):
         exc = ValueError("object at 0xdeadbeef failed")
@@ -204,3 +250,13 @@ class TestFallback:
         exc = AttributeError("'NoneType' object has no attribute 'encode'")
         result = error_normalization.normalize_error_message(exception=exc)
         assert result == "AttributeError: 'NoneType' object has no attribute 'encode'"
+
+    def test_strips_json_object(self):
+        exc = RuntimeError("operation failed: {'key': 'value', 'nested': {'a': 1}}")
+        result = error_normalization.normalize_error_message(exception=exc)
+        assert result == "RuntimeError: operation failed: {...}"
+
+    def test_strips_json_object_double_quotes(self):
+        exc = RuntimeError('operation failed: {"key": "value"}')
+        result = error_normalization.normalize_error_message(exception=exc)
+        assert result == "RuntimeError: operation failed: {...}"
