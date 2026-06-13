@@ -35,6 +35,7 @@ _CUSTOM_GROUPING_KEY = os.environ.get("TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY")
 
 IS_BUGSNAG_ENABLED: bool = bool(_BUGSNAG_API_KEY)
 _setup_called: bool = False
+_service_name: str | None = None
 
 
 def _before_notify(event: bugsnag_event.Event) -> None:
@@ -42,6 +43,11 @@ def _before_notify(event: bugsnag_event.Event) -> None:
     context = contextual_logging.get_all_context_metadata()
     if context:
         event.add_tab("tangle_context", context)
+
+    custom: dict[str, str] = {}
+    if _service_name:
+        custom["slice_name"] = _service_name
+
     if _CUSTOM_GROUPING_KEY and event.original_error:
         # Use the full chain for grouping so that "LauncherError <- TimeoutError"
         # and "LauncherError <- ApiException" land in separate, stable groups.
@@ -50,7 +56,7 @@ def _before_notify(event: bugsnag_event.Event) -> None:
         )
         prefix = (event.metadata.get("extra") or {}).get("grouping_prefix")
         key_value = f"{prefix}: {chain}" if prefix else chain
-        event.add_tab("custom", {_CUSTOM_GROUPING_KEY: key_value})
+        custom[_CUSTOM_GROUPING_KEY] = key_value
         if prefix and event.errors:
             try:
                 for error in event.errors:
@@ -74,6 +80,9 @@ def _before_notify(event: bugsnag_event.Event) -> None:
                     "Could not set chain title on errorClass", exc_info=True
                 )
 
+    if custom:
+        event.add_tab("custom", custom)
+
 
 def setup(*, service_name: str | None = None) -> None:
     """Configure the Bugsnag client.
@@ -81,7 +90,10 @@ def setup(*, service_name: str | None = None) -> None:
     No-op if TANGLE_BUGSNAG_API_KEY is not set.
 
     Args:
-        service_name: Identifies the process in Bugsnag (e.g. "tangle-api").
+        service_name: Identifies the process in Bugsnag (e.g. "tangle-orchestrator-production").
+            Also emitted as ``slice_name`` in the Bugsnag "custom" metadata tab on every event,
+            so errors can be filtered by service slice. Note: ``slice_name`` is a reserved key —
+            avoid setting ``TANGLE_BUGSNAG_CUSTOM_GROUPING_KEY=slice_name``.
     """
     if not IS_BUGSNAG_ENABLED:
         return
@@ -104,8 +116,9 @@ def setup(*, service_name: str | None = None) -> None:
             project_root=service_name,
         )
         bugsnag_sdk.before_notify(_before_notify)
-        global _setup_called
+        global _setup_called, _service_name
         _setup_called = True
+        _service_name = service_name
     except Exception:
         _logger.exception("Failed to initialize Bugsnag")
 
