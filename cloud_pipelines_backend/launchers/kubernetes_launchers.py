@@ -935,11 +935,22 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             _preload_content=False,
         )
         try:
-            log = response.data.decode("utf-8", errors="replace")
+            raw = response.data
+            # TEMP DIAGNOSTIC: inject a torn tqdm glyph to force the warning path
+            raw = raw[:100] + b"\xe2\x96" + raw[100:]
+            content_type = response.getheader("Content-Type", "unknown")
+            log = raw.decode("utf-8", errors="replace")
             if "�" in log:
+                first = log.index("�")
+                count = log.count("�")
+                window = repr(log[max(0, first - 40) : first + 40])
                 _logger.warning(
-                    "Pod log for %s contained invalid UTF-8 bytes; substituted replacement characters.",
+                    "Pod log for %s contained %d invalid UTF-8 byte(s) substituted with "
+                    "U+FFFD. Content-Type: %s. Context around first substitution: %s",
                     self._pod_name,
+                    count,
+                    content_type,
+                    window,
                 )
             return log
         finally:
@@ -1514,11 +1525,22 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 _preload_content=False,
             )
             try:
-                log = response.data.decode("utf-8", errors="replace")
+                raw = response.data
+                # TEMP DIAGNOSTIC: inject a torn tqdm glyph to force the warning path
+                raw = raw[:100] + b"\xe2\x96" + raw[100:]
+                content_type = response.getheader("Content-Type", "unknown")
+                log = raw.decode("utf-8", errors="replace")
                 if "�" in log:
+                    first = log.index("�")
+                    count = log.count("�")
+                    window = repr(log[max(0, first - 40) : first + 40])
                     _logger.warning(
-                        "Pod log for %s contained invalid UTF-8 bytes; substituted replacement characters.",
+                        "Pod log for %s contained %d invalid UTF-8 byte(s) substituted with "
+                        "U+FFFD. Content-Type: %s. Context around first substitution: %s",
                         pod_name,
+                        count,
+                        content_type,
+                        window,
                     )
                 return log
             finally:
