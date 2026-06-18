@@ -69,6 +69,16 @@ _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_ad
 # Environment variables for multi-node execution.
 _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 
+# Environment variables injected into every container to suppress tqdm progress
+# bar output. High-volume block-glyph writes (3-byte UTF-8: █▉▊▋▌▍▎▏) from
+# concurrent worker processes interleave at the OS level, producing torn
+# multi-byte sequences in the pod log stream that cause UnicodeDecodeError.
+# Components may override these by setting the same keys in their own env.
+_TQDM_SUPPRESS_ENV_VARS: dict[str, str] = {
+    "TQDM_DISABLE": "1",
+    "HF_DATASETS_DISABLE_PROGRESS_BARS": "1",
+}
+
 
 _T = typing.TypeVar("_T")
 
@@ -352,6 +362,10 @@ class _KubernetesContainerLauncherBase:
             k8s_client_lib.V1EnvVar(name=name, value=value)
             for name, value in (container_spec.env or {}).items()
         ]
+        user_env_names = {env.name for env in container_env}
+        for name, value in _TQDM_SUPPRESS_ENV_VARS.items():
+            if name not in user_env_names:
+                container_env.append(k8s_client_lib.V1EnvVar(name=name, value=value))
         main_container_spec = k8s_client_lib.V1Container(
             name=_MAIN_CONTAINER_NAME,
             image=container_spec.image,
