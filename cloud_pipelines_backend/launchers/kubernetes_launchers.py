@@ -922,16 +922,29 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
     def get_log(self) -> str:
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-        return core_api_client.read_namespaced_pod_log(
-            name=self._pod_name,
-            namespace=self._namespace,
-            container=_MAIN_CONTAINER_NAME,
-            timestamps=True,
-            # Disabled stream="All" due to error in some new GKE clusters
-            # HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"PodLogOptions \"task-pod-xxxxx\" is invalid: stream: Forbidden: may not be specified","reason":"Invalid","details":{"name":"task-pod-xxxxx","kind":"PodLogOptions","causes":[{"reason":"FieldValueForbidden","message":"Forbidden: may not be specified","field":"stream"}]},"code":422}
-            # stream="All",
-            _request_timeout=launcher._request_timeout,
-        )
+        try:
+            return core_api_client.read_namespaced_pod_log(
+                name=self._pod_name,
+                namespace=self._namespace,
+                container=_MAIN_CONTAINER_NAME,
+                timestamps=True,
+                # Disabled stream="All" due to error in some new GKE clusters
+                # HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"PodLogOptions \"task-pod-xxxxx\" is invalid: stream: Forbidden: may not be specified","reason":"Invalid","details":{"name":"task-pod-xxxxx","kind":"PodLogOptions","causes":[{"reason":"FieldValueForbidden","message":"Forbidden: may not be specified","field":"stream"}]},"code":422}
+                # stream="All",
+                _request_timeout=launcher._request_timeout,
+            )
+        except Exception:
+            # The Kubernetes API can return truncated or otherwise malformed responses
+            # (broken UTF-8, broken JSON) that cause the client to throw before we can
+            # read the log. Surfacing that exception fails the entire execution via the
+            # orchestrator's retry wrapper. A missing log is far less harmful than a
+            # false SYSTEM_ERROR on an otherwise-healthy run.
+            _logger.warning(
+                "Failed to retrieve log for pod %s; log will be missing.",
+                self._pod_name,
+                exc_info=True,
+            )
+            return ""
 
     def upload_log(self):
         launcher = self._get_launcher()
@@ -1504,6 +1517,18 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 # See https://github.com/TangleML/tangle/issues/139
                 return None
             raise
+        except Exception:
+            # The Kubernetes API can return truncated or otherwise malformed responses
+            # (broken UTF-8, broken JSON) that cause the client to throw before we can
+            # read the log. Surfacing that exception fails the entire execution via the
+            # orchestrator's retry wrapper. A missing log is far less harmful than a
+            # false SYSTEM_ERROR on an otherwise-healthy run.
+            _logger.warning(
+                "Failed to retrieve log for pod %s; log will be missing for this pod.",
+                pod_name,
+                exc_info=True,
+            )
+            return None
 
     def _get_all_logs(self) -> dict[str, str]:
         logs = {}
