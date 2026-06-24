@@ -31,6 +31,18 @@ _logger = logging.getLogger(__name__)
 _MAX_INPUT_VALUE_SIZE = 10000
 _MAIN_CONTAINER_NAME = "main"
 
+# Detection of pods wedged by a transient GKE gcsfuse-sidecar failure.
+# The GKE-injected gcsfuse sidecar runs a bucket-access-check pre-flight that
+# resolves Workload Identity via the metadata server. When that endpoint is
+# degraded the call times out, the sidecar fatals (exit 255), the GCS volume
+# never mounts, and the main container wedges in CreateContainerConfigError
+# until the run-level timeout cancels it. We surface that signature so the
+# orchestrator can relaunch the task in place (usually on a healthier node).
+_GCSFUSE_SIDECAR_CONTAINER_NAME = "gke-gcsfuse-sidecar"
+_GCSFUSE_SIDECAR_FATAL_EXIT_CODE = 255
+_GCSFUSE_WEDGE_MESSAGE_SUBSTRING = "bucket access check"
+_GCSFUSE_WEDGE_REASONS = frozenset({"ContainerStatusUnknown", "Error", "StartError"})
+
 
 # Kubernetes annotation keys. (Has strict naming policy. Single slash only etc.)
 _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY = "cloud-pipelines.net"
@@ -918,6 +930,64 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         new_launched_container = copy.copy(self)
         new_launched_container._debug_pod = pod
         return new_launched_container
+
+    def _detect_wedged_gcsfuse_sidecar(self) -> bool:
+        """Return True if the pod is wedged by a fatal gcsfuse-sidecar pre-flight.
+
+        Signature: the gke-gcsfuse-sidecar init container terminated with exit
+        255, a transient reason, and a bucket-access-check message, while the
+        main container has not started. See the module-level constants.
+        """
+        pod_status: k8s_client_lib.V1PodStatus | None = self._debug_pod.status
+        if pod_status is None:
+            return False
+        # Never relaunch a pod whose main container has already started or ended;
+        # the wedge only matters while the main container is still blocked.
+        main_container_state = self._get_main_container_state()
+        if main_container_state is not None and (
+            main_container_state.running is not None
+            or main_container_state.terminated is not None
+        ):
+            return False
+
+        init_container_statuses: list[k8s_client_lib.V1ContainerStatus] = (
+            pod_status.init_container_statuses or []
+        )
+        for container_status in init_container_statuses:
+            if container_status.name != _GCSFUSE_SIDECAR_CONTAINER_NAME:
+                continue
+            state: k8s_client_lib.V1ContainerState | None = container_status.state
+            last_state: k8s_client_lib.V1ContainerState | None = (
+                container_status.last_state
+            )
+            terminated_states = [
+                s.terminated
+                for s in (state, last_state)
+                if s is not None and s.terminated is not None
+            ]
+            for terminated in terminated_states:
+                message = terminated.message or ""
+                if (
+                    terminated.exit_code == _GCSFUSE_SIDECAR_FATAL_EXIT_CODE
+                    and terminated.reason in _GCSFUSE_WEDGE_REASONS
+                    and _GCSFUSE_WEDGE_MESSAGE_SUBSTRING in message.lower()
+                ):
+                    return True
+        return False
+
+    def transient_infra_failure_reason(self) -> str | None:
+        """Reason string when the pod is wedged by a transient gcsfuse-sidecar
+        bucket-access-check failure, else None.
+
+        The orchestrator relaunches the task in place (same run/node) when this
+        returns a reason, so we do not mutate the pod here.
+        """
+        if self._detect_wedged_gcsfuse_sidecar():
+            return (
+                "gke-gcsfuse-sidecar bucket-access-check timeout "
+                "(GKE metadata server unreachable)"
+            )
+        return None
 
     def get_log(self) -> str:
         launcher = self._get_launcher()
