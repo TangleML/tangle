@@ -764,6 +764,9 @@ class OrchestratorService_Sql:
         # execution node so the normal launch path builds a fresh pod.
         transient_infra_failure_reason = (
             reloaded_launched_container.transient_infra_failure_reason()
+            # TEMP staging-only simulation — DO NOT MERGE. Lets us drive the
+            # self-heal path on staging without a real metadata-server outage.
+            or self._simulate_transient_infra_failure(container_execution)
         )
         if transient_infra_failure_reason is not None:
             self._handle_transient_infra_failure(
@@ -987,6 +990,46 @@ class OrchestratorService_Sql:
                 f"Unexpected running container status: {new_status=}, {launched_container=}"
             )
         session.commit()
+
+    # ---------------------------------------------------------------------
+    # TEMPORARY staging simulation — DO NOT MERGE.
+    # ---------------------------------------------------------------------
+    _SIMULATE_WEDGE_ANNOTATION_KEY = "simulate_gcsfuse_wedge"
+
+    def _simulate_transient_infra_failure(
+        self, container_execution: bts.ContainerExecution
+    ) -> str | None:
+        """Pretend a task is wedged, to exercise the self-heal path on staging.
+
+        Fires only for a task carrying the `simulate_gcsfuse_wedge` annotation
+        (set per-task in the tangle-ui Configuration tab). The annotation value
+        is the number of attempts to fail before letting the task through:
+          - "1"  -> fails the first attempt, then the relaunch succeeds.
+          - "99" -> fails every attempt, exercising the retry cap.
+        The per-node retry counter (persisted in extra_data) gates this, so a
+        marked task self-terminates instead of looping forever. No other task
+        can match, so this is safe to run on the shared staging orchestrator.
+        """
+        for execution_node in container_execution.execution_nodes:
+            annotations = (execution_node.task_spec or {}).get("annotations") or {}
+            raw_value = annotations.get(self._SIMULATE_WEDGE_ANNOTATION_KEY)
+            if raw_value is None:
+                continue
+            try:
+                fail_attempts = int(str(raw_value))
+            except ValueError:
+                fail_attempts = 1
+            retry_count = int(
+                (execution_node.extra_data or {}).get(
+                    _TRANSIENT_INFRA_RETRY_COUNT_KEY, 0
+                )
+            )
+            if retry_count < fail_attempts:
+                return (
+                    "SIMULATED gke-gcsfuse-sidecar wedge (staging test, "
+                    f"attempt {retry_count + 1}/{fail_attempts})"
+                )
+        return None
 
     def _handle_transient_infra_failure(
         self,
