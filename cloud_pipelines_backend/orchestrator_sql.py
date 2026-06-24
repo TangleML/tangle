@@ -32,6 +32,12 @@ _T = typing.TypeVar("_T")
 DYNAMIC_DATA_SECRET_KEY = "secret"
 DYNAMIC_DATA_SECRET_NAME_KEY = "name"
 
+# Per-node retry budget for transient infrastructure failures (e.g. a wedged
+# gcsfuse sidecar). Each attempt is one fresh pod; the count is tracked on the
+# ExecutionNode's extra_data so it survives across orchestrator polls/relaunches.
+_MAX_TRANSIENT_INFRA_RETRIES = 2
+_TRANSIENT_INFRA_RETRY_COUNT_KEY = "transient_infra_retry_count"
+
 
 class OrchestratorError(RuntimeError):
     pass
@@ -753,6 +759,20 @@ class OrchestratorService_Sql:
         reloaded_launched_container: launcher_interfaces.LaunchedContainer = (
             self._launcher.get_refreshed_launched_container_from_dict(launcher_data)
         )
+        # Self-heal transient infra failures (e.g. a wedged gcsfuse sidecar) by
+        # relaunching the task in place: error out this attempt and re-queue the
+        # execution node so the normal launch path builds a fresh pod.
+        transient_infra_failure_reason = (
+            reloaded_launched_container.transient_infra_failure_reason()
+        )
+        if transient_infra_failure_reason is not None:
+            self._handle_transient_infra_failure(
+                session=session,
+                container_execution=container_execution,
+                launched_container=reloaded_launched_container,
+                reason=transient_infra_failure_reason,
+            )
+            return
         current_time = _get_current_time()
         # Saving the updated launcher data
         reloaded_launcher_data = reloaded_launched_container.to_dict()
@@ -967,6 +987,91 @@ class OrchestratorService_Sql:
                 f"Unexpected running container status: {new_status=}, {launched_container=}"
             )
         session.commit()
+
+    def _handle_transient_infra_failure(
+        self,
+        *,
+        session: orm.Session,
+        container_execution: bts.ContainerExecution,
+        launched_container: launcher_interfaces.LaunchedContainer,
+        reason: str,
+    ):
+        """Relaunch a task wedged by a transient infrastructure failure.
+
+        The current pod attempt is terminated and its ContainerExecution is
+        marked SYSTEM_ERROR (which both records the failed attempt and excludes
+        it from cache reuse). Each linked ExecutionNode is then re-queued so the
+        normal launch path builds a fresh pod, up to `_MAX_TRANSIENT_INFRA_RETRIES`
+        attempts; beyond that the node is failed (SYSTEM_ERROR) and its downstream
+        skipped so the run fails fast instead of hanging until its timeout.
+        """
+        # Best-effort delete of the wedged pod; it may already be gone.
+        try:
+            launched_container.terminate()
+        except Exception:
+            _logger.exception(
+                f"Failed to terminate wedged container execution {container_execution.id}; "
+                "continuing with re-queue."
+            )
+
+        session.rollback()
+        with session.begin():
+            container_execution.status = bts.ContainerExecutionStatus.SYSTEM_ERROR
+            container_execution.ended_at = _get_current_time()
+
+            execution_nodes = container_execution.execution_nodes
+            for execution_node in execution_nodes:
+                if execution_node.extra_data is None:
+                    execution_node.extra_data = {}
+                retry_count = int(
+                    execution_node.extra_data.get(_TRANSIENT_INFRA_RETRY_COUNT_KEY, 0)
+                )
+
+                # Record the reason on the node either way, for observability.
+                _record_orchestration_error_message(
+                    container_execution=container_execution,
+                    execution_nodes=[execution_node],
+                    message=(
+                        f"Transient infrastructure failure: {reason}. "
+                        f"Attempt {retry_count + 1}/{_MAX_TRANSIENT_INFRA_RETRIES + 1}."
+                    ),
+                )
+
+                if retry_count < _MAX_TRANSIENT_INFRA_RETRIES:
+                    execution_node.extra_data[_TRANSIENT_INFRA_RETRY_COUNT_KEY] = (
+                        retry_count + 1
+                    )
+                    # Re-queue: the queued processor will launch a fresh pod.
+                    # The wedged (now SYSTEM_ERROR) execution is not a cache
+                    # reuse candidate, so a new ContainerExecution is created.
+                    execution_node.container_execution_status = (
+                        bts.ContainerExecutionStatus.QUEUED
+                    )
+                    _logger.info(
+                        f"Re-queuing execution {execution_node.id} after transient "
+                        f"infra failure ({reason}); retry "
+                        f"{retry_count + 1}/{_MAX_TRANSIENT_INFRA_RETRIES}."
+                    )
+                else:
+                    execution_node.container_execution_status = (
+                        bts.ContainerExecutionStatus.SYSTEM_ERROR
+                    )
+                    record_system_error_exception(
+                        execution=execution_node,
+                        exception=OrchestratorError(
+                            f"Transient infrastructure failure persisted after "
+                            f"{_MAX_TRANSIENT_INFRA_RETRIES} retries: {reason}"
+                        ),
+                    )
+                    _mark_all_downstream_executions_as_skipped(
+                        session=session, execution=execution_node
+                    )
+                    _logger.warning(
+                        f"Execution {execution_node.id} still hitting transient infra "
+                        f"failure ({reason}) after {retry_count} retries "
+                        f"(max {_MAX_TRANSIENT_INFRA_RETRIES}); failing it and skipping "
+                        "downstream."
+                    )
 
 
 def _get_direct_downstream_executions(
