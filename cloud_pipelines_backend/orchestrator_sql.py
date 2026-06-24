@@ -772,6 +772,11 @@ class OrchestratorService_Sql:
         )
         session.rollback()
         container_execution.updated_at = current_time
+        if new_status in (
+            launcher_interfaces.ContainerStatus.SUCCEEDED,
+            launcher_interfaces.ContainerStatus.FAILED,
+        ):
+            _cleanup_launched_container(reloaded_launched_container)
         execution_nodes = container_execution.execution_nodes
         if not execution_nodes:
             raise OrchestratorError(
@@ -1090,6 +1095,15 @@ def _retry(
             if i == max_retries - 1:
                 raise
     raise
+
+
+def _cleanup_launched_container(
+    launched_container: launcher_interfaces.LaunchedContainer,
+) -> None:
+    try:
+        _retry(launched_container.cleanup)
+    except Exception:
+        _logger.exception("Error during `LaunchedContainer.cleanup` call.")
 
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import secrets
 import typing
 from typing import Any, Optional
 
@@ -19,6 +20,7 @@ from cloud_pipelines.orchestration.storage_providers import (
 )
 from cloud_pipelines.orchestration.storage_providers import local_storage
 from .. import component_structures as structures
+from ..runtime import multi_node as multi_node_runtime
 from . import common_annotations
 from . import container_component_utils
 from . import interfaces
@@ -73,6 +75,8 @@ _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 _T = typing.TypeVar("_T")
 
 _CONTAINER_FILE_NAME = "data"
+_REDACTED_VALUE = "[REDACTED]"
+_SENSITIVE_ENV_VAR_NAME_PARTS = ("PASSWORD", "SECRET", "TOKEN")
 
 
 def _create_volume_and_volume_mount_host_path(
@@ -144,6 +148,25 @@ def _create_volume_and_volume_mount_google_cloud_storage(
             sub_path=sub_path,
         ),
     )
+
+
+def _delete_namespaced_service_if_exists(
+    *,
+    core_api_client: k8s_client_lib.CoreV1Api,
+    name: str,
+    namespace: str,
+    request_timeout: int | tuple[int, int],
+) -> None:
+    try:
+        core_api_client.delete_namespaced_service(
+            name=name,
+            namespace=namespace,
+            _request_timeout=request_timeout,
+        )
+    except kubernetes.client.exceptions.ApiException as ex:
+        if ex.status == 404:
+            return
+        raise
 
 
 class PodPostProcessor(typing.Protocol):
@@ -1084,6 +1107,7 @@ class _KubernetesJobLauncher(
         else:
             node_0_address = "localhost"
             all_node_addresses_str = node_0_address
+        multi_node_barrier_token = secrets.token_hex(16)
 
         # Resolving the dynamic data arguments
         known_dynamic_data_values = {
@@ -1138,6 +1162,20 @@ class _KubernetesJobLauncher(
         if enable_multi_node:
             main_container_spec = pod.spec.containers[0]
             main_container_spec.env = main_container_spec.env or []
+            runtime_env_names = {
+                _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME,
+                multi_node_runtime.NUMBER_OF_NODES_ENV_VAR_NAME,
+                multi_node_runtime.NODE_INDEX_ENV_VAR_NAME,
+                multi_node_runtime.NODE_0_ADDRESS_ENV_VAR_NAME,
+                multi_node_runtime.ALL_NODE_ADDRESSES_ENV_VAR_NAME,
+                multi_node_runtime.BARRIER_PORT_ENV_VAR_NAME,
+                multi_node_runtime.BARRIER_TOKEN_ENV_VAR_NAME,
+            }
+            main_container_spec.env = [
+                env_var
+                for env_var in main_container_spec.env
+                if env_var.name not in runtime_env_names
+            ]
 
             # We need to insert this env variable at the start on the list since subsequent variables can depend on it.
             main_container_spec.env.insert(
@@ -1154,6 +1192,34 @@ class _KubernetesJobLauncher(
                     ),
                 ),
             )
+            main_container_spec.env.extend(
+                [
+                    k8s_client_lib.V1EnvVar(
+                        name=multi_node_runtime.NUMBER_OF_NODES_ENV_VAR_NAME,
+                        value=str(num_nodes),
+                    ),
+                    k8s_client_lib.V1EnvVar(
+                        name=multi_node_runtime.NODE_INDEX_ENV_VAR_NAME,
+                        value=f"$({_MULTI_NODE_NODE_INDEX_ENV_VAR_NAME})",
+                    ),
+                    k8s_client_lib.V1EnvVar(
+                        name=multi_node_runtime.NODE_0_ADDRESS_ENV_VAR_NAME,
+                        value=node_0_address,
+                    ),
+                    k8s_client_lib.V1EnvVar(
+                        name=multi_node_runtime.ALL_NODE_ADDRESSES_ENV_VAR_NAME,
+                        value=all_node_addresses_str,
+                    ),
+                    k8s_client_lib.V1EnvVar(
+                        name=multi_node_runtime.BARRIER_PORT_ENV_VAR_NAME,
+                        value=str(multi_node_runtime.DEFAULT_BARRIER_PORT),
+                    ),
+                    k8s_client_lib.V1EnvVar(
+                        name=multi_node_runtime.BARRIER_TOKEN_ENV_VAR_NAME,
+                        value=multi_node_barrier_token,
+                    ),
+                ]
+            )
             # Handling cross-pod communication.
             # Creating headless Kubernetes Service to give all pods in the job a stable DNS name to communicate with each other.
             service = k8s_client_lib.V1Service(
@@ -1167,6 +1233,14 @@ class _KubernetesJobLauncher(
                     selector={
                         "job-name": explicit_job_name,
                     },
+                    ports=[
+                        k8s_client_lib.V1ServicePort(
+                            name="barrier",
+                            port=multi_node_runtime.DEFAULT_BARRIER_PORT,
+                            target_port=multi_node_runtime.DEFAULT_BARRIER_PORT,
+                        )
+                    ],
+                    publish_not_ready_addresses=True,
                 ),
             )
             core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
@@ -1218,6 +1292,20 @@ class _KubernetesJobLauncher(
                 _request_timeout=self._request_timeout,
             )
         except Exception as ex:
+            if enable_multi_node:
+                try:
+                    _delete_namespaced_service_if_exists(
+                        core_api_client=core_api_client,
+                        name=explicit_service_name,
+                        namespace=namespace,
+                        request_timeout=self._request_timeout,
+                    )
+                except Exception:
+                    _logger.warning(
+                        "Failed to delete Kubernetes Service %s after Job creation failed.",
+                        explicit_service_name,
+                        exc_info=True,
+                    )
             raise interfaces.LauncherError(
                 f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}"
             ) from ex
@@ -1607,15 +1695,30 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
         return pprint.pformat(self.to_dict())
 
+    def cleanup(self) -> None:
+        launcher = self._get_launcher()
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
+        _delete_namespaced_service_if_exists(
+            core_api_client=core_api_client,
+            name=self._job_name,
+            namespace=self._namespace,
+            request_timeout=launcher._request_timeout,
+        )
+
     def terminate(self):
         launcher = self._get_launcher()
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
-        batch_api_client.delete_namespaced_job(
-            name=self._job_name,
-            namespace=self._namespace,
-            grace_period_seconds=10,
-            propagation_policy="Foreground",
-        )
+        try:
+            batch_api_client.delete_namespaced_job(
+                name=self._job_name,
+                namespace=self._namespace,
+                grace_period_seconds=10,
+                propagation_policy="Foreground",
+            )
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status != 404:
+                raise
+        self.cleanup()
         _logger.info(f"Terminated job {self._job_name} in namespace {self._namespace}")
 
 
@@ -1802,7 +1905,30 @@ def windows_path_to_docker_path(path: str) -> str:
 
 def _kubernetes_serialize(obj) -> dict[str, Any]:
     shallow_client = k8s_client_lib.ApiClient.__new__(k8s_client_lib.ApiClient)
-    return shallow_client.sanitize_for_serialization(obj)
+    serialized = shallow_client.sanitize_for_serialization(obj)
+    _redact_sensitive_env_values(serialized)
+    return serialized
+
+
+def _redact_sensitive_env_values(value: Any) -> None:
+    if isinstance(value, dict):
+        env_name = value.get("name")
+        if (
+            isinstance(env_name, str)
+            and "value" in value
+            and _is_sensitive_env_var_name(env_name)
+        ):
+            value["value"] = _REDACTED_VALUE
+        for child_value in value.values():
+            _redact_sensitive_env_values(child_value)
+    elif isinstance(value, list):
+        for item in value:
+            _redact_sensitive_env_values(item)
+
+
+def _is_sensitive_env_var_name(name: str) -> bool:
+    upper_name = name.upper()
+    return any(part in upper_name for part in _SENSITIVE_ENV_VAR_NAME_PARTS)
 
 
 def _kubernetes_deserialize(obj_dict: dict[str, Any], cls: typing.Type[_T]) -> _T:
