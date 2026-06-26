@@ -1,12 +1,29 @@
+import datetime
+
 import pytest
 from sqlalchemy import orm
 
 from cloud_pipelines_backend import backend_types_sql as bts
+from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend.api_server_sql import (
     ExecutionNodesApiService_Sql,
+    GetExecutionInfoResponse,
     GetGraphExecutionStateResponse,
 )
+
+
+def _make_task_spec_dict(name: str = "task") -> dict:
+    return structures.TaskSpec(
+        component_ref=structures.ComponentReference(
+            spec=structures.ComponentSpec(
+                name=name,
+                implementation=structures.ContainerImplementation(
+                    container=structures.ContainerSpec(image="test-image:latest"),
+                ),
+            ),
+        ),
+    ).to_json_dict()
 
 
 def _initialize_db_and_get_session_factory():
@@ -323,6 +340,74 @@ class TestGetGraphExecutionState:
         # Total ended = 2 + 5 = 7
         assert result.child_execution_status_summary.ended_executions == 7
         assert result.child_execution_status_summary.has_ended is False
+
+
+class TestGetExecutionInfo:
+    """Tests for ExecutionNodesApiService_Sql.get (the /details endpoint)."""
+
+    def setup_method(self):
+        self.session_factory = _initialize_db_and_get_session_factory()
+        self.service = ExecutionNodesApiService_Sql()
+
+    def test_status_history_is_returned_in_order(self):
+        """status_history mirrors ExecutionNode.extra_data, parsed and in order."""
+        history = [
+            {"status": "QUEUED", "first_observed_at": "2026-01-01T00:00:00+00:00"},
+            {"status": "PENDING", "first_observed_at": "2026-01-01T00:02:00+00:00"},
+            {"status": "RUNNING", "first_observed_at": "2026-01-01T00:05:00+00:00"},
+        ]
+        with self.session_factory() as session:
+            node = _make_execution_node(task_spec=_make_task_spec_dict())
+            node.extra_data = {
+                bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY: history
+            }
+            session.add(node)
+            session.flush()
+
+            result = self.service.get(session, node.id)
+
+        assert isinstance(result, GetExecutionInfoResponse)
+        assert result.status_history is not None
+        assert [e.status for e in result.status_history] == [
+            "QUEUED",
+            "PENDING",
+            "RUNNING",
+        ]
+        # The last entry is the current status; its timestamp is parsed to a datetime.
+        assert result.status_history[-1].first_observed_at == datetime.datetime(
+            2026, 1, 1, 0, 5, tzinfo=datetime.timezone.utc
+        )
+
+    def test_status_history_is_none_when_absent(self):
+        """No history in extra_data yields status_history=None (not an empty list)."""
+        with self.session_factory() as session:
+            node = _make_execution_node(task_spec=_make_task_spec_dict())
+            session.add(node)
+            session.flush()
+
+            result = self.service.get(session, node.id)
+
+        assert result.status_history is None
+
+    def test_status_history_skips_malformed_entries(self):
+        """Entries missing status or first_observed_at are dropped."""
+        history = [
+            {"status": "QUEUED", "first_observed_at": "2026-01-01T00:00:00+00:00"},
+            {"status": "PENDING"},  # missing first_observed_at
+            {"first_observed_at": "2026-01-01T00:03:00+00:00"},  # missing status
+        ]
+        with self.session_factory() as session:
+            node = _make_execution_node(task_spec=_make_task_spec_dict())
+            node.extra_data = {
+                bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY: history
+            }
+            session.add(node)
+            session.flush()
+
+            result = self.service.get(session, node.id)
+
+        assert result.status_history is not None
+        assert [e.status for e in result.status_history] == ["QUEUED"]
 
 
 if __name__ == "__main__":
