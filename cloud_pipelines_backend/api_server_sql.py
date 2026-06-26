@@ -502,6 +502,12 @@ def _construct_constant_artifact_node_and_add_to_session(
 # ============
 
 
+@dataclasses.dataclass
+class StatusHistoryEntry:
+    status: str
+    first_observed_at: datetime.datetime
+
+
 @dataclasses.dataclass(kw_only=True)
 class GetExecutionInfoResponse:
     id: bts.IdType
@@ -512,6 +518,10 @@ class GetExecutionInfoResponse:
     # ancestor_breadcrumbs: list[tuple[str, str]]
     input_artifacts: dict[str, "ArtifactNodeIdResponse"] | None = None
     output_artifacts: dict[str, "ArtifactNodeIdResponse"] | None = None
+    # Ordered history of container-execution status transitions for this node,
+    # sourced from `ExecutionNode.extra_data`. The last entry corresponds to the
+    # current status, so its `first_observed_at` is when the node entered it.
+    status_history: list[StatusHistoryEntry] | None = None
 
 
 @dataclasses.dataclass
@@ -603,6 +613,19 @@ class ExecutionNodesApiService_Sql:
                 ).where(bts.OutputArtifactLink.execution_id == id)
             ).tuples()
         }
+        raw_status_history = (execution_node.extra_data or {}).get(
+            bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY, []
+        )
+        status_history = [
+            StatusHistoryEntry(
+                status=entry["status"],
+                first_observed_at=datetime.datetime.fromisoformat(
+                    entry["first_observed_at"]
+                ),
+            )
+            for entry in raw_status_history
+            if entry.get("status") and entry.get("first_observed_at")
+        ] or None
         return GetExecutionInfoResponse(
             id=execution_node.id,
             task_spec=structures.TaskSpec.from_json_dict(execution_node.task_spec),
@@ -611,6 +634,7 @@ class ExecutionNodesApiService_Sql:
             child_task_execution_ids=child_task_execution_ids,
             input_artifacts=input_artifacts,
             output_artifacts=output_artifacts,
+            status_history=status_history,
         )
 
     def get_graph_execution_state(
