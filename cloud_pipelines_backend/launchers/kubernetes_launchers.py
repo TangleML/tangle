@@ -875,6 +875,16 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         launcher_error_message = f"Kubernetes error. Reason: {main_container_terminated_state.reason}, message: {main_container_terminated_state.message}"
         return launcher_error_message
 
+    @property
+    def pending_diagnostics(self) -> str | None:
+        state = self._get_main_container_state()
+        waiting = state.waiting if state is not None else None
+        if waiting is None or not waiting.reason:
+            return None
+        if waiting.message:
+            return f"{waiting.reason}: {waiting.message}"
+        return waiting.reason
+
     def to_dict(self) -> dict[str, Any]:
         pod_dict = _serialize_kubernetes_object_to_compact_dict(self._debug_pod)
         result = dict(

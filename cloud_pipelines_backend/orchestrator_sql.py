@@ -50,6 +50,7 @@ class OrchestratorService_Sql:
         default_task_annotations: dict[str, Any] | None = None,
         sleep_seconds_between_queue_sweeps: float = 1.0,
         output_data_purge_duration: datetime.timedelta = None,
+        max_pending_duration: datetime.timedelta | None = None,
         *,
         # Internal/experimental:
         _max_queue_batch_size: int = 1,
@@ -65,6 +66,7 @@ class OrchestratorService_Sql:
         self._queued_executions_queue_idle = False
         self._running_executions_queue_idle = False
         self._output_data_purge_duration = output_data_purge_duration
+        self._max_pending_duration = max_pending_duration
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
@@ -765,6 +767,35 @@ class OrchestratorService_Sql:
             reloaded_launched_container.status
         )
         if new_status == previous_status:
+            if (
+                new_status == launcher_interfaces.ContainerStatus.PENDING
+                and _pending_deadline_exceeded(
+                    created_at=container_execution.created_at,
+                    now=current_time,
+                    max_pending_duration=self._max_pending_duration,
+                )
+            ):
+                # The container never started (e.g. an unschedulable pod or a
+                # gcsfuse/image-pull boot wedge). Terminate it and let the outer
+                # exception handler mark it SYSTEM_ERROR and skip downstream.
+                pending_duration = current_time - container_execution.created_at
+                diagnostics = getattr(
+                    reloaded_launched_container, "pending_diagnostics", None
+                )
+                try:
+                    _retry(reloaded_launched_container.upload_log)
+                except Exception:
+                    _logger.exception(
+                        "Error uploading logs before pending-deadline termination."
+                    )
+                reloaded_launched_container.terminate()
+                message = (
+                    f"Task pending {pending_duration}, never started"
+                    f" (deadline {self._max_pending_duration})."
+                )
+                if diagnostics:
+                    message += f"\n{diagnostics}"
+                raise OrchestratorError(message)
             _logger.info(f"Container execution remains in {new_status} state.")
             return
         _logger.info(
@@ -1053,6 +1084,22 @@ def _calculate_container_execution_cache_key(
 
 def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
+
+
+def _pending_deadline_exceeded(
+    created_at: datetime.datetime | None,
+    now: datetime.datetime,
+    max_pending_duration: datetime.timedelta | None,
+) -> bool:
+    """Whether a still-pending container has outlived its start deadline.
+
+    Returns False when the watchdog is disabled (``max_pending_duration`` is
+    None) or the creation time is unknown, so legacy rows without
+    ``created_at`` are never force-failed.
+    """
+    if max_pending_duration is None or created_at is None:
+        return False
+    return (now - created_at) > max_pending_duration
 
 
 def _generate_random_id() -> str:
