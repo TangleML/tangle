@@ -25,6 +25,9 @@ from .instrumentation import bugsnag_instrumentation
 from .instrumentation import contextual_logging
 from .instrumentation import metrics as app_metrics
 
+if typing.TYPE_CHECKING:
+    from .launchers import kubernetes_pvc_reaper
+
 _logger = logging.getLogger(__name__)
 
 _T = typing.TypeVar("_T")
@@ -51,12 +54,14 @@ class OrchestratorService_Sql:
         sleep_seconds_between_queue_sweeps: float = 1.0,
         output_data_purge_duration: datetime.timedelta = None,
         *,
+        pvc_reaper: "kubernetes_pvc_reaper.KubernetesPVCReaper | None" = None,
         # Internal/experimental:
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
     ):
         self._session_factory = session_factory
         self._launcher = launcher
+        self._pvc_reaper = pvc_reaper
         self._storage_provider = storage_provider
         self._data_root_uri = data_root_uri
         self._logs_root_uri = logs_root_uri
@@ -70,13 +75,19 @@ class OrchestratorService_Sql:
         self._max_queue_batch_duration = _max_queue_batch_duration
 
     def run_loop(self):
-        while True:
-            try:
-                self.process_each_queue_once()
-                time.sleep(self._sleep_seconds_between_queue_sweeps)
-            except Exception as exc:
-                _logger.exception("Error while calling `process_each_queue_once`")
-                bugsnag_instrumentation.notify(exception=exc)
+        if self._pvc_reaper is not None:
+            self._pvc_reaper.start()
+        try:
+            while True:
+                try:
+                    self.process_each_queue_once()
+                    time.sleep(self._sleep_seconds_between_queue_sweeps)
+                except Exception as exc:
+                    _logger.exception("Error while calling `process_each_queue_once`")
+                    bugsnag_instrumentation.notify(exception=exc)
+        finally:
+            if self._pvc_reaper is not None:
+                self._pvc_reaper.stop()
 
     def process_each_queue_once(self):
         queue_handlers = [

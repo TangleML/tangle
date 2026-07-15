@@ -57,6 +57,16 @@ SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
 )
 
 
+# Kubernetes labels (not annotations) applied to auto-provisioned PVCs so that
+# KubernetesPVCReaper can select them and delete them when their owning Job is
+# deleted. Labels are used (rather than annotations) so they are usable in a
+# Kubernetes label selector. Label keys allow a single "/" (prefix/name), so
+# these use the flat form rather than the multi-segment annotation keys above.
+PVC_MANAGED_LABEL_KEY = "tangleml.com/managed-pvc"
+PVC_MANAGED_LABEL_VALUE = "true"
+PVC_OWNER_JOB_NAME_LABEL_KEY = "tangleml.com/owner-job-name"
+
+
 # Multi-node constants
 _MULTI_NODE_MAX_NUMBER_OF_NODES = 16
 
@@ -143,6 +153,46 @@ def _create_volume_and_volume_mount_google_cloud_storage(
             read_only=read_only,
             sub_path=sub_path,
         ),
+    )
+
+
+def create_managed_pvc(
+    *,
+    core_api_client: k8s_client_lib.CoreV1Api,
+    namespace: str,
+    pvc_name: str,
+    owner_job_name: str,
+    storage_class_name: str,
+    storage_size: str,
+    access_modes: list[str] | None = None,
+    request_timeout: int | tuple[int, int] = 10,
+) -> k8s_client_lib.V1PersistentVolumeClaim:
+    """Create a PVC labeled for event-based reaping by KubernetesPVCReaper.
+
+    The PVC is labeled so that when the Job named ``owner_job_name`` is deleted,
+    the reaper deletes this PVC. ``storage_class_name`` is caller-supplied because
+    the appropriate storage class is environment-specific.
+    """
+    pvc = k8s_client_lib.V1PersistentVolumeClaim(
+        metadata=k8s_client_lib.V1ObjectMeta(
+            name=pvc_name,
+            labels={
+                PVC_MANAGED_LABEL_KEY: PVC_MANAGED_LABEL_VALUE,
+                PVC_OWNER_JOB_NAME_LABEL_KEY: owner_job_name,
+            },
+        ),
+        spec=k8s_client_lib.V1PersistentVolumeClaimSpec(
+            storage_class_name=storage_class_name,
+            access_modes=access_modes or ["ReadWriteMany"],
+            resources=k8s_client_lib.V1VolumeResourceRequirements(
+                requests={"storage": storage_size},
+            ),
+        ),
+    )
+    return core_api_client.create_namespaced_persistent_volume_claim(
+        namespace=namespace,
+        body=pvc,
+        _request_timeout=request_timeout,
     )
 
 
