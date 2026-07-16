@@ -212,8 +212,13 @@ class OrchestratorService_Sql:
                     # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
                     session.commit()
 
-                    # Mark our ExecutionNode as SYSTEM_ERROR
-                    execution_nodes = running_container_execution.execution_nodes
+                    # Mark our active ExecutionNodes as SYSTEM_ERROR.
+                    execution_nodes = [
+                        execution_node
+                        for execution_node in running_container_execution.execution_nodes
+                        if execution_node.container_execution_status
+                        != bts.ContainerExecutionStatus.CANCELLED
+                    ]
                     for execution_node in execution_nodes:
                         execution_node.container_execution_status = (
                             bts.ContainerExecutionStatus.SYSTEM_ERROR
@@ -689,70 +694,77 @@ class OrchestratorService_Sql:
         launched_container: launcher_interfaces.LaunchedContainer = (
             self._launcher.deserialize_launched_container_from_dict(launcher_data)
         )
-        previous_status = launched_container.status
+        previous_status = launcher_interfaces.ContainerStatus(
+            container_execution.status.value
+        )
         if previous_status not in (
-            bts.ContainerExecutionStatus.PENDING,
-            bts.ContainerExecutionStatus.RUNNING,
+            launcher_interfaces.ContainerStatus.PENDING,
+            launcher_interfaces.ContainerStatus.RUNNING,
         ):
             raise OrchestratorError(
                 f"Unexpected running container status: {previous_status=}, {launched_container=}"
             )
 
-        # Handling cancellation
-        votes_to_terminate = []
-        votes_to_not_terminate = []
-        # TODO: Get the desired state from the pipeline runs, not execution nodes
-        execution_nodes = container_execution.execution_nodes
-        for execution_node in execution_nodes:
-            should_terminate = (execution_node.extra_data or {}).get(
-                "desired_state"
-            ) == "TERMINATED"
-            if should_terminate:
-                votes_to_terminate.append(execution_node)
-            else:
-                votes_to_not_terminate.append(execution_node)
-
-        if votes_to_terminate:
-            # Terminate the container execution only when all execution nodes pointing to it are asked to terminate.
-            terminated = False
-            if votes_to_not_terminate:
-                _logger.info(
-                    f"Not terminating container execution since some other executions ({[execution_node.id for execution_node in votes_to_not_terminate]}) are still using it."
-                )
-            else:
-                _logger.info("Terminating container execution.")
-                # We should preserve the logs before terminating/deleting the container
-                try:
-                    _retry(lambda: launched_container.upload_log())
-                except Exception:
-                    _logger.exception("Error uploading logs before termination.")
-                # Requesting container termination.
-                # Termination might not happen immediately (e.g. Kubernetes has grace period).
-                launched_container.terminate()
-                container_execution.ended_at = _get_current_time()
-                # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
-                container_execution.status = bts.ContainerExecutionStatus.CANCELLED
-                terminated = True
-
-            # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
-            for execution_node in votes_to_terminate:
-                _logger.info(
-                    f"Cancelling execution {execution_node.id} and skipping all downstream executions."
-                )
-                execution_node.container_execution_status = (
-                    bts.ContainerExecutionStatus.CANCELLED
-                )
-                _mark_all_downstream_executions_as_skipped(
-                    session=session, execution=execution_node
-                )
-            session.commit()
-            if terminated:
-                return
-
-        # Asking the launcher to refresh the container state.
-        reloaded_launched_container: launcher_interfaces.LaunchedContainer = (
-            self._launcher.get_refreshed_launched_container_from_dict(launcher_data)
+        cached_snapshot_is_terminal = launched_container.status in (
+            launcher_interfaces.ContainerStatus.SUCCEEDED,
+            launcher_interfaces.ContainerStatus.FAILED,
         )
+
+        if not cached_snapshot_is_terminal:
+            # Handling cancellation
+            votes_to_terminate = []
+            votes_to_not_terminate = []
+            # TODO: Get the desired state from the pipeline runs, not execution nodes
+            execution_nodes = container_execution.execution_nodes
+            for execution_node in execution_nodes:
+                should_terminate = (execution_node.extra_data or {}).get(
+                    "desired_state"
+                ) == "TERMINATED"
+                if should_terminate:
+                    votes_to_terminate.append(execution_node)
+                else:
+                    votes_to_not_terminate.append(execution_node)
+
+            if votes_to_terminate:
+                # Terminate the container execution only when all execution nodes pointing to it are asked to terminate.
+                terminated = False
+                if votes_to_not_terminate:
+                    _logger.info(
+                        f"Not terminating container execution since some other executions ({[execution_node.id for execution_node in votes_to_not_terminate]}) are still using it."
+                    )
+                else:
+                    _logger.info("Terminating container execution.")
+                    # We should preserve the logs before terminating/deleting the container
+                    _upload_log_best_effort(launched_container)
+                    # Requesting container termination.
+                    # Termination might not happen immediately (e.g. Kubernetes has grace period).
+                    launched_container.terminate()
+                    container_execution.ended_at = _get_current_time()
+                    # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
+                    container_execution.status = bts.ContainerExecutionStatus.CANCELLED
+                    terminated = True
+
+                # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
+                for execution_node in votes_to_terminate:
+                    _logger.info(
+                        f"Cancelling execution {execution_node.id} and skipping all downstream executions."
+                    )
+                    execution_node.container_execution_status = (
+                        bts.ContainerExecutionStatus.CANCELLED
+                    )
+                    _mark_all_downstream_executions_as_skipped(
+                        session=session, execution=execution_node
+                    )
+                session.commit()
+                if terminated:
+                    return
+
+            # Asking the launcher to refresh the container state.
+            reloaded_launched_container: launcher_interfaces.LaunchedContainer = (
+                self._launcher.get_refreshed_launched_container_from_dict(launcher_data)
+            )
+        else:
+            reloaded_launched_container = launched_container
         current_time = _get_current_time()
         # Saving the updated launcher data
         reloaded_launcher_data = reloaded_launched_container.to_dict()
@@ -772,7 +784,12 @@ class OrchestratorService_Sql:
         )
         session.rollback()
         container_execution.updated_at = current_time
-        execution_nodes = container_execution.execution_nodes
+        execution_nodes = [
+            execution_node
+            for execution_node in container_execution.execution_nodes
+            if execution_node.container_execution_status
+            != bts.ContainerExecutionStatus.CANCELLED
+        ]
         if not execution_nodes:
             raise OrchestratorError(
                 "Could not find ExecutionNode associated with ContainerExecution."
@@ -796,14 +813,8 @@ class OrchestratorService_Sql:
             container_execution.started_at = reloaded_launched_container.started_at
             container_execution.ended_at = reloaded_launched_container.ended_at
 
-            # Don't fail the execution if log upload fails.
-            # Logs are important, but not so important that we should fail a successfully completed container execution.
-            try:
-                _retry(reloaded_launched_container.upload_log)
-            except Exception as ex:
-                _logger.exception(
-                    f"! Error during `LaunchedContainer.upload_log` call: {ex}."
-                )
+            # Logs are useful diagnostics, but do not determine execution success.
+            _upload_log_best_effort(reloaded_launched_container)
 
             _MAX_PRELOAD_VALUE_SIZE = 255
 
@@ -939,7 +950,7 @@ class OrchestratorService_Sql:
                     message=orchestration_error_message,
                 )
 
-            _retry(reloaded_launched_container.upload_log)
+            _upload_log_best_effort(reloaded_launched_container)
             # Skip downstream executions
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
@@ -1090,6 +1101,15 @@ def _retry(
             if i == max_retries - 1:
                 raise
     raise
+
+
+def _upload_log_best_effort(
+    launched_container: launcher_interfaces.LaunchedContainer,
+) -> None:
+    try:
+        _retry(launched_container.upload_log)
+    except Exception:
+        _logger.exception("Error during `LaunchedContainer.upload_log` call.")
 
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):

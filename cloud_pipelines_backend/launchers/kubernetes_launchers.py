@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import pathlib
+import time
 import typing
 from typing import Any, Optional
 
@@ -71,6 +72,21 @@ _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 
 
 _T = typing.TypeVar("_T")
+
+_KUBERNETES_DIAGNOSTIC_MAX_ATTEMPTS = 3
+_KUBERNETES_DIAGNOSTIC_RETRY_WAIT_SECONDS = 0.1
+
+
+def _retry_kubernetes_diagnostic_call(func: typing.Callable[[], _T]) -> _T:
+    for attempt in range(_KUBERNETES_DIAGNOSTIC_MAX_ATTEMPTS):
+        try:
+            return func()
+        except Exception:
+            if attempt == _KUBERNETES_DIAGNOSTIC_MAX_ATTEMPTS - 1:
+                raise
+            time.sleep(_KUBERNETES_DIAGNOSTIC_RETRY_WAIT_SECONDS)
+    raise RuntimeError("Unreachable")
+
 
 _CONTAINER_FILE_NAME = "data"
 
@@ -910,11 +926,21 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
     def get_refreshed(self) -> "LaunchedKubernetesContainer":
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-        pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
-            name=self._pod_name,
-            namespace=self._namespace,
-            _request_timeout=launcher._request_timeout,
-        )
+        try:
+            pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
+                name=self._pod_name,
+                namespace=self._namespace,
+                _request_timeout=launcher._request_timeout,
+            )
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status == 404:
+                raise interfaces.LauncherResourceNotFound(
+                    kind="Pod",
+                    namespace=self._namespace,
+                    name=self._pod_name,
+                    cached_status=self.status,
+                ) from None
+            raise
         new_launched_container = copy.copy(self)
         new_launched_container._debug_pod = pod
         return new_launched_container
@@ -975,11 +1001,19 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
     def terminate(self):
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-        core_api_client.delete_namespaced_pod(
-            name=self._pod_name,
-            namespace=self._namespace,
-            grace_period_seconds=10,
-        )
+        try:
+            core_api_client.delete_namespaced_pod(
+                name=self._pod_name,
+                namespace=self._namespace,
+                grace_period_seconds=10,
+            )
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status != 404:
+                raise
+            _logger.info(
+                f"Pod {self._pod_name} in namespace {self._namespace} was already absent."
+            )
+            return
         _logger.info(f"Terminated pod {self._pod_name} in namespace {self._namespace}")
 
 
@@ -1449,28 +1483,50 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     def get_refreshed(self) -> "LaunchedKubernetesJob":
         launcher = self._get_launcher()
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
-        job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
-            name=self._job_name,
-            namespace=self._namespace,
-            _request_timeout=launcher._request_timeout,
-        )
-        # Refreshing the job pods. We do not strictly need them.
-        # But this information is useful for debugging and it will also allow slightly better status reporting.
-        core_api_client = k8s_client_lib.CoreV1Api(launcher._api_client)
-        pod_list_response: k8s_client_lib.V1PodList = (
-            core_api_client.list_namespaced_pod(
+        try:
+            job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
+                name=self._job_name,
                 namespace=self._namespace,
-                label_selector=f"job-name={self._job_name}",
-                watch=False,
                 _request_timeout=launcher._request_timeout,
             )
-        )
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status == 404:
+                raise interfaces.LauncherResourceNotFound(
+                    kind="Job",
+                    namespace=self._namespace,
+                    name=self._job_name,
+                    cached_status=self.status,
+                ) from None
+            raise
+
+        new_launched_container = copy.copy(self)
+        new_launched_container._debug_job = job
+
+        # Child Pods are diagnostics. Once the parent Job is terminal, failures to
+        # collect them must not replace the Job's authoritative terminal state.
+        core_api_client = k8s_client_lib.CoreV1Api(launcher._api_client)
+        try:
+            pod_list_response: k8s_client_lib.V1PodList = (
+                _retry_kubernetes_diagnostic_call(
+                    lambda: core_api_client.list_namespaced_pod(
+                        namespace=self._namespace,
+                        label_selector=f"job-name={self._job_name}",
+                        watch=False,
+                        _request_timeout=launcher._request_timeout,
+                    )
+                )
+            )
+        except Exception:
+            if not new_launched_container.has_ended:
+                raise
+            _logger.exception(
+                f"Unable to collect child Pod diagnostics for terminal Job {self._job_name} in namespace {self._namespace}."
+            )
+            return new_launched_container
+
         pod_map: dict[str, k8s_client_lib.V1Pod] = {}
         if job.spec.completion_mode == "Indexed":
-            # There can be multiple pods for each index.
-            # This can happen when Job gets suspended and resumed multiple times and Pods can get stuck in "Terminating" phase.
-            # In this case we want to get the latest Pods.
-            # Alternatively, we could store all pods, but this can complicate the routines that determine status and get logs.
+            # A suspended and resumed indexed Job can have multiple Pods per index.
             pods_sorted_by_creation_time = sorted(
                 pod_list_response.items,
                 key=lambda pod: pod.metadata.creation_timestamp or "",
@@ -1492,8 +1548,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             for pod in pod_list_response.items:
                 index_str: str = pod.metadata.name
                 pod_map[index_str] = pod
-        new_launched_container = copy.copy(self)
-        new_launched_container._debug_job = job
+
         new_launched_container._debug_pods = pod_map
         return new_launched_container
 
@@ -1531,7 +1586,22 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     def _get_all_logs(self) -> dict[str, str]:
         logs = {}
         for pod_key, pod in self._debug_pods.items():
-            log = self._get_log_by_pod_key(pod.metadata.name)
+            if not pod.metadata or not pod.metadata.name:
+                raise ValueError(
+                    f"Child Pod {pod_key} of Job {self._job_name} does not have a name."
+                )
+            pod_name = pod.metadata.name
+            try:
+                log = _retry_kubernetes_diagnostic_call(
+                    lambda: self._get_log_by_pod_key(pod_name)
+                )
+            except Exception:
+                if not self.has_ended:
+                    raise
+                _logger.exception(
+                    f"Unable to collect log diagnostics for Pod {pod_name} of terminal Job {self._job_name}."
+                )
+                continue
             if log:
                 logs[pod_key] = log
         return logs
@@ -1565,6 +1635,11 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
     def upload_log(self):
         all_logs = self._get_all_logs()
+        if not all_logs:
+            _logger.info(
+                f"No child Pod logs were available for Job {self._job_name}; preserving any existing uploaded log."
+            )
+            return
         merged_log = self._merge_logs(all_logs)
 
         # Uploading the merged log
@@ -1610,12 +1685,20 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     def terminate(self):
         launcher = self._get_launcher()
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
-        batch_api_client.delete_namespaced_job(
-            name=self._job_name,
-            namespace=self._namespace,
-            grace_period_seconds=10,
-            propagation_policy="Foreground",
-        )
+        try:
+            batch_api_client.delete_namespaced_job(
+                name=self._job_name,
+                namespace=self._namespace,
+                grace_period_seconds=10,
+                propagation_policy="Foreground",
+            )
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status != 404:
+                raise
+            _logger.info(
+                f"Job {self._job_name} in namespace {self._namespace} was already absent."
+            )
+            return
         _logger.info(f"Terminated job {self._job_name} in namespace {self._namespace}")
 
 

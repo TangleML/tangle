@@ -71,6 +71,25 @@ class ContainerStatus(str, enum.Enum):
     ERROR = "ERROR"
 
 
+class LauncherResourceNotFound(LauncherError):
+    def __init__(
+        self,
+        *,
+        kind: str,
+        namespace: str,
+        name: str,
+        cached_status: ContainerStatus,
+    ):
+        self.kind = kind
+        self.namespace = namespace
+        self.name = name
+        self.cached_status = cached_status
+        super().__init__(
+            f"Kubernetes {kind} {namespace}/{name} was not found while refreshing "
+            f"cached {cached_status.value} state."
+        )
+
+
 class LaunchedContainer(abc.ABC):
 
     # @classmethod
