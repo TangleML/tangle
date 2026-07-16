@@ -108,6 +108,19 @@ def _setup_routes_internal(
             response.headers["x-tangle-request-id"] = request_id
         return response
 
+    @app.exception_handler(errors.ContainerExecutionNotReadyError)
+    def handle_container_execution_not_ready_error(
+        request: fastapi.Request, exc: errors.ContainerExecutionNotReadyError
+    ):
+        return fastapi.responses.JSONResponse(
+            status_code=fastapi.status.HTTP_409_CONFLICT,
+            content={
+                "reason": "container_not_ready",
+                "execution_status": exc.execution_status,
+                "message": str(exc),
+            },
+        )
+
     @app.exception_handler(errors.PermissionError)
     def handle_permission_error(request: fastapi.Request, exc: errors.PermissionError):
         response = fastapi.responses.JSONResponse(
