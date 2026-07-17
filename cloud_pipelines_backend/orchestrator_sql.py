@@ -748,6 +748,15 @@ class OrchestratorService_Sql:
         # Mark the container execution as terminally failed
         container_execution.ended_at = current_time
         container_execution.status = bts.ContainerExecutionStatus.SYSTEM_ERROR
+        # TODO: Observe/Grafana queries for this metric:
+        #   1. sum(execution.system_errors{reason="pending_timeout"})
+        #      → count of executions auto-terminated for exceeding the pending timeout
+        #   2. sum(execution.system_errors{reason=""}) or
+        #        sum(execution.system_errors) - sum(execution.system_errors{reason="pending_timeout"})
+        #      → count of all other system errors (exceptions, unhandled failures)
+        app_metrics.execution_system_errors.add(
+            1, attributes={"reason": "pending_timeout"}
+        )
 
         # Record a human-readable error message (visible in the UI execution detail panel)
         orchestration_error_message = (
