@@ -6,6 +6,7 @@ from sqlalchemy import orm
 from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
+from cloud_pipelines_backend import errors
 from cloud_pipelines_backend.api_server_sql import (
     ExecutionNodesApiService_Sql,
     GetExecutionInfoResponse,
@@ -408,6 +409,37 @@ class TestGetExecutionInfo:
 
         assert result.status_history is not None
         assert [e.status for e in result.status_history] == ["QUEUED"]
+
+
+class TestGetContainerExecutionState:
+    """Tests for ExecutionNodesApiService_Sql.get_container_execution_state."""
+
+    def setup_method(self):
+        self.session_factory = _initialize_db_and_get_session_factory()
+        self.service = ExecutionNodesApiService_Sql()
+
+    def test_pending_without_container_row_raises_not_ready(self):
+        """PENDING node with no ContainerExecution yet is a transient state, not a 500."""
+        with self.session_factory() as session:
+            node = _make_execution_node(
+                task_spec=_make_task_spec_dict(),
+                container_execution_status=bts.ContainerExecutionStatus.PENDING,
+            )
+            session.add(node)
+            session.flush()
+
+            with pytest.raises(errors.ContainerExecutionNotReadyError) as exc_info:
+                self.service.get_container_execution_state(session=session, id=node.id)
+
+        assert exc_info.value.execution_status == bts.ContainerExecutionStatus.PENDING
+
+    def test_missing_execution_still_raises_not_found(self):
+        """A genuinely absent execution remains an ItemNotFoundError (404)."""
+        with self.session_factory() as session:
+            with pytest.raises(errors.ItemNotFoundError):
+                self.service.get_container_execution_state(
+                    session=session, id="does-not-exist"
+                )
 
 
 if __name__ == "__main__":

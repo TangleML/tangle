@@ -761,8 +761,9 @@ class ExecutionNodesApiService_Sql:
             raise errors.ItemNotFoundError(f"Execution with {id=} does not exist.")
         container_execution = execution.container_execution
         if not container_execution:
-            raise RuntimeError(
-                f"Execution with {id=} does not have container execution information."
+            raise errors.ContainerExecutionNotReadyError(
+                execution_node_id=id,
+                execution_status=execution.container_execution_status,
             )
 
         if include_execution_nodes_linked_to_same_container_execution:
@@ -890,8 +891,9 @@ class ExecutionNodesApiService_Sql:
                     system_error_exception_full=system_error_exception_full,
                     orchestration_error_message=orchestration_error_message,
                 )
-            raise RuntimeError(
-                f"Execution with {id=} does not have container execution information."
+            raise errors.ContainerExecutionNotReadyError(
+                execution_node_id=id,
+                execution_status=execution.container_execution_status,
             )
         log_text: str | None = None
         if container_execution.status in (
@@ -961,8 +963,9 @@ class ExecutionNodesApiService_Sql:
             )
         container_execution = execution.container_execution
         if not container_execution:
-            raise ApiServiceError(
-                "Execution does not have container execution information."
+            raise errors.ContainerExecutionNotReadyError(
+                execution_node_id=execution_id,
+                execution_status=execution.container_execution_status,
             )
         if not container_execution.launcher_data:
             raise ApiServiceError(
