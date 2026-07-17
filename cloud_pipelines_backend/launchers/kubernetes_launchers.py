@@ -52,6 +52,9 @@ RESOURCES_ACCELERATORS_ANNOTATION_KEY = (
 MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
     "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes"
 )
+SINGLE_NODE_EXECUTION_MODE_ANNOTATION_KEY = (
+    "tangleml.com/launchers/kubernetes/single_node/execution_mode"
+)
 SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
     "tangleml.com/launchers/kubernetes/security_context.capability.IPC_LOCK"
 )
@@ -68,6 +71,23 @@ _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_ad
 
 # Environment variables for multi-node execution.
 _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
+
+_SINGLE_NODE_DYNAMIC_DATA_VALUES = {
+    _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY: "1",
+    _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY: "0",
+    _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: "localhost",
+    _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: "localhost",
+}
+
+
+def _validate_single_node_execution_mode(
+    value: Any,
+) -> typing.Literal["pod", "job"]:
+    if value not in ("pod", "job"):
+        raise interfaces.LauncherError(
+            f"Invalid single-node execution mode {value!r}. Expected 'pod' or 'job'."
+        )
+    return typing.cast(typing.Literal["pod", "job"], value)
 
 
 _T = typing.TypeVar("_T")
@@ -522,12 +542,7 @@ class _KubernetesPodLauncher(
         # Resolving the dynamic data arguments
         # Since pod-based launcher cannot launch multiple nodes, we could have chosen to fail when encountering multi-node arguments.
         # However it's possible to provide sensible values for them.
-        known_dynamic_data_values = {
-            _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY: "1",
-            _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY: "0",
-            _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: "localhost",
-            _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: "localhost",
-        }
+        known_dynamic_data_values = _SINGLE_NODE_DYNAMIC_DATA_VALUES
         for input_name, input_argument in list(input_arguments.items()):
             if input_argument.value is not None or input_argument.uri is not None:
                 continue
@@ -1028,6 +1043,43 @@ class _KubernetesJobLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesJob":
+        return self._launch_container_task(
+            component_spec=component_spec,
+            input_arguments=input_arguments,
+            output_uris=output_uris,
+            log_uri=log_uri,
+            annotations=annotations,
+            single_node_job=False,
+        )
+
+    def launch_single_node_container_task(
+        self,
+        *,
+        component_spec: structures.ComponentSpec,
+        input_arguments: dict[str, interfaces.InputArgument],
+        output_uris: dict[str, str],
+        log_uri: str,
+        annotations: dict[str, Any] | None = None,
+    ) -> "LaunchedKubernetesJob":
+        return self._launch_container_task(
+            component_spec=component_spec,
+            input_arguments=input_arguments,
+            output_uris=output_uris,
+            log_uri=log_uri,
+            annotations=annotations,
+            single_node_job=True,
+        )
+
+    def _launch_container_task(
+        self,
+        *,
+        component_spec: structures.ComponentSpec,
+        input_arguments: dict[str, interfaces.InputArgument],
+        output_uris: dict[str, str],
+        log_uri: str,
+        annotations: dict[str, Any] | None,
+        single_node_job: bool,
+    ) -> "LaunchedKubernetesJob":
         namespace = self._choose_namespace(annotations=annotations)
 
         # We have 2 options regarding job name:
@@ -1052,7 +1104,7 @@ class _KubernetesJobLauncher(
             explicit_resource_name = resource_name_prefix + container_execution_id
         else:
             _logger.warning(
-                "Should not happen: Container execution ID annotation is required for multi-node execution, but it was not found."
+                "Should not happen: Container execution ID annotation is required for Kubernetes Job execution, but it was not found."
             )
             import uuid
 
@@ -1060,15 +1112,19 @@ class _KubernetesJobLauncher(
 
         explicit_job_name = explicit_resource_name
 
-        num_nodes_annotation_str = (annotations or {}).get(
-            MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, 1
-        )
-        enable_multi_node = num_nodes_annotation_str is not None
-        num_nodes = int(num_nodes_annotation_str) if num_nodes_annotation_str else 1
-        if not (0 < num_nodes <= _MULTI_NODE_MAX_NUMBER_OF_NODES):
-            raise interfaces.LauncherError(
-                f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and {_MULTI_NODE_MAX_NUMBER_OF_NODES}, but got {num_nodes}."
+        if single_node_job:
+            enable_multi_node = False
+            num_nodes = 1
+        else:
+            num_nodes_annotation_str = (annotations or {}).get(
+                MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, 1
             )
+            enable_multi_node = num_nodes_annotation_str is not None
+            num_nodes = int(num_nodes_annotation_str) if num_nodes_annotation_str else 1
+            if not (0 < num_nodes <= _MULTI_NODE_MAX_NUMBER_OF_NODES):
+                raise interfaces.LauncherError(
+                    f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and {_MULTI_NODE_MAX_NUMBER_OF_NODES}, but got {num_nodes}."
+                )
         explicit_service_name = explicit_resource_name
         if enable_multi_node:
             all_node_addresses = [
@@ -1086,13 +1142,17 @@ class _KubernetesJobLauncher(
             all_node_addresses_str = node_0_address
 
         # Resolving the dynamic data arguments
-        known_dynamic_data_values = {
-            _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY: str(num_nodes),
-            # Using Kubernetes' env variable substitution to inject the node index into the container since it's not known at the time of pod creation.
-            _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY: f"$({_MULTI_NODE_NODE_INDEX_ENV_VAR_NAME})",
-            _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: node_0_address,
-            _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: all_node_addresses_str,
-        }
+        known_dynamic_data_values = (
+            _SINGLE_NODE_DYNAMIC_DATA_VALUES
+            if single_node_job
+            else {
+                _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY: str(num_nodes),
+                # The completion index is only available when the Job's Pods are created.
+                _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY: f"$({_MULTI_NODE_NODE_INDEX_ENV_VAR_NAME})",
+                _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: node_0_address,
+                _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: all_node_addresses_str,
+            }
+        )
 
         for input_name, input_argument in list(input_arguments.items()):
             if input_argument.value is not None or input_argument.uri is not None:
@@ -1185,27 +1245,34 @@ class _KubernetesJobLauncher(
             # This requires the service name to be known.
             pod.spec.subdomain = explicit_service_name
 
-        job = k8s_client_lib.V1Job(
-            metadata=k8s_client_lib.V1ObjectMeta(
-                name=explicit_job_name,
-                namespace=namespace,
-                # annotations=self._pod_annotations,
-                # labels=self._pod_labels,
-            ),
-            spec=k8s_client_lib.V1JobSpec(
-                template=k8s_client_lib.V1PodTemplateSpec(
-                    metadata=pod.metadata,
-                    spec=pod.spec,
-                ),
-                # Let's always use Indexed Jobs. There are no downsides.
+        pod_template = k8s_client_lib.V1PodTemplateSpec(
+            metadata=pod.metadata,
+            spec=pod.spec,
+        )
+        if single_node_job:
+            job_spec = k8s_client_lib.V1JobSpec(
+                template=pod_template,
+                completion_mode="NonIndexed",
+                completions=1,
+                parallelism=1,
+                backoff_limit=0,
+            )
+        else:
+            job_spec = k8s_client_lib.V1JobSpec(
+                template=pod_template,
                 completion_mode="Indexed",
-                # backoff_limit=0,
                 backoff_limit_per_index=0,
                 # Without explicit max_failed_indexes=0, the job waits for all pods to end and then succeeds ("Complete") despite pod failures!
                 max_failed_indexes=0,
                 completions=num_nodes,
                 parallelism=num_nodes,
+            )
+        job = k8s_client_lib.V1Job(
+            metadata=k8s_client_lib.V1ObjectMeta(
+                name=explicit_job_name,
+                namespace=namespace,
             ),
+            spec=job_spec,
         )
 
         job = self._transform_job_before_launching(job=job, annotations=annotations)
@@ -1235,6 +1302,7 @@ class _KubernetesJobLauncher(
             debug_pods={},
             cluster_server=self._api_client.configuration.host,
             launcher=self,
+            single_node_job=single_node_job,
         )
 
         return launched_container
@@ -1274,6 +1342,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         debug_pods: dict[str, k8s_client_lib.V1Pod] | None = None,
         cluster_server: str | None = None,
         launcher: _KubernetesJobLauncher | None = None,
+        single_node_job: bool = False,
     ):
         self._job_name = job_name
         self._namespace = namespace
@@ -1283,6 +1352,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         self._debug_pods: dict[str, k8s_client_lib.V1Pod] = debug_pods or {}
         self._cluster_server = cluster_server
         self._launcher = launcher
+        self._single_node_job = single_node_job
 
     def _get_launcher(self):
         if not self._launcher:
@@ -1400,19 +1470,19 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 )
                 for pod_name, pod in self._debug_pods.items()
             }
-        result = {
-            self.SERIALIZATION_ROOT_KEY: dict(
-                launched_container_class_name=self.__class__.__name__,
-                job_name=self._job_name,
-                namespace=self._namespace,
-                cluster_server=self._cluster_server,
-                output_uris=self._output_uris,
-                log_uri=self._log_uri,
-                debug_job=job_dict,
-                debug_pods=pod_dicts,
-            ),
-        }
-        return result
+        launcher_data = dict(
+            launched_container_class_name=self.__class__.__name__,
+            job_name=self._job_name,
+            namespace=self._namespace,
+            cluster_server=self._cluster_server,
+            output_uris=self._output_uris,
+            log_uri=self._log_uri,
+            debug_job=job_dict,
+            debug_pods=pod_dicts,
+        )
+        if self._single_node_job:
+            launcher_data["single_node_job"] = True
+        return {self.SERIALIZATION_ROOT_KEY: launcher_data}
 
     @classmethod
     def from_dict(
@@ -1444,6 +1514,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             debug_job=debug_job,
             debug_pods=debug_pods,
             launcher=launcher,
+            single_node_job=d.get("single_node_job", False),
         )
 
     def get_refreshed(self) -> "LaunchedKubernetesJob":
@@ -1622,7 +1693,11 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 class _KubernetesPodOrJobLauncher(
     interfaces.ContainerTaskLauncher[interfaces.LaunchedContainer],
 ):
-    """Launcher that launches Kubernetes Pods or Jobs"""
+    """Launches single-node tasks as Pods by default and multi-node tasks as Indexed Jobs.
+
+    ``single_node_execution_mode`` or the per-task execution-mode annotation can
+    select a NonIndexed Job. A multi-node annotation always takes precedence.
+    """
 
     def __init__(
         self,
@@ -1634,12 +1709,16 @@ class _KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        single_node_execution_mode: typing.Literal["pod", "job"] = "pod",
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
             tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
         ],
     ):
+        self._single_node_execution_mode = _validate_single_node_execution_mode(
+            single_node_execution_mode
+        )
         self._pod_launcher = _KubernetesPodLauncher(
             api_client=api_client,
             namespace=namespace,
@@ -1677,7 +1756,8 @@ class _KubernetesPodOrJobLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesContainer | LaunchedKubernetesJob":
-        if annotations and MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY in annotations:
+        task_annotations = annotations or {}
+        if MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY in task_annotations:
             return self._job_launcher.launch_container_task(
                 component_spec=component_spec,
                 input_arguments=input_arguments,
@@ -1685,14 +1765,25 @@ class _KubernetesPodOrJobLauncher(
                 log_uri=log_uri,
                 annotations=annotations,
             )
-        else:
-            return self._pod_launcher.launch_container_task(
-                component_spec=component_spec,
-                input_arguments=input_arguments,
-                output_uris=output_uris,
-                log_uri=log_uri,
-                annotations=annotations,
+
+        execution_mode = _validate_single_node_execution_mode(
+            task_annotations.get(
+                SINGLE_NODE_EXECUTION_MODE_ANNOTATION_KEY,
+                self._single_node_execution_mode,
             )
+        )
+        launcher = (
+            self._job_launcher.launch_single_node_container_task
+            if execution_mode == "job"
+            else self._pod_launcher.launch_container_task
+        )
+        return launcher(
+            component_spec=component_spec,
+            input_arguments=input_arguments,
+            output_uris=output_uris,
+            log_uri=log_uri,
+            annotations=annotations,
+        )
 
     def get_refreshed_launched_container_from_dict(
         self, launched_container_dict: dict
@@ -1750,6 +1841,8 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
 class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
     _KubernetesPodOrJobLauncher
 ):
+    """Local-storage Kubernetes launcher with selectable single-node Pod or Job mode."""
+
     def __init__(
         self,
         *,
@@ -1760,6 +1853,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        single_node_execution_mode: typing.Literal["pod", "job"] = "pod",
     ):
         super().__init__(
             namespace=namespace,
@@ -1769,6 +1863,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            single_node_execution_mode=single_node_execution_mode,
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )

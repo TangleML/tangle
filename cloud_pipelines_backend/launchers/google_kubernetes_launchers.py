@@ -54,7 +54,12 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesJobLauncher(
 class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
     kubernetes_launchers._KubernetesPodOrJobLauncher
 ):
-    """Launcher that uses Google Kubernetes Engine to launch Kubernetes Pods or Jobs (uses GKE-gcsfuse driver for data passing)"""
+    """GKE/GCS launcher with selectable single-node Pod or Job mode.
+
+    Single-node tasks default to Pods. ``single_node_execution_mode`` or the
+    per-task execution-mode annotation can select a NonIndexed Job; multi-node
+    annotations always select an Indexed Job.
+    """
 
     def __init__(
         self,
@@ -67,6 +72,7 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: kubernetes_launchers.PodPostProcessor | None = None,
+        single_node_execution_mode: typing.Literal["pod", "job"] = "pod",
     ):
         pod_postprocessors = [
             kubernetes_launchers._google_kubernetes_engine_accelerator_pod_postprocessor
@@ -85,6 +91,7 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
+            single_node_execution_mode=single_node_execution_mode,
             _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
                 gcs_client
             ),
