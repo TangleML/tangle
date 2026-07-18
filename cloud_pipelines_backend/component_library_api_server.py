@@ -59,7 +59,8 @@ class ComponentRow(bts._TableBase):
     # By default `str` is mapped to VARCHAR(255) so that it's still stored in the row.
     # sql.String(65535) is translated to VARCHAR(65535) which fails on MySQL:
     # "Column length too big for column 'value' (max = 16383); use BLOB or TEXT instead"
-    text: orm.Mapped[str] = orm.mapped_column(sql.Text(), default=None)
+    # DB-agnostic: MySQL maps Text(length=2**24) to MEDIUMTEXT, PG and SQLite ignore the length.
+    text: orm.Mapped[str] = orm.mapped_column(sql.Text(length=bts._MEDIUMTEXT_LENGTH), default=None)
 
     # The "spec" column (in JSON format) can be useful for querying.
     # The "text" column has YAML format and cannot be queried.
