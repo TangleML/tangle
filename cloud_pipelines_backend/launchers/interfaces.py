@@ -134,6 +134,9 @@ class LaunchedContainer(abc.ABC):
     def stream_log_lines(self) -> typing.Iterator[str]:
         raise NotImplementedError()
 
+    def cleanup(self) -> None:
+        pass
+
     def terminate(self) -> None:
         raise NotImplementedError()
 

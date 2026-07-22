@@ -136,6 +136,19 @@ A **task** describes an instance of a component and specifies the input argument
 The resulting *graph* of interconnected tasks is called a *pipeline*.
 A pipeline can be submitted for *execution*. During the pipeline execution, the pipeline's tasks are executed (in parallel, if possible) and produce output artifacts that are passed to downstream tasks.
 
+## Multi-node runtime helpers
+
+Kubernetes-backed multi-node tasks receive runtime metadata through environment variables such as `TANGLE_MULTI_NODE_NUMBER_OF_NODES`, `TANGLE_MULTI_NODE_NODE_INDEX`, and `TANGLE_MULTI_NODE_NODE_0_ADDRESS`.
+Python component images that include this package can use the cooperative barrier helper when all nodes must reach the same phase before node 0 continues:
+
+```python
+from cloud_pipelines_backend.runtime import multi_node
+
+multi_node.barrier("training-finished", timeout_seconds=600)
+```
+
+The helper coordinates over the task's headless Kubernetes Service. It is a synchronization primitive for nodes in the same task, not an authentication boundary. Component images must include `cloud-pipelines-backend` for the helper import to be available; non-Python containers can use the injected environment variables to implement equivalent coordination.
+
 ## Design
 
 This backend consists of the API Server and the Orchestrator.
