@@ -58,6 +58,10 @@ def generate_unique_id() -> str:
     return ("%012x" % milliseconds) + random_bytes.hex()
 
 
+def _utcnow() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
 id_column = orm.mapped_column(
     sql.String(20), primary_key=True, init=False, insert_default=generate_unique_id
 )
@@ -358,7 +362,11 @@ class ExecutionNode(_TableBase):
         repr=False,
     )
 
-    # updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(default=None)
+    updated_at: orm.Mapped[datetime.datetime | None] = orm.mapped_column(
+        init=False,
+        insert_default=_utcnow,
+        onupdate=_utcnow,
+    )
 
     # execution_kind = orm.Mapped[typing.Literal["CONTAINER", "GRAPH"]]
 
