@@ -1826,6 +1826,52 @@ def _recursively_create_all_executions_and_artifacts(
                 for link in child_execution_node.output_artifact_links
             }
 
+            # Handling conditional execution (`child_task_spec.is_enabled`)
+            if child_task_spec.is_enabled is not None:
+                if not isinstance(
+                    child_component_spec.implementation,
+                    structures.ContainerImplementation,
+                ):
+                    # We do not support `is_enabled` on graph component tasks since it's unclear
+                    # how it should interact with the `is_enabled` settings of child component tasks`.
+                    raise ApiServiceError(
+                        f"TaskSpec.is_enabled is only supported for container component tasks. {child_task_id=}, {child_task_spec=}"
+                    )
+                is_enabled_argument = child_task_spec.is_enabled
+                if isinstance(is_enabled_argument, (bool, str)):
+                    # Do not create an ArtifactNode for a constant value
+                    is_enabled_artifact_node = None
+                elif isinstance(is_enabled_argument, structures.GraphInputArgument):
+                    is_enabled_artifact_node = input_artifact_nodes.get(
+                        is_enabled_argument.graph_input.input_name
+                    )
+                    if is_enabled_artifact_node is None:
+                        # Warning: unconnected upstream for is_enabled
+                        pass
+                elif isinstance(is_enabled_argument, structures.TaskOutputArgument):
+                    task_output_source = is_enabled_argument.task_output
+                    is_enabled_artifact_node = task_output_artifact_nodes[
+                        task_output_source.task_id
+                    ][task_output_source.output_name]
+                else:
+                    raise ApiServiceError(
+                        f"Unsupported TaskSpec.is_enabled value: {child_task_id=}, {is_enabled_argument=}"
+                    )
+                if is_enabled_artifact_node:
+                    if not isinstance(is_enabled_artifact_node, bts.ArtifactNode):
+                        raise ApiServiceError(
+                            f"Unsupported TaskSpec.is_enabled value: {child_task_id=}, {is_enabled_artifact_node=}"
+                        )
+                    child_task_input_artifact_nodes[
+                        bts.EXECUTION_NODE_TASK_IS_ENABLED_SPECIAL_INPUT_NAME
+                    ] = is_enabled_artifact_node
+                    input_artifact_link = bts.InputArtifactLink(
+                        execution=child_execution_node,
+                        input_name=bts.EXECUTION_NODE_TASK_IS_ENABLED_SPECIAL_INPUT_NAME,
+                        artifact=is_enabled_artifact_node,
+                    )
+                    session.add(input_artifact_link)
+
         # Processing root graph output artifacts
         for output_name, output_source in (graph_spec.output_values or {}).items():
             if not isinstance(output_source, structures.TaskOutputArgument):
@@ -1858,16 +1904,14 @@ def _toposort_tasks(
         # Using dict instead of set to stabilize the ordering
         dependencies: dict[str, bool] = {}
         task_dependencies[task_id] = dependencies
-        if task.arguments is not None:
-            for argument in task.arguments.values():
-                if isinstance(argument, structures.TaskOutputArgument):
-                    dependencies[argument.task_output.task_id] = True
-                    if argument.task_output.task_id not in tasks:
-                        raise TypeError(
-                            'Argument "{}" references non-existing task.'.format(
-                                argument
-                            )
-                        )
+        all_arguments = dict(task.arguments or {}) | {"__is_enabled": task.is_enabled}
+        for input_name, argument in all_arguments.items():
+            if isinstance(argument, structures.TaskOutputArgument):
+                dependencies[argument.task_output.task_id] = True
+                if argument.task_output.task_id not in tasks:
+                    raise TypeError(
+                        f"Toposort: Argument for {task_id=} {input_name=} ({argument=}) references non-existing task '{argument.task_output.task_id}'."
+                    )
 
     # Topologically sorting tasks to detect cycles
     task_dependents = {k: {} for k in task_dependencies.keys()}

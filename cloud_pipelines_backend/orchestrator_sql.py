@@ -281,6 +281,66 @@ class OrchestratorService_Sql:
             session.commit()
             return
 
+        # region Conditional execution
+        if task_spec.is_enabled is not None:
+            is_enabled: bool | None = None
+            if isinstance(task_spec.is_enabled, bool):
+                is_enabled = task_spec.is_enabled
+            else:
+                is_enabled_str: str | None = None
+                if isinstance(task_spec.is_enabled, str):
+                    is_enabled_str = task_spec.is_enabled
+                elif isinstance(
+                    task_spec.is_enabled,
+                    (structures.TaskOutputArgument, structures.GraphInputArgument),
+                ):
+                    if (
+                        bts.EXECUTION_NODE_TASK_IS_ENABLED_SPECIAL_INPUT_NAME
+                        not in input_artifact_data
+                    ):
+                        # TODO: Change this to a warning. Missing input artifact should lead to is_enabled = True
+                        raise OrchestratorError(
+                            f"Conditional execution check: is_enabled input does not have an artifact (this should not happen). {task_spec.is_enabled=}"
+                        )
+                    # Getting and removing the is_enabled artifact from input_artifact_data so that it does not affect caching.
+                    is_enabled_artifact = input_artifact_data.pop(
+                        bts.EXECUTION_NODE_TASK_IS_ENABLED_SPECIAL_INPUT_NAME
+                    )
+                    if not (is_enabled_artifact and is_enabled_artifact.value):
+                        raise OrchestratorError(
+                            f"Conditional execution check: is_enabled artifact does not have value {is_enabled_artifact=}, {task_spec.is_enabled=}."
+                        )
+                    is_enabled_str = is_enabled_artifact.value
+                # DynamicData or secrets is not supported here.
+                else:
+                    raise OrchestratorError(
+                        f"Conditional execution check: Unexpected {task_spec.is_enabled=}."
+                    )
+                # Comparison is case-insensitive and whitespace-insensitive (which important since most components output strings with a trailing newline character)
+                if is_enabled_str.strip().lower() == "true":
+                    is_enabled = True
+                elif is_enabled_str.strip().lower() == "false":
+                    is_enabled = False
+                else:
+                    raise OrchestratorError(
+                        f"Conditional execution check: Expected `isEnabled` to resolve to 'true' or 'false', but got '{is_enabled_str}', {task_spec.is_enabled=}."
+                    )
+            if not is_enabled:
+                _logger.info(
+                    f"Conditionally skipping execution {execution.id} and all downstream executions."
+                )
+                execution.container_execution_status = (
+                    bts.ContainerExecutionStatus.SKIPPED
+                )
+                _mark_all_downstream_executions_as_skipped(
+                    session=session,
+                    execution=execution,
+                )
+                session.commit()
+                # Do not process the ExecutionNode any further.
+                return
+        # endregion
+
         # We need to extract dynamic data arguments so that we can use them in cache key calculation.
         # We read secrets and dynamic data from execution_node.extra_data rather than from task_spec.arguments,
         # because some secrets might have been passed from upstream graph inputs.

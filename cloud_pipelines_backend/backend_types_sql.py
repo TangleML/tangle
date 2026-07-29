@@ -426,6 +426,10 @@ class ExecutionNode(_TableBase):
 
     _status_changed: bool = dataclasses.field(default=False, init=False, repr=False)
 
+# The name of a special input that links to the the `TaskSpec.is_enabled` artifact.
+EXECUTION_NODE_TASK_IS_ENABLED_SPECIAL_INPUT_NAME = (
+    "tangleml.com/orchestration/conditional_execution/is_enabled"
+)
 
 EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY = "container_execution_status_history"
 EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY = (
