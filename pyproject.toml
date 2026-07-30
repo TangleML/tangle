@@ -26,7 +26,7 @@ dev = [
     "pytest-asyncio>=0.25.2",
 ]
 huggingface = [
-    "huggingface-hub[oauth]>=0.35.3",
+    "huggingface-hub[oauth]>=1.16.1",
 ]
 skypilot = [
     "skypilot>=0.12.1",
