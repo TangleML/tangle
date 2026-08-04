@@ -37,6 +37,16 @@ class OrchestratorError(RuntimeError):
     pass
 
 
+def _format_duration(*, duration: datetime.timedelta) -> str:
+    """Formats a timedelta as a human-readable string with the most appropriate unit."""
+    total_seconds = duration.total_seconds()
+    if total_seconds >= 3600:
+        return f"{total_seconds / 3600:.1f} hours"
+    if total_seconds >= 60:
+        return f"{total_seconds / 60:.1f} minutes"
+    return f"{total_seconds:.1f} seconds"
+
+
 class OrchestratorService_Sql:
     def __init__(
         self,
@@ -51,6 +61,7 @@ class OrchestratorService_Sql:
         sleep_seconds_between_queue_sweeps: float = 1.0,
         output_data_purge_duration: datetime.timedelta = None,
         *,
+        pending_execution_timeout: datetime.timedelta | None = None,
         # Internal/experimental:
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
@@ -65,9 +76,17 @@ class OrchestratorService_Sql:
         self._queued_executions_queue_idle = False
         self._running_executions_queue_idle = False
         self._output_data_purge_duration = output_data_purge_duration
+        self._pending_execution_timeout = pending_execution_timeout
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
+
+        timeout_str = (
+            _format_duration(duration=self._pending_execution_timeout)
+            if self._pending_execution_timeout
+            else "disabled"
+        )
+        _logger.info(f"Orchestrator initialized. pending_execution_timeout={timeout_str}")
 
     def run_loop(self):
         while True:
@@ -736,6 +755,83 @@ class OrchestratorService_Sql:
             execution.container_execution_status = container_execution.status
             # TODO: Maybe add artifact value and URI to input ArtifactData.
 
+    def _terminate_timed_out_pending_execution(
+        self,
+        *,
+        session: orm.Session,
+        container_execution: bts.ContainerExecution,
+        launched_container: launcher_interfaces.LaunchedContainer,
+        execution_nodes: list[bts.ExecutionNode],
+        current_time: datetime.datetime,
+    ) -> bool:
+        """Terminates a container execution that has been PENDING beyond the configured timeout.
+
+        Returns True if the execution was terminated, False otherwise.
+        """
+        # Guard: feature disabled (None means no timeout enforced)
+        if not self._pending_execution_timeout:
+            return False
+        # Guard: missing timestamp (shouldn't happen, but defensive)
+        if not container_execution.created_at:
+            return False
+
+        # Calculate how long this execution has been stuck in PENDING
+        pending_duration = current_time - container_execution.created_at.astimezone(
+            datetime.timezone.utc
+        )
+        # Not timed out yet — let it continue waiting
+        if pending_duration <= self._pending_execution_timeout:
+            return False
+
+        pending_str = _format_duration(duration=pending_duration)
+        timeout_str = _format_duration(duration=self._pending_execution_timeout)
+
+        pod_name = (container_execution.launcher_data or {}).get(
+            "kubernetes", {}
+        ).get("pod_name", "unknown")
+        _logger.warning(
+            f"Container execution (pod={pod_name}) has been PENDING for {pending_str} "
+            f"(timeout: {timeout_str}). Terminating."
+        )
+
+        # Best-effort log preservation before killing the container
+        try:
+            _retry(lambda: launched_container.upload_log())
+        except Exception:
+            _logger.exception(
+                "Error uploading logs before pending timeout termination."
+            )
+
+        # Delete the K8s pod/job so it stops consuming cluster resources
+        launched_container.terminate()
+
+        # Mark the container execution as terminally failed
+        container_execution.ended_at = current_time
+        container_execution.status = bts.ContainerExecutionStatus.SYSTEM_ERROR
+
+        # Record a human-readable error message (visible in the UI execution detail panel)
+        orchestration_error_message = (
+            f"Execution terminated: stuck in PENDING state for {pending_str} "
+            f"(timeout: {timeout_str})."
+        )
+        _record_orchestration_error_message(
+            container_execution=container_execution,
+            execution_nodes=execution_nodes,
+            message=orchestration_error_message,
+        )
+
+        # Mark all execution nodes linked to this container as failed and skip their downstream.
+        # Multiple nodes can share one container via cache reuse (identical tasks across pipeline runs).
+        for execution_node in execution_nodes:
+            execution_node.container_execution_status = (
+                bts.ContainerExecutionStatus.SYSTEM_ERROR
+            )
+            _mark_all_downstream_executions_as_skipped(
+                session=session, execution=execution_node
+            )
+        session.commit()
+        return True
+
     def internal_process_one_running_execution(
         self, session: orm.Session, container_execution: bts.ContainerExecution
     ):
@@ -825,6 +921,15 @@ class OrchestratorService_Sql:
             reloaded_launched_container.status
         )
         if new_status == previous_status:
+            if new_status == launcher_interfaces.ContainerStatus.PENDING:
+                if self._terminate_timed_out_pending_execution(
+                    session=session,
+                    container_execution=container_execution,
+                    launched_container=reloaded_launched_container,
+                    execution_nodes=container_execution.execution_nodes,
+                    current_time=current_time,
+                ):
+                    return
             _logger.info(f"Container execution remains in {new_status} state.")
             return
         _logger.info(
