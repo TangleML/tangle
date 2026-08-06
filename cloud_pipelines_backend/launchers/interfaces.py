@@ -125,6 +125,16 @@ class LaunchedContainer(abc.ABC):
     ) -> typing_extensions.Self:
         raise NotImplementedError()
 
+    def transient_infra_failure_reason(self) -> str | None:
+        """Short human-readable reason if this container is wedged by a transient
+        infrastructure fault that warrants relaunching the task, else None.
+
+        Default: None (no transient fault). Launchers override this to detect
+        launcher-specific transient faults (e.g. a wedged CSI sidecar). The
+        orchestrator relaunches the task in place when a reason is returned.
+        """
+        return None
+
     def get_log(self) -> str:
         raise NotImplementedError()
 
