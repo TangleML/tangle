@@ -222,6 +222,16 @@ class OrchestratorService_Sql:
                         isinstance(ex, launcher_interfaces.LauncherError)
                         and ex.is_retriable
                     )
+                    if isinstance(
+                        ex, launcher_interfaces.LaunchedContainerNotFoundError
+                    ):
+                        app_metrics.execution_missing_workloads.add(
+                            1,
+                            attributes={
+                                "status": running_container_execution.status.value
+                            },
+                        )
+
                     error_count = (
                         self._container_execution_refresh_error_counts.get(
                             running_container_execution.id, 0

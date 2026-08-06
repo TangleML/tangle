@@ -28,6 +28,10 @@ def _non_retriable_error() -> launcher_interfaces.LauncherError:
     return launcher_interfaces.LauncherError("Something went definitively wrong")
 
 
+def _missing_workload_error() -> launcher_interfaces.LaunchedContainerNotFoundError:
+    return launcher_interfaces.LaunchedContainerNotFoundError("The workload is gone")
+
+
 def _create_session_factory() -> Callable[[], orm.Session]:
     db_engine = database_ops.create_db_engine_and_migrate_db(database_uri="sqlite://")
     return lambda: orm.Session(bind=db_engine)
@@ -175,6 +179,30 @@ class TestContainerExecutionRefreshRetries:
             session=session_factory()
         )
 
+        assert _only_status(session_factory) == (
+            bts.ContainerExecutionStatus.SYSTEM_ERROR
+        )
+
+    def test_missing_workload_is_counted_and_terminalizes(self) -> None:
+        session_factory = _create_launched_container_executions()
+        orchestrator = _make_orchestrator(
+            session_factory,
+            mock.MagicMock(side_effect=_missing_workload_error()),
+            max_failures=3,
+        )
+
+        with mock.patch.object(
+            orchestrator_sql.app_metrics, "execution_missing_workloads"
+        ) as missing_workloads:
+            orchestrator.internal_process_running_executions_queue(
+                session=session_factory()
+            )
+
+        missing_workloads.add.assert_called_once()
+        args, kwargs = missing_workloads.add.call_args
+        assert args == (1,)
+        assert isinstance(kwargs["attributes"]["status"], str)
+        assert kwargs["attributes"]["status"]
         assert _only_status(session_factory) == (
             bts.ContainerExecutionStatus.SYSTEM_ERROR
         )

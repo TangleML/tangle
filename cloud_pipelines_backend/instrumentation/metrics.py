@@ -55,6 +55,15 @@ execution_system_errors = orchestrator_meter.create_counter(
     unit=MetricUnit.ERRORS,
 )
 
+execution_missing_workloads = orchestrator_meter.create_counter(
+    name="execution.missing_workloads",
+    description=(
+        "Number of execution nodes that failed because their workload"
+        " disappeared before it completed (e.g. the pod was deleted)"
+    ),
+    unit=MetricUnit.ERRORS,
+)
+
 execution_status_transition_duration = orchestrator_meter.create_histogram(
     name="execution.status_transition.duration",
     description="Duration an execution spent in a status before transitioning to the next status",
