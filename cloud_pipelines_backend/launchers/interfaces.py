@@ -37,6 +37,16 @@ class LauncherError(RuntimeError):
         self.is_retriable = is_retriable
 
 
+class LaunchedContainerNotFoundError(LauncherError):
+    """The launched container no longer exists (e.g. its pod was deleted).
+
+    A definitive, non-retriable failure: re-reading cannot bring it back. The
+    launcher raises this so the orchestrator can tell "the workload is gone"
+    apart from "we could not reach the platform" without inspecting platform
+    error codes itself.
+    """
+
+
 @dataclasses.dataclass(kw_only=True)
 class InputArgument:
     total_size: int

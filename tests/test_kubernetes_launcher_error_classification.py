@@ -24,10 +24,11 @@ class TestLauncherErrorFromApiException:
         )
         assert error.is_retriable
 
-    def test_not_found_is_not_retriable(self) -> None:
+    def test_not_found_is_a_missing_workload_error(self) -> None:
         error = kubernetes_launchers._launcher_error_from_api_exception(
             _api_exception(404), message="Failed to refresh pod status"
         )
+        assert isinstance(error, interfaces.LaunchedContainerNotFoundError)
         assert not error.is_retriable
 
     def test_client_error_is_not_retriable(self) -> None:
