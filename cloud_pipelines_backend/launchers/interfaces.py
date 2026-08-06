@@ -26,7 +26,15 @@ __all__ = [
 
 
 class LauncherError(RuntimeError):
-    pass
+    """Base class for errors raised by a launcher.
+
+    `is_retriable` marks a failure worth trying again (e.g. the backing platform
+    was unavailable) rather than a definitive error.
+    """
+
+    def __init__(self, *args: object, is_retriable: bool = False) -> None:
+        super().__init__(*args)
+        self.is_retriable = is_retriable
 
 
 @dataclasses.dataclass(kw_only=True)
