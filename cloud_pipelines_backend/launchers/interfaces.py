@@ -137,6 +137,21 @@ class LaunchedContainer(abc.ABC):
     def terminate(self) -> None:
         raise NotImplementedError()
 
+    def release(self) -> bool:
+        """Releases any hold the orchestrator has on the launched container.
+
+        A launcher may keep the underlying workload object alive after the
+        container has finished, so that its terminal status, exit code and logs
+        can still be observed (the Kubernetes pod launcher does this with a
+        finalizer). Calling `release` says "I have everything I need" and lets
+        the cluster reclaim the object.
+
+        Returns True when a hold was actually released. Launchers that hold
+        nothing return False, which is the default, so callers can call this
+        unconditionally.
+        """
+        return False
+
 
 # @dataclasses.dataclass
 # class ContainerExecutionResult:

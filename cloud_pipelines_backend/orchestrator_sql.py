@@ -33,6 +33,36 @@ DYNAMIC_DATA_SECRET_KEY = "secret"
 DYNAMIC_DATA_SECRET_NAME_KEY = "name"
 
 
+# Statuses from which an execution is never polled again. Anything that reaches
+# one of these must release its workload hold, or the workload object is held
+# for ever (see `LaunchedContainer.release`).
+_TERMINAL_CONTAINER_EXECUTION_STATUSES = frozenset(
+    {
+        bts.ContainerExecutionStatus.SUCCEEDED,
+        bts.ContainerExecutionStatus.FAILED,
+        bts.ContainerExecutionStatus.SYSTEM_ERROR,
+        bts.ContainerExecutionStatus.CANCELLED,
+    }
+)
+
+
+def _release_launched_container(
+    launched_container: launcher_interfaces.LaunchedContainer | None,
+) -> None:
+    """Tells the launcher we are done with a container we will not poll again.
+
+    Best-effort by construction: the execution's outcome is already recorded and
+    committed, so a failure to release must never change it. A missed release is
+    picked up later by the launcher's own sweep.
+    """
+    if launched_container is None:
+        return
+    try:
+        launched_container.release()
+    except Exception as ex:
+        _logger.warning(f"Failed to release the launched container: {ex!r}")
+
+
 class OrchestratorError(RuntimeError):
     pass
 
@@ -50,6 +80,10 @@ class OrchestratorService_Sql:
         default_task_annotations: dict[str, Any] | None = None,
         sleep_seconds_between_queue_sweeps: float = 1.0,
         output_data_purge_duration: datetime.timedelta = None,
+        finalizer_hold_max_duration: datetime.timedelta = datetime.timedelta(
+            minutes=10
+        ),
+        finalizer_sweep_interval: datetime.timedelta = datetime.timedelta(minutes=1),
         *,
         # Internal/experimental:
         _max_queue_batch_size: int = 1,
@@ -65,6 +99,10 @@ class OrchestratorService_Sql:
         self._queued_executions_queue_idle = False
         self._running_executions_queue_idle = False
         self._output_data_purge_duration = output_data_purge_duration
+        # Backstop for workload holds that no execution will release itself.
+        self._finalizer_hold_max_duration = finalizer_hold_max_duration
+        self._finalizer_sweep_interval = finalizer_sweep_interval
+        self._last_finalizer_sweep_at: float | None = None
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
@@ -160,7 +198,45 @@ class OrchestratorService_Sql:
                 _logger.debug("No queued executions found")
             return False
 
+    def _deserialize_launched_container_or_none(
+        self, launcher_data: Any
+    ) -> launcher_interfaces.LaunchedContainer | None:
+        if not launcher_data:
+            return None
+        try:
+            return self._launcher.deserialize_launched_container_from_dict(
+                launcher_data
+            )
+        except Exception as ex:
+            _logger.warning(
+                f"Could not deserialize the launched container to release it: {ex!r}"
+            )
+            return None
+
+    def _maybe_release_abandoned_holds(self) -> None:
+        """Periodically clears workload holds that nothing else will release."""
+        release_holds = getattr(
+            self._launcher, "release_abandoned_finalizer_holds", None
+        )
+        if release_holds is None:
+            return
+        now = time.monotonic()
+        if (
+            self._last_finalizer_sweep_at is not None
+            and now - self._last_finalizer_sweep_at
+            < self._finalizer_sweep_interval.total_seconds()
+        ):
+            return
+        self._last_finalizer_sweep_at = now
+        try:
+            released = release_holds(max_hold=self._finalizer_hold_max_duration)
+            if released:
+                _logger.warning(f"Force-released {released} abandoned workload holds.")
+        except Exception as ex:
+            _logger.warning(f"Could not sweep abandoned workload holds: {ex!r}")
+
     def internal_process_running_executions_queue(self, session: orm.Session):
+        self._maybe_release_abandoned_holds()
         # Select only the ID to avoid loading large JSON columns into the sort buffer.
         id_query = (
             sql.select(bts.ContainerExecution.id)
@@ -230,6 +306,14 @@ class OrchestratorService_Sql:
                             session=session, execution=execution_node
                         )
                     session.commit()
+
+                    # This execution is terminal and will never be polled again,
+                    # so drop any hold we have on its workload.
+                    _release_launched_container(
+                        self._deserialize_launched_container_or_none(
+                            running_container_execution.launcher_data
+                        )
+                    )
                 finally:
                     duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
                     _logger.info(
@@ -789,6 +873,11 @@ class OrchestratorService_Sql:
                 # Requesting container termination.
                 # Termination might not happen immediately (e.g. Kubernetes has grace period).
                 launched_container.terminate()
+                # We already have the logs and this execution is about to become
+                # CANCELLED, which stops it being polled. Release the hold now:
+                # without this, every cancellation leaves a pod wedged in
+                # `Terminating` with nobody left to free it.
+                _release_launched_container(launched_container)
                 container_execution.ended_at = _get_current_time()
                 # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
                 container_execution.status = bts.ContainerExecutionStatus.CANCELLED
@@ -1027,6 +1116,11 @@ class OrchestratorService_Sql:
                 f"Unexpected running container status: {new_status=}, {launched_container=}"
             )
         session.commit()
+
+        if container_execution.status in _TERMINAL_CONTAINER_EXECUTION_STATUSES:
+            # Status, exit code, logs and output artifacts are recorded and
+            # committed, so the workload object is no longer needed.
+            _release_launched_container(reloaded_launched_container)
 
 
 def _get_direct_downstream_executions(
