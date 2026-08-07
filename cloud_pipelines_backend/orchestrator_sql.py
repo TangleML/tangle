@@ -147,6 +147,14 @@ class OrchestratorService_Sql:
                         execution=queued_execution, exception=ex
                     )
                     session.commit()
+                    # Skipping downstream happens after the commit above, so that
+                    # the SYSTEM_ERROR status is durable even if this traversal
+                    # fails. Otherwise the execution would stay QUEUED and be
+                    # reprocessed on every sweep.
+                    _mark_all_downstream_executions_as_skipped(
+                        session=session, execution=queued_execution
+                    )
+                    session.commit()
                 finally:
                     duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
                     _logger.info(
