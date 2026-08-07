@@ -35,6 +35,97 @@ _MAIN_CONTAINER_NAME = "main"
 # Kubernetes annotation keys. (Has strict naming policy. Single slash only etc.)
 _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY = "cloud-pipelines.net"
 _KUBERNETES_LAUNCHER_ANNOTATION_KEY = "cloud-pipelines.net/launchers.kubernetes"
+# Finalizer that keeps a task pod's API object alive after the container has
+# finished, until the orchestrator has observed its terminal status. While it is
+# present a delete only stamps `deletionTimestamp`: the object stays readable in
+# `Terminating` instead of disappearing mid-poll. See `LaunchedContainer.release`.
+_STATUS_OBSERVED_FINALIZER = "cloud-pipelines.net/status-observed"
+# Finalizers are not selectable, so the hold is mirrored in a label to make held
+# pods findable by `release_abandoned_finalizer_holds`.
+_STATUS_OBSERVED_FINALIZER_LABEL_KEY = "cloud-pipelines.net/held-for-status"
+# Opt-in, because a hold that is never released is worse than a pod that is
+# collected too early. Set on the launcher, or through this environment variable
+# for deployments that construct the launcher without threading the argument.
+_HOLD_PODS_ENV_VAR = "CLOUD_PIPELINES_HOLD_PODS_UNTIL_STATUS_OBSERVED"
+_DEFAULT_MAX_FINALIZER_HOLD = datetime.timedelta(minutes=10)
+
+
+def _env_flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _add_status_observed_finalizer(pod: k8s_client_lib.V1Pod) -> None:
+    """Marks a pod as held until the orchestrator observes its terminal status."""
+    metadata = pod.metadata
+    finalizers = list(metadata.finalizers or [])
+    if _STATUS_OBSERVED_FINALIZER not in finalizers:
+        finalizers.append(_STATUS_OBSERVED_FINALIZER)
+    metadata.finalizers = finalizers
+    metadata.labels = (metadata.labels or {}) | {
+        _STATUS_OBSERVED_FINALIZER_LABEL_KEY: "true"
+    }
+
+
+def _remove_status_observed_finalizer(
+    *,
+    core_api_client: k8s_client_lib.CoreV1Api,
+    pod_name: str,
+    namespace: str,
+    request_timeout: int | tuple[int, int] = 10,
+    pod: k8s_client_lib.V1Pod | None = None,
+    max_attempts: int = 3,
+) -> bool:
+    """Removes the hold finalizer from a pod. Returns True if one was removed.
+
+    Idempotent: a pod that was never held, or is already gone, is not an error.
+    Removing the finalizer never deletes anything by itself; it only stops
+    blocking a deletion that someone else has already requested or will request.
+    """
+    for attempt in range(1, max_attempts + 1):
+        if pod is None:
+            try:
+                pod = core_api_client.read_namespaced_pod(
+                    name=pod_name,
+                    namespace=namespace,
+                    _request_timeout=request_timeout,
+                )
+            except kubernetes.client.exceptions.ApiException as ex:
+                if ex.status == 404:
+                    return False
+                raise
+        current_finalizers = list(
+            (pod.metadata.finalizers if pod.metadata else None) or []
+        )
+        if _STATUS_OBSERVED_FINALIZER not in current_finalizers:
+            return False
+        remaining = [f for f in current_finalizers if f != _STATUS_OBSERVED_FINALIZER]
+        # JSON Patch: a list body makes the Kubernetes client select
+        # `application/json-patch+json`. A strategic merge patch cannot express
+        # this, because `metadata.finalizers` has merge semantics and can only
+        # gain entries that way. The `test` op makes the removal atomic against
+        # a concurrent writer.
+        patch = [
+            {"op": "test", "path": "/metadata/finalizers", "value": current_finalizers},
+            {"op": "replace", "path": "/metadata/finalizers", "value": remaining},
+        ]
+        try:
+            core_api_client.patch_namespaced_pod(
+                name=pod_name,
+                namespace=namespace,
+                body=patch,
+                _request_timeout=request_timeout,
+            )
+            _logger.info(f"Released pod {pod_name} in namespace {namespace}.")
+            return True
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status == 404:
+                return False
+            if ex.status in (409, 422) and attempt < max_attempts:
+                # Someone else changed the finalizer list. Re-read and retry.
+                pod = None
+                continue
+            raise
+    return False
 # ComponentSpec annotation keys
 RESOURCES_CPU_ANNOTATION_KEY = "cloud-pipelines.net/launchers/generic/resources.cpu"
 RESOURCES_MEMORY_ANNOTATION_KEY = (
@@ -166,6 +257,7 @@ class _KubernetesContainerLauncherBase:
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        hold_pods_until_status_observed: bool | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -184,6 +276,13 @@ class _KubernetesContainerLauncherBase:
             _KUBERNETES_LAUNCHER_ANNOTATION_KEY: "true",
         } | (pod_annotations or {})
         self._pod_postprocessor = pod_postprocessor
+        # Left to the environment when not passed explicitly, so a deployment can
+        # turn the hold on without every launcher subclass forwarding the flag.
+        self._hold_pods_until_status_observed = (
+            _env_flag(_HOLD_PODS_ENV_VAR)
+            if hold_pods_until_status_observed is None
+            else hold_pods_until_status_observed
+        )
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
 
         try:
@@ -562,6 +661,15 @@ class _KubernetesPodLauncher(
         if self._pod_postprocessor:
             pod = self._pod_postprocessor(pod=pod, annotations=annotations)
 
+        # Hold the pod object until its terminal status has been observed.
+        # Applied after the post-processor so a post-processor cannot drop it,
+        # and before creation so the pod is never unprotected. Deliberately only
+        # on pod-launched containers: a Job outlives its pods, so the Job
+        # launcher does not need this, and must not have it, since the Job
+        # controller's own pod cleanup would wedge on the finalizer.
+        if self._hold_pods_until_status_observed:
+            _add_status_observed_finalizer(pod)
+
         core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
         try:
             created_pod: k8s_client_lib.V1Pod = core_api_client.create_namespaced_pod(
@@ -588,6 +696,69 @@ class _KubernetesPodLauncher(
             launcher=self,
         )
         return launched_kubernetes_container
+
+    def release_abandoned_finalizer_holds(
+        self,
+        *,
+        max_hold: datetime.timedelta = _DEFAULT_MAX_FINALIZER_HOLD,
+        namespace: str | None = None,
+    ) -> int:
+        """Force-releases held pods whose deletion has been pending too long.
+
+        Every hold needs a guaranteed release. Without this, a pod nothing polls
+        any more (the orchestrator restarted, its execution row is gone, it was
+        terminalized by a path that could not release) would sit in
+        `Terminating` for ever, holding etcd space and namespace pod quota and
+        consuming the cluster's pod-GC budget. This bounds the worst case: no
+        pod is held longer than `max_hold` past its deletion request, whatever
+        the orchestrator does.
+
+        Cluster-wide by default, because a pod post-processor may place pods in
+        a namespace other than the launcher's own.
+        """
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
+        label_selector = f"{_STATUS_OBSERVED_FINALIZER_LABEL_KEY}=true"
+        if namespace:
+            pod_list = core_api_client.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=label_selector,
+                _request_timeout=self._request_timeout,
+            )
+        else:
+            pod_list = core_api_client.list_pod_for_all_namespaces(
+                label_selector=label_selector,
+                _request_timeout=self._request_timeout,
+            )
+        now = datetime.datetime.now(datetime.timezone.utc)
+        released = 0
+        for pod in pod_list.items or []:
+            metadata = pod.metadata
+            if not metadata or not metadata.deletion_timestamp:
+                # Not deleted, so the hold is not blocking anything.
+                continue
+            if _STATUS_OBSERVED_FINALIZER not in (metadata.finalizers or []):
+                continue
+            held_for = now - metadata.deletion_timestamp
+            if held_for < max_hold:
+                continue
+            _logger.warning(
+                f"Force-releasing pod {metadata.name} in namespace"
+                f" {metadata.namespace}: its deletion has been held for"
+                f" {held_for} (max {max_hold}). Its execution will not get to"
+                " see the pod's terminal status."
+            )
+            try:
+                if _remove_status_observed_finalizer(
+                    core_api_client=core_api_client,
+                    pod_name=metadata.name,
+                    namespace=metadata.namespace,
+                    request_timeout=self._request_timeout,
+                    pod=pod,
+                ):
+                    released += 1
+            except Exception:
+                _logger.exception(f"Failed to force-release pod {metadata.name}.")
+        return released
 
     def get_refreshed_launched_container_from_dict(
         self, launched_container_dict: dict
@@ -981,6 +1152,22 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             grace_period_seconds=10,
         )
         _logger.info(f"Terminated pod {self._pod_name} in namespace {self._namespace}")
+
+    def release(self) -> bool:
+        """Removes the hold finalizer so Kubernetes may delete the pod.
+
+        Call this once the container's terminal status, exit code and logs have
+        been recorded, and on every other path that terminalizes an execution:
+        anything that is never polled again must not stay held.
+        """
+        launcher = self._get_launcher()
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
+        return _remove_status_observed_finalizer(
+            core_api_client=core_api_client,
+            pod_name=self._pod_name,
+            namespace=self._namespace,
+            request_timeout=launcher._request_timeout,
+        )
 
 
 class _KubernetesJobLauncher(
@@ -1634,6 +1821,7 @@ class _KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        hold_pods_until_status_observed: bool | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -1649,9 +1837,13 @@ class _KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            hold_pods_until_status_observed=hold_pods_until_status_observed,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
+        # Note: the hold is deliberately not passed to the Job launcher. A Job
+        # outlives its pods, so its status survives pod collection, and a
+        # finalizer on Job-owned pods would wedge the Job controller's cleanup.
         self._job_launcher = _KubernetesJobLauncher(
             api_client=api_client,
             namespace=namespace,
@@ -1666,6 +1858,19 @@ class _KubernetesPodOrJobLauncher(
         # This might help cross-cluster launchers identify this launcher via teh server address.
         self._api_client = api_client
         self._storage_provider = _storage_provider
+
+    def release_abandoned_finalizer_holds(
+        self,
+        *,
+        max_hold: datetime.timedelta = _DEFAULT_MAX_FINALIZER_HOLD,
+        namespace: str | None = None,
+    ) -> int:
+        """Sweeps abandoned holds. This launcher composes rather than inherits,
+        so the sweep has to be forwarded explicitly, or the orchestrator would
+        silently find no sweeper on the launcher production actually uses."""
+        return self._pod_launcher.release_abandoned_finalizer_holds(
+            max_hold=max_hold, namespace=namespace
+        )
 
     def launch_container_task(
         self,
