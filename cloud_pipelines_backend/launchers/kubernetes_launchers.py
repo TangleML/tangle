@@ -32,6 +32,23 @@ _MAX_INPUT_VALUE_SIZE = 10000
 _MAIN_CONTAINER_NAME = "main"
 
 
+def _launcher_error_from_api_exception(
+    exception: kubernetes.client.exceptions.ApiException,
+    *,
+    message: str,
+) -> interfaces.LauncherError:
+    """Translate a Kubernetes API error into a launcher error.
+
+    A 5xx is retriable (the API server broke or shed load); any other status is
+    a definitive failure.
+    """
+    status = exception.status
+    is_retriable = isinstance(status, int) and 500 <= status < 600
+    return interfaces.LauncherError(
+        f"{message}: {exception!r}", is_retriable=is_retriable
+    )
+
+
 # Kubernetes annotation keys. (Has strict naming policy. Single slash only etc.)
 _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY = "cloud-pipelines.net"
 _KUBERNETES_LAUNCHER_ANNOTATION_KEY = "cloud-pipelines.net/launchers.kubernetes"
@@ -595,7 +612,12 @@ class _KubernetesPodLauncher(
         launched_container = LaunchedKubernetesContainer.from_dict(
             launched_container_dict, launcher=self
         )
-        return launched_container.get_refreshed()
+        try:
+            return launched_container.get_refreshed()
+        except kubernetes.client.exceptions.ApiException as ex:
+            raise _launcher_error_from_api_exception(
+                ex, message="Failed to refresh pod status"
+            ) from ex
 
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
@@ -1257,7 +1279,12 @@ class _KubernetesJobLauncher(
         launched_container = LaunchedKubernetesJob.from_dict(
             launched_container_dict, launcher=self
         )
-        return launched_container.get_refreshed()
+        try:
+            return launched_container.get_refreshed()
+        except kubernetes.client.exceptions.ApiException as ex:
+            raise _launcher_error_from_api_exception(
+                ex, message="Failed to refresh job status"
+            ) from ex
 
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
