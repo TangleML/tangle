@@ -972,7 +972,7 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
 
         return pprint.pformat(self.to_dict())
 
-    def terminate(self):
+    def _delete_pod(self):
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
         core_api_client.delete_namespaced_pod(
@@ -980,7 +980,13 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             namespace=self._namespace,
             grace_period_seconds=10,
         )
+
+    def terminate(self):
+        self._delete_pod()
         _logger.info(f"Terminated pod {self._pod_name} in namespace {self._namespace}")
+
+    def cleanup(self):
+        self._delete_pod()
 
 
 class _KubernetesJobLauncher(
@@ -1607,7 +1613,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
         return pprint.pformat(self.to_dict())
 
-    def terminate(self):
+    def _delete_job(self):
         launcher = self._get_launcher()
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
         batch_api_client.delete_namespaced_job(
@@ -1616,7 +1622,13 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             grace_period_seconds=10,
             propagation_policy="Foreground",
         )
+
+    def terminate(self):
+        self._delete_job()
         _logger.info(f"Terminated job {self._job_name} in namespace {self._namespace}")
+
+    def cleanup(self) -> None:
+        self._delete_job()
 
 
 class _KubernetesPodOrJobLauncher(

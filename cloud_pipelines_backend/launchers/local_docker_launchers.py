@@ -335,6 +335,9 @@ class LaunchedDockerContainer(interfaces.LaunchedContainer):
     def terminate(self):
         self._container.stop(timeout=10)
 
+    def cleanup(self) -> None:
+        self._container.remove()
+
     def to_dict(self) -> dict[str, Any]:
         return dict(
             docker=dict(

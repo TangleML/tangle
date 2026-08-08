@@ -137,6 +137,9 @@ class LaunchedContainer(abc.ABC):
     def terminate(self) -> None:
         raise NotImplementedError()
 
+    def cleanup(self) -> None:
+        pass
+
 
 # @dataclasses.dataclass
 # class ContainerExecutionResult:

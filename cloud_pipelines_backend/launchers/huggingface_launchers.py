@@ -445,6 +445,9 @@ class LaunchedHuggingFaceJobContainer(interfaces.LaunchedContainer):
     def terminate(self):
         self._get_api_client().cancel_job(job_id=self._id, namespace=self._namespace)
 
+    def cleanup(self):
+        pass
+
     def to_dict(self) -> dict[str, Any]:
         debug_job_info = dataclasses.asdict(self._job)
         # Fix JSON serialization of datetime
