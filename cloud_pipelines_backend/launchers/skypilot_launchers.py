@@ -744,6 +744,9 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
         request_id = sky_jobs.cancel(job_ids=[self._handle.job_id])
         sky.get(request_id)
 
+    def cleanup(self) -> None:
+        pass
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "skypilot": {

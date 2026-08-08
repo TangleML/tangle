@@ -1028,6 +1028,18 @@ class OrchestratorService_Sql:
             )
         session.commit()
 
+        # Cleaning up after the jobs. But only when container succeeds/fails, not gets SYSTEM_ERROR.
+        if new_status in (
+            launcher_interfaces.ContainerStatus.SUCCEEDED,
+            launcher_interfaces.ContainerStatus.FAILED,
+        ):
+            try:
+                launched_container.cleanup()
+            except Exception:
+                _logger.exception(
+                    f"Processing running container execution {container_execution.id}: Error doing launched container cleanup."
+                )
+
 
 def _get_direct_downstream_executions(
     session: orm.Session, execution: bts.ExecutionNode
