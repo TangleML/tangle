@@ -18,6 +18,9 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
+[options.exclude-newer-package]
+cloud-pipelines = false
+
 [[package]]
 name = "aiofiles"
 version = "25.1.0"
@@ -625,7 +628,7 @@ wheels = [
 
 [[package]]
 name = "cloud-pipelines"
-version = "0.26.3.12"
+version = "0.26.7.29"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docker" },
@@ -634,9 +637,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "strip-hints" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cc/fb/856dc68694fe76722596ea5725feeade2aff5beba612c8e0d98f1597d94d/cloud_pipelines-0.26.3.12.tar.gz", hash = "sha256:d93b26567bcc2e7f740f55387e433aa09f33042e4188f0e00dfa0730c5ee24d4", size = 111439, upload-time = "2026-03-12T09:04:26.206Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/20/d7a8aa9581056f652762699e873cbb6f79faaec5c5b12c1965a4206cca91/cloud_pipelines-0.26.7.29.tar.gz", hash = "sha256:b2af8f3ef60b9d91b80cc6a8cb72872d789b53d2e9e37e7147d565b93f476768", size = 81652, upload-time = "2026-07-29T22:21:09.934Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/57/122ced86f5e7ff368cb27c572719329dfe91bada29bb1b38bf1ceb33322f/cloud_pipelines-0.26.3.12-py3-none-any.whl", hash = "sha256:e7b26d92857b96852b88c50a1b2354c5322ceeb2d56b12e49c020c52e2e5457a", size = 104660, upload-time = "2026-03-12T09:04:25.054Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/da/ea1cd339d524e47f893e98f86d905605e8049ebc4aa3d4102c8029c8c0dc/cloud_pipelines-0.26.7.29-py3-none-any.whl", hash = "sha256:5b946de166235d989cfa57bbb30affcef1a5462b30844ab1dd4c3d5b79c83b39", size = 105517, upload-time = "2026-07-29T22:21:12.3Z" },
 ]
 
 [[package]]
@@ -675,7 +678,7 @@ skypilot = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.18.5" },
     { name = "bugsnag", specifier = ">=4.9.1,<5" },
-    { name = "cloud-pipelines", specifier = ">=0.23.2.4" },
+    { name = "cloud-pipelines", specifier = ">=0.26.7.29" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.139.2" },
     { name = "kubernetes", specifier = ">=33.1.0,<36" },
     { name = "opentelemetry-api", specifier = ">=1.44.0" },
