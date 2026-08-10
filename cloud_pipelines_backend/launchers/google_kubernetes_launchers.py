@@ -26,6 +26,7 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: kubernetes_launchers.PodPostProcessor | None = None,
+        job_postprocessor: kubernetes_launchers.JobPostProcessor | None = None,
     ):
         pod_postprocessors = [
             kubernetes_launchers._google_kubernetes_engine_accelerator_pod_postprocessor
@@ -44,6 +45,7 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesJobLauncher(
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
+            job_postprocessor=job_postprocessor,
             _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
                 gcs_client
             ),
@@ -67,6 +69,7 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: kubernetes_launchers.PodPostProcessor | None = None,
+        job_postprocessor: kubernetes_launchers.JobPostProcessor | None = None,
     ):
         pod_postprocessors = [
             kubernetes_launchers._google_kubernetes_engine_accelerator_pod_postprocessor
@@ -85,6 +88,7 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
+            job_postprocessor=job_postprocessor,
             _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
                 gcs_client
             ),

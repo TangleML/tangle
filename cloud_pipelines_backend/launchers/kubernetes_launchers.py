@@ -152,6 +152,12 @@ class PodPostProcessor(typing.Protocol):
     ) -> k8s_client_lib.V1Pod: ...
 
 
+class JobPostProcessor(typing.Protocol):
+    def __call__(
+        self, *, job: k8s_client_lib.V1Job, annotations: dict[str, str] | None = None
+    ) -> k8s_client_lib.V1Job: ...
+
+
 class _KubernetesContainerLauncherBase:
     """Launcher that launches container using Kubernetes"""
 
@@ -1005,6 +1011,7 @@ class _KubernetesJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        job_postprocessor: JobPostProcessor | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -1023,6 +1030,7 @@ class _KubernetesJobLauncher(
             pod_postprocessor=pod_postprocessor,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
+        self._job_postprocessor = job_postprocessor
 
     def launch_container_task(
         self,
@@ -1248,7 +1256,8 @@ class _KubernetesJobLauncher(
     def _transform_job_before_launching(
         self, *, job: k8s_client_lib.V1Job, annotations: dict[str, str] | None = None
     ) -> k8s_client_lib.V1Job:
-        del annotations
+        if self._job_postprocessor:
+            job = self._job_postprocessor(job=job, annotations=annotations)
         return job
 
     def get_refreshed_launched_container_from_dict(
@@ -1646,6 +1655,7 @@ class _KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        job_postprocessor: JobPostProcessor | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -1672,6 +1682,7 @@ class _KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            job_postprocessor=job_postprocessor,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
