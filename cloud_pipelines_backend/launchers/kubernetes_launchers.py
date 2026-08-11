@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import http
 import json
 import logging
 import os
@@ -1867,10 +1868,12 @@ def _launcher_error_from_api_exception(
 ) -> interfaces.LauncherError:
     """Translate a Kubernetes API error into a launcher error.
 
-    A 5xx is retriable (the API server broke or shed load); any other status is
-    a definitive failure.
+    A 404 means the workload is gone; a 5xx is retriable (the API server broke
+    or shed load); any other status is a definitive failure.
     """
     status = exception.status
+    if status == http.HTTPStatus.NOT_FOUND:
+        return interfaces.LaunchedContainerNotFoundError(f"{message}: {exception!r}")
     is_retriable = isinstance(status, int) and 500 <= status < 600
     return interfaces.LauncherError(
         f"{message}: {exception!r}", is_retriable=is_retriable
