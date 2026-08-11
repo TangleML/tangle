@@ -980,6 +980,12 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             namespace=self._namespace,
             grace_period_seconds=10,
         )
+        _run_pod_cleanup_handlers(
+            pod_name=self._pod_name,
+            namespace=self._namespace,
+            api_client=launcher._api_client,
+            pod=self._debug_pod,
+        )
 
     def terminate(self):
         self._delete_pod()
@@ -1848,3 +1854,59 @@ def _remove_keys_with_none_values(d: dict):
             del d[k]
         if isinstance(v, dict):
             _remove_keys_with_none_values(v)
+
+
+# Internal/experimental: this post-delete cleanup-handler extension point is not
+# a stable public API. It is intentionally leading-underscore so out-of-tree
+# consumers do not build on it before the Tangle team commits to it; the names
+# (and shape) may change or be removed without a deprecation cycle.
+class _PodCleanupHandler(typing.Protocol):
+    def __call__(
+        self,
+        *,
+        pod_name: str,
+        namespace: str,
+        api_client: k8s_client_lib.ApiClient,
+        pod: k8s_client_lib.V1Pod | None = None,
+    ) -> None: ...
+
+
+# Callbacks invoked after a launched pod is deleted (during cleanup or
+# terminate), in registration order. Each is best-effort: an exception in one
+# handler is logged and stops neither the other handlers nor the delete. This is
+# a generic extension point -- e.g. an operator that stamps a finalizer on its
+# pods to hold them can register a handler here to remove that finalizer inline
+# the instant the pod is deleted, rather than reconciling it out of band.
+_pod_cleanup_handlers: list[_PodCleanupHandler] = []
+
+
+def _register_pod_cleanup_handler(handler: _PodCleanupHandler) -> None:
+    """Register a callback run after a launched pod is deleted. See _PodCleanupHandler.
+
+    Internal/experimental -- see the note on _PodCleanupHandler. Not a stable API.
+    """
+    _pod_cleanup_handlers.append(handler)
+
+
+def _run_pod_cleanup_handlers(
+    *,
+    pod_name: str,
+    namespace: str,
+    api_client: k8s_client_lib.ApiClient,
+    pod: k8s_client_lib.V1Pod | None = None,
+) -> None:
+    for handler in _pod_cleanup_handlers:
+        try:
+            handler(
+                pod_name=pod_name,
+                namespace=namespace,
+                api_client=api_client,
+                pod=pod,
+            )
+        except Exception:
+            _logger.exception(
+                "Pod cleanup handler %r failed for pod %s in namespace %s.",
+                getattr(handler, "__name__", handler),
+                pod_name,
+                namespace,
+            )
