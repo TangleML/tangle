@@ -1471,7 +1471,9 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 _request_timeout=launcher._request_timeout,
             )
         )
-        pod_map: dict[str, k8s_client_lib.V1Pod] = {}
+        # Preserving missing Pod information. We're starting with the Pod info that we already have instead of starting form nothing.
+        # This way if some Pods are now missing, we do not lose their information that we've obtained in the past.
+        pod_map = copy.copy(self._debug_pods)
         if job.spec.completion_mode == "Indexed":
             # There can be multiple pods for each index.
             # This can happen when Job gets suspended and resumed multiple times and Pods can get stuck in "Terminating" phase.
