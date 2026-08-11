@@ -2,6 +2,7 @@ import copy
 import json
 import datetime
 import logging
+import os
 import time
 import traceback
 import typing
@@ -52,6 +53,7 @@ class OrchestratorService_Sql:
         output_data_purge_duration: datetime.timedelta = None,
         *,
         # Internal/experimental:
+        _max_container_execution_refresh_error_retries: int = 3,
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
     ):
@@ -65,6 +67,10 @@ class OrchestratorService_Sql:
         self._queued_executions_queue_idle = False
         self._running_executions_queue_idle = False
         self._output_data_purge_duration = output_data_purge_duration
+        self._max_container_execution_refresh_error_retries = (
+            _max_container_execution_refresh_error_retries
+        )
+        self._container_execution_refresh_error_counts: dict[Any, int] = {}
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
@@ -213,6 +219,38 @@ class OrchestratorService_Sql:
                 except Exception as ex:
                     _logger.exception("Error processing running container execution")
                     session.rollback()
+
+                    is_retriable = (
+                        isinstance(ex, launcher_interfaces.LauncherError)
+                        and ex.is_retriable
+                    )
+                    error_count = (
+                        self._container_execution_refresh_error_counts.get(
+                            running_container_execution.id, 0
+                        )
+                        + 1
+                    )
+                    if (
+                        is_retriable
+                        and error_count
+                        < self._max_container_execution_refresh_error_retries
+                    ):
+                        self._container_execution_refresh_error_counts[
+                            running_container_execution.id
+                        ] = error_count
+                        _logger.warning(
+                            "Could not refresh running container execution "
+                            f"({error_count} of "
+                            f"{self._max_container_execution_refresh_error_retries}"
+                            f" consecutive retriable failures): {ex!r}. Leaving "
+                            f"it in {running_container_execution.status} and "
+                            "refreshing it on a later sweep."
+                        )
+                        return True
+
+                    self._container_execution_refresh_error_counts.pop(
+                        running_container_execution.id, None
+                    )
                     running_container_execution.status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
                     )
@@ -238,6 +276,10 @@ class OrchestratorService_Sql:
                             session=session, execution=execution_node
                         )
                     session.commit()
+                else:
+                    self._container_execution_refresh_error_counts.pop(
+                        running_container_execution.id, None
+                    )
                 finally:
                     duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
                     _logger.info(
