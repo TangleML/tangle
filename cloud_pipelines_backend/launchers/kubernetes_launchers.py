@@ -1648,6 +1648,7 @@ class _KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        always_launch_jobs: bool = False,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -1677,6 +1678,7 @@ class _KubernetesPodOrJobLauncher(
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
+        self._always_launch_jobs = always_launch_jobs
         # This might help cross-cluster launchers identify this launcher via teh server address.
         self._api_client = api_client
         self._storage_provider = _storage_provider
@@ -1691,7 +1693,11 @@ class _KubernetesPodOrJobLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesContainer | LaunchedKubernetesJob":
-        if annotations and MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY in annotations:
+        if (
+            self._always_launch_jobs
+            or annotations
+            and MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY in annotations
+        ):
             return self._job_launcher.launch_container_task(
                 component_spec=component_spec,
                 input_arguments=input_arguments,
