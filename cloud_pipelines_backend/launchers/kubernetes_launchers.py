@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import copy
 import datetime
 import http
@@ -1331,7 +1332,24 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         num_active_or_ended = num_ended + (job_status.active or 0)
         if num_active_or_ended < num_required_completions:
             return interfaces.ContainerStatus.PENDING
-        # TODO: ! Discern pods in Pending and Running states
+        # Distinguishing between PENDING and RUNNING jobs.
+        # This cannot be learned from the Job object (which just has the number of "active" pods). We need pod objects to analyze their statuses.
+        pod_phases = collections.Counter(
+            pod.status.phase
+            for pod in self._debug_pods.values()
+            if pod.status and pod.status.phase
+        )
+        if "Pending" in pod_phases:
+            return interfaces.ContainerStatus.PENDING
+        elif "Running" in pod_phases:
+            return interfaces.ContainerStatus.RUNNING
+        # Job status may lag behind the Pod status.
+        # You can see: Job: {active: 1}, Pods: {Succeeded: 1}.
+        # Lets wait for Job to catch up.
+        # Meanwhile we'll treat this case as "Running".
+        # _logger.warning(
+        #     f"The Kubernetes Job state is inconsistent with the Pod status counts: {job_status=}, {pod_phases=}"
+        # )
         return interfaces.ContainerStatus.RUNNING
 
     @property
