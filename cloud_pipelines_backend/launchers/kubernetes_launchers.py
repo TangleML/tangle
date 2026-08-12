@@ -1563,6 +1563,15 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 # Kubernetes client raises kubernetes.client.exceptions.ApiException when Pod is still in PodInitializing phase
                 # See https://github.com/TangleML/tangle/issues/139
                 return None
+            if ex.status == http.HTTPStatus.NOT_FOUND:
+                # The Pod is gone (e.g. deleted by the cluster-autoscaler mid-run).
+                # `_debug_pods` deliberately retains vanished Pods, so this key would
+                # 404 on every subsequent read. A deleted Pod means "no logs", not an
+                # error, so return None instead of re-raising.
+                _logger.warning(
+                    f"Pod {pod_name} no longer exists; its logs are unrecoverable."
+                )
+                return None
             raise
 
     def _get_all_logs(self) -> dict[str, str]:
