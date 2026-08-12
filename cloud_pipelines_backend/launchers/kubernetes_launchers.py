@@ -34,6 +34,28 @@ _MAX_INPUT_VALUE_SIZE = 10000
 _MAIN_CONTAINER_NAME = "main"
 
 
+class _PodDeleted:
+    """Sentinel: a Pod no longer exists, so its logs can never be retrieved."""
+
+
+# Returned by `LaunchedKubernetesJob._get_log_by_pod_key` when a Pod read 404s.
+# Distinct from `None`, which means the Pod exists but has no logs available yet
+# (HTTP 400, still initializing).
+_POD_DELETED = _PodDeleted()
+
+# Persisted in place of an empty log when the only reason no logs were captured
+# is that the Pod(s) were deleted before we could read them -- e.g. the
+# cluster-autoscaler evicting the node, or Kubernetes garbage-collecting a
+# finished Pod. Without this the UI shows a blank pane indistinguishable from a
+# task that simply produced no output.
+_LOGS_UNAVAILABLE_POD_DELETED_MESSAGE = (
+    "Logs are unavailable: the pod was deleted before its logs could be "
+    "captured (for example, autoscaler eviction or Kubernetes garbage "
+    "collection). The task's final status still reflects what happened; the "
+    "logs themselves could not be captured."
+)
+
+
 # Kubernetes annotation keys. (Has strict naming policy. Single slash only etc.)
 _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY = "cloud-pipelines.net"
 _KUBERNETES_LAUNCHER_ANNOTATION_KEY = "cloud-pipelines.net/launchers.kubernetes"
@@ -1534,7 +1556,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         new_launched_container._debug_pods = pod_map
         return new_launched_container
 
-    def _get_log_by_pod_key(self, pod_name: str) -> str | None:
+    def _get_log_by_pod_key(self, pod_name: str) -> str | None | _PodDeleted:
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
         try:
@@ -1564,23 +1586,34 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 # See https://github.com/TangleML/tangle/issues/139
                 return None
             if ex.status == http.HTTPStatus.NOT_FOUND:
-                # The Pod is gone (e.g. deleted by the cluster-autoscaler mid-run).
-                # `_debug_pods` deliberately retains vanished Pods, so this key would
-                # 404 on every subsequent read. A deleted Pod means "no logs", not an
-                # error, so return None instead of re-raising.
+                # The Pod is gone (e.g. evicted by the cluster-autoscaler or
+                # garbage-collected mid-run). `_debug_pods` deliberately retains
+                # vanished Pods, so this key would 404 on every subsequent read. A
+                # deleted Pod means "no logs", not an error, so report it as such
+                # instead of re-raising.
                 _logger.warning(
                     f"Pod {pod_name} no longer exists; its logs are unrecoverable."
                 )
-                return None
+                return _POD_DELETED
             raise
 
-    def _get_all_logs(self) -> dict[str, str]:
-        logs = {}
+    def _get_all_logs(self) -> tuple[dict[str, str], list[str]]:
+        """Logs by pod key, plus the keys of pods that no longer exist.
+
+        A Pod can vanish before its logs are captured -- the cluster-autoscaler
+        evicting its node, or Kubernetes garbage-collecting a finished Pod. Such
+        pods are reported separately so callers can tell "the pod is gone" apart
+        from "the pod produced no output".
+        """
+        logs: dict[str, str] = {}
+        deleted_pod_keys: list[str] = []
         for pod_key, pod in self._debug_pods.items():
             log = self._get_log_by_pod_key(pod.metadata.name)
-            if log:
+            if log is _POD_DELETED:
+                deleted_pod_keys.append(pod_key)
+            elif log:
                 logs[pod_key] = log
-        return logs
+        return logs, deleted_pod_keys
 
     def _merge_logs(self, logs: dict[str, str | None]) -> str:
         if not logs:
@@ -1605,13 +1638,21 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         return "\n".join(all_log_lines) + "\n"
 
     def get_log(self) -> str:
-        all_logs = self._get_all_logs()
-        merged_log = self._merge_logs(all_logs)
+        logs, deleted_pod_keys = self._get_all_logs()
+        merged_log = self._merge_logs(logs)
+        # Only substitute the notice when we recovered nothing *and* a Pod was
+        # deleted -- an empty log from a Pod that still exists is a real result.
+        if not merged_log and deleted_pod_keys:
+            return _LOGS_UNAVAILABLE_POD_DELETED_MESSAGE
         return merged_log
 
     def upload_log(self):
-        all_logs = self._get_all_logs()
-        merged_log = self._merge_logs(all_logs)
+        logs, deleted_pod_keys = self._get_all_logs()
+        merged_log = self._merge_logs(logs)
+        # Only substitute the notice when we recovered nothing *and* a Pod was
+        # deleted -- an empty log from a Pod that still exists is a real result.
+        if not merged_log and deleted_pod_keys:
+            merged_log = _LOGS_UNAVAILABLE_POD_DELETED_MESSAGE
 
         # Uploading the merged log
         launcher = self._get_launcher()
@@ -1620,7 +1661,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
         # Uploading per-pod logs.
         # It's not ideal to construct new URIs ourselves. But Orchestrator only supports single log per container execution.
-        for pod_key, log in all_logs.items():
+        for pod_key, log in logs.items():
             uri_writer = launcher._storage_provider.make_uri(
                 self._log_uri + f".{pod_key}"
             ).get_writer()
