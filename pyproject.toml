@@ -5,7 +5,7 @@ description = "Backend for Cloud Pipelines"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "alembic>=1.18.5",
+    "alembic>=1.19.0",
     "bugsnag>=4.9.1,<5",
     "cloud-pipelines>=0.26.7.29",
     "fastapi[standard]>=0.139.2",
