@@ -1065,7 +1065,16 @@ class OrchestratorService_Sql:
                     message=orchestration_error_message,
                 )
 
-            _retry(reloaded_launched_container.upload_log)
+            # A log-upload failure must not change a terminal status.
+            # Logs are best-effort; losing them is never a reason to fail an
+            # execution. The launcher decides what a lost log means; the
+            # orchestrator only records that the upload did not succeed.
+            try:
+                _retry(reloaded_launched_container.upload_log)
+            except Exception as ex:
+                _logger.exception(
+                    f"! Error during `LaunchedContainer.upload_log` call: {ex}."
+                )
             # Skip downstream executions
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
