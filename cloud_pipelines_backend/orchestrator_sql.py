@@ -118,6 +118,9 @@ class OrchestratorService_Sql:
                     break
 
     def internal_process_queued_executions_queue(self, session: orm.Session):
+        _logger.debug("Selecting queued execution to process.)")
+
+        query_start_timestamp = time.monotonic_ns()
         query = (
             sql.select(bts.ExecutionNode).where(
                 bts.ExecutionNode.container_execution_status.in_(
@@ -133,12 +136,15 @@ class OrchestratorService_Sql:
             .limit(1)
         )
         queued_execution = session.scalar(query)
+        query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
         if queued_execution:
             self._queued_executions_queue_idle = False
             start_timestamp = time.monotonic_ns()
 
             with contextual_logging.execution_logging_context(queued_execution):
-                _logger.info("Before processing queued execution")
+                _logger.info(
+                    f"Before processing queued execution. (Query duration: {query_duration_ms}ms)"
+                )
                 try:
                     self.internal_process_one_queued_execution(
                         session=session, execution=queued_execution
@@ -169,13 +175,18 @@ class OrchestratorService_Sql:
 
             return True
         else:
-            if not self._queued_executions_queue_idle:
+            if not self._queued_executions_queue_idle or query_duration_ms > 1000:
                 self._queued_executions_queue_idle = True
-                _logger.debug("No queued executions found")
+                _logger.debug(
+                    f"No queued executions found. (Query duration: {query_duration_ms}ms.)"
+                )
             return False
 
     def internal_process_running_executions_queue(self, session: orm.Session):
+        _logger.debug("Selecting running container execution to process.)")
+
         # Select only the ID to avoid loading large JSON columns into the sort buffer.
+        query_start_timestamp = time.monotonic_ns()
         id_query = (
             sql.select(bts.ContainerExecution.id)
             .where(
@@ -193,6 +204,7 @@ class OrchestratorService_Sql:
         running_container_execution = (
             session.get(bts.ContainerExecution, execution_id) if execution_id else None
         )
+        query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
         if running_container_execution:
             self._running_executions_queue_idle = False
             start_timestamp = time.monotonic_ns()
@@ -210,7 +222,12 @@ class OrchestratorService_Sql:
                 container_execution_id=running_container_execution.id,
                 execution_node_ids=execution_node_ids,
             ):
-                _logger.info("Before processing running container execution")
+                queries_duration_ms = (
+                    time.monotonic_ns() - query_start_timestamp
+                ) / 1_000_000
+                _logger.info(
+                    f"Before processing running container execution. Queries duration {queries_duration_ms}ms."
+                )
                 try:
                     self.internal_process_one_running_execution(
                         session=session,
@@ -297,8 +314,10 @@ class OrchestratorService_Sql:
                     )
             return True
         else:
-            if not self._running_executions_queue_idle:
-                _logger.debug("No running container executions found")
+            if not self._running_executions_queue_idle or query_duration_ms > 1000:
+                _logger.debug(
+                    f"No running container executions found. (Query duration: {query_duration_ms}ms.)"
+                )
                 self._running_executions_queue_idle = True
             return False
 
