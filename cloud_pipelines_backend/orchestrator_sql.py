@@ -33,6 +33,9 @@ _T = typing.TypeVar("_T")
 DYNAMIC_DATA_SECRET_KEY = "secret"
 DYNAMIC_DATA_SECRET_NAME_KEY = "name"
 
+ORCHESTRATOR_RETRY_DEADLINE_ENV = "TANGLE_ORCHESTRATOR_RETRY_DEADLINE_SECONDS"
+DEFAULT_ORCHESTRATOR_RETRY_DEADLINE_SECONDS = 180.0
+
 
 class OrchestratorError(RuntimeError):
     pass
@@ -1225,18 +1228,70 @@ def _update_dict_recursive(d1: dict, d2: dict):
         d1[k] = v2
 
 
+class RetryDeadlineExceededError(TimeoutError):
+    pass
+
+
 def _retry(
-    func: typing.Callable[[], _T], max_retries: int = 5, wait_seconds: float = 1.0
+    func: typing.Callable[[], _T],
+    max_retries: int = 5,
+    wait_seconds: float = 1.0,
+    max_elapsed_seconds: float | None = None,
 ) -> _T:
+    if max_elapsed_seconds is None:
+        max_elapsed_seconds = _configured_retry_deadline_seconds()
+    deadline_at = time.monotonic() + max_elapsed_seconds
+    last_exception: Exception | None = None
+
     for i in range(max_retries):
+        if time.monotonic() >= deadline_at:
+            raise RetryDeadlineExceededError(
+                f"Retry deadline expired before attempt {i + 1} of {max_retries} "
+                f"for {func}."
+            ) from last_exception
+
         try:
             return func()
-        except Exception:
+        except Exception as ex:
+            last_exception = ex
             _logger.exception(f"Exception calling {func}.")
-            time.sleep(wait_seconds)
             if i == max_retries - 1:
                 raise
+
+            remaining_seconds = deadline_at - time.monotonic()
+            if remaining_seconds <= 0:
+                raise RetryDeadlineExceededError(
+                    f"Retry deadline expired after attempt {i + 1} of "
+                    f"{max_retries} for {func}."
+                ) from ex
+            time.sleep(min(wait_seconds, remaining_seconds))
     raise
+
+
+def _configured_retry_deadline_seconds() -> float:
+    raw_value = os.environ.get(
+        ORCHESTRATOR_RETRY_DEADLINE_ENV,
+        str(DEFAULT_ORCHESTRATOR_RETRY_DEADLINE_SECONDS),
+    )
+    try:
+        timeout = float(raw_value)
+    except (TypeError, ValueError):
+        _logger.warning(
+            "Invalid %s=%r; using default %.1fs",
+            ORCHESTRATOR_RETRY_DEADLINE_ENV,
+            raw_value,
+            DEFAULT_ORCHESTRATOR_RETRY_DEADLINE_SECONDS,
+        )
+        return DEFAULT_ORCHESTRATOR_RETRY_DEADLINE_SECONDS
+    if timeout <= 0:
+        _logger.warning(
+            "Invalid %s=%r; using default %.1fs",
+            ORCHESTRATOR_RETRY_DEADLINE_ENV,
+            raw_value,
+            DEFAULT_ORCHESTRATOR_RETRY_DEADLINE_SECONDS,
+        )
+        return DEFAULT_ORCHESTRATOR_RETRY_DEADLINE_SECONDS
+    return timeout
 
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):

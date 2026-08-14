@@ -2,7 +2,7 @@ import typing
 
 from kubernetes import client as k8s_client_lib
 
-from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
+from cloud_pipelines_backend.storage_providers import google_cloud_storage_with_timeout
 
 from . import kubernetes_launchers
 
@@ -23,6 +23,9 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesJobLauncher(
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         gcs_client: "storage.Client | None" = None,
+        gcs_request_timeout: (
+            google_cloud_storage_with_timeout.RequestTimeout | None
+        ) = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: kubernetes_launchers.PodPostProcessor | None = None,
@@ -44,8 +47,9 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesJobLauncher(
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
-                gcs_client
+            _storage_provider=google_cloud_storage_with_timeout.GoogleCloudStorageProviderWithTimeout(
+                gcs_client,
+                request_timeout=gcs_request_timeout,
             ),
             _create_volume_and_volume_mount=kubernetes_launchers._create_volume_and_volume_mount_google_cloud_storage,
         )
@@ -64,6 +68,9 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         gcs_client: "storage.Client | None" = None,
+        gcs_request_timeout: (
+            google_cloud_storage_with_timeout.RequestTimeout | None
+        ) = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: kubernetes_launchers.PodPostProcessor | None = None,
@@ -87,8 +94,9 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
             always_launch_jobs=always_launch_jobs,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
-                gcs_client
+            _storage_provider=google_cloud_storage_with_timeout.GoogleCloudStorageProviderWithTimeout(
+                gcs_client,
+                request_timeout=gcs_request_timeout,
             ),
             _create_volume_and_volume_mount=kubernetes_launchers._create_volume_and_volume_mount_google_cloud_storage,
         )

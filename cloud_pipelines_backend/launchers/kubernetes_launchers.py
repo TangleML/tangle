@@ -715,6 +715,9 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
         gcs_client: "storage.Client | None" = None,
+        gcs_request_timeout: (
+            "google_cloud_storage_with_timeout.RequestTimeout | None"
+        ) = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
@@ -724,7 +727,9 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             pod_postprocessors.append(pod_postprocessor)
         final_pod_postporocessor = _create_pod_postprocessor_stack(pod_postprocessors)
 
-        from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
+        from cloud_pipelines_backend.storage_providers import (
+            google_cloud_storage_with_timeout,
+        )
 
         super().__init__(
             namespace=namespace,
@@ -732,8 +737,9 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             api_client=api_client,
             request_timeout=request_timeout,
             pod_name_prefix=pod_name_prefix,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
-                gcs_client
+            _storage_provider=google_cloud_storage_with_timeout.GoogleCloudStorageProviderWithTimeout(
+                gcs_client,
+                request_timeout=gcs_request_timeout,
             ),
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
