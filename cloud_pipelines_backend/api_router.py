@@ -4,6 +4,8 @@ import dataclasses
 import typing
 import typing_extensions
 
+from alembic import migration as alembic_migration
+from alembic import operations as alembic_operations
 import fastapi
 import sqlalchemy
 from sqlalchemy import orm
@@ -13,6 +15,7 @@ import starlette.types
 from . import api_server_sql
 from . import backend_types_sql
 from . import component_library_api_server as components_api
+from . import database_migrations
 from . import database_ops
 from . import errors
 from .instrumentation import contextual_logging
@@ -624,6 +627,88 @@ def _setup_routes_internal(
         session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
     ) -> str:
         return session.get_bind().pool.status()
+
+    # ============================================================
+    # TEMPORARY TESTING APIs — DO NOT MERGE INTO master/main
+    # These endpoints exist solely for staging migration testing.
+    # Remove before merging the PR.
+    # ============================================================
+
+    @router.get(
+        "/api/admin/component_text_column_status",
+        tags=["components-admin"],
+    )
+    def get_component_text_column_status(
+        session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
+    ) -> dict[str, typing.Any]:
+        engine = session.get_bind()
+        inspector = sqlalchemy.inspect(engine)
+        db_columns = {
+            c["name"]: c for c in inspector.get_columns("component")
+        }
+        col_type = db_columns["text"]["type"]
+        return {
+            "table": "component",
+            "column": "text",
+            "type": str(col_type),
+            "length": getattr(col_type, "length", None),
+        }
+
+    @router.post(
+        "/api/admin/migrate_component_text_column_to_medium_text",
+        tags=["components-admin"],
+    )
+    def migrate_component_text_column_to_medium_text(
+        session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
+    ) -> dict[str, str]:
+        engine = session.get_bind()
+        database_migrations.migrate_component_text_column(db_engine=engine)
+        return {"status": "complete"}
+
+    @router.post(
+        "/api/admin/migrate_component_text_column_to_text",
+        tags=["components-admin"],
+    )
+    def migrate_component_text_column_to_text(
+        session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
+    ) -> dict[str, typing.Any]:
+        engine = session.get_bind()
+
+        # Safety check: refuse if any row would be truncated
+        with engine.connect() as conn:
+            result = conn.execute(
+                sqlalchemy.text(
+                    "SELECT COUNT(*) FROM component WHERE LENGTH(text) > 65535"
+                )
+            )
+            oversized_count = result.scalar()
+
+        if oversized_count and oversized_count > 0:
+            return fastapi.responses.JSONResponse(
+                status_code=409,
+                content={
+                    "status": "refused",
+                    "reason": f"{oversized_count} row(s) would be truncated (text > 64KB)",
+                },
+            )
+
+        # Downgrade MEDIUMTEXT -> TEXT
+        with engine.connect() as conn:
+            ctx = alembic_migration.MigrationContext.configure(conn)
+            op = alembic_operations.Operations(ctx)
+            with op.batch_alter_table("component") as batch_op:
+                batch_op.alter_column(
+                    "text",
+                    type_=sqlalchemy.Text(),
+                    existing_type=sqlalchemy.Text(
+                        length=backend_types_sql._MEDIUMTEXT_LENGTH
+                    ),
+                    existing_nullable=False,
+                    existing_server_default=None,
+                )
+            conn.commit()
+
+        return {"status": "complete", "downgraded_to": "TEXT"}
 
     # # Needs to be called after all routes have been added to the router
     # app.include_router(router)
