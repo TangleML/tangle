@@ -1017,14 +1017,17 @@ class OrchestratorService_Sql:
                         session=session, execution=execution_node
                     )
             else:
-                output_artifact_data_info_map = {
-                    output_name: _retry(
-                        lambda: self._storage_provider.make_uri(uri)
-                        .get_reader()
-                        .get_info()
-                    )
-                    for output_name, uri in output_artifact_uris.items()
-                }
+                with orchestrator_tracing.operation_span(
+                    "orchestrator.get_output_artifact_info"
+                ):
+                    output_artifact_data_info_map = {
+                        output_name: _retry(
+                            lambda: self._storage_provider.make_uri(uri)
+                            .get_reader()
+                            .get_info()
+                        )
+                        for output_name, uri in output_artifact_uris.items()
+                    }
                 new_output_artifact_data_map = {
                     output_name: bts.ArtifactData(
                         total_size=data_info.total_size,
