@@ -724,7 +724,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             pod_postprocessors.append(pod_postprocessor)
         final_pod_postporocessor = _create_pod_postprocessor_stack(pod_postprocessors)
 
-        from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
+        from ..instrumentation import gcs_tracing
 
         super().__init__(
             namespace=namespace,
@@ -732,9 +732,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             api_client=api_client,
             request_timeout=request_timeout,
             pod_name_prefix=pod_name_prefix,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
-                gcs_client
-            ),
+            _storage_provider=gcs_tracing.TracingGoogleCloudStorageProvider(gcs_client),
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,

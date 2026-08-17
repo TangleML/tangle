@@ -2,9 +2,8 @@ import typing
 
 from kubernetes import client as k8s_client_lib
 
-from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
-
 from . import kubernetes_launchers
+from ..instrumentation import gcs_tracing
 
 if typing.TYPE_CHECKING:
     from google.cloud import storage
@@ -44,9 +43,7 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesJobLauncher(
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
-                gcs_client
-            ),
+            _storage_provider=gcs_tracing.TracingGoogleCloudStorageProvider(gcs_client),
             _create_volume_and_volume_mount=kubernetes_launchers._create_volume_and_volume_mount_google_cloud_storage,
         )
 
@@ -87,8 +84,6 @@ class GoogleKubernetesEngine_UsingGoogleCloudStorage_KubernetesPodOrJobLauncher(
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
             always_launch_jobs=always_launch_jobs,
-            _storage_provider=google_cloud_storage.GoogleCloudStorageProvider(
-                gcs_client
-            ),
+            _storage_provider=gcs_tracing.TracingGoogleCloudStorageProvider(gcs_client),
             _create_volume_and_volume_mount=kubernetes_launchers._create_volume_and_volume_mount_google_cloud_storage,
         )
