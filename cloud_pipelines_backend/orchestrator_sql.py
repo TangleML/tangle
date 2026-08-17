@@ -25,6 +25,7 @@ from .launchers import interfaces as launcher_interfaces
 from .instrumentation import bugsnag_instrumentation
 from .instrumentation import contextual_logging
 from .instrumentation import metrics as app_metrics
+from .instrumentation import orchestrator_tracing
 
 _logger = logging.getLogger(__name__)
 
@@ -229,10 +230,16 @@ class OrchestratorService_Sql:
                     f"Before processing running container execution. Queries duration {queries_duration_ms}ms."
                 )
                 try:
-                    self.internal_process_one_running_execution(
-                        session=session,
-                        container_execution=running_container_execution,
-                    )
+                    with orchestrator_tracing.operation_span(
+                        "orchestrator.process_running_execution",
+                        attributes={
+                            "container_execution.id": running_container_execution.id
+                        },
+                    ):
+                        self.internal_process_one_running_execution(
+                            session=session,
+                            container_execution=running_container_execution,
+                        )
                 except Exception as ex:
                     _logger.exception("Error processing running container execution")
                     session.rollback()
