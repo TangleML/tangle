@@ -13,6 +13,6 @@ def reset_otel_providers():
     """
     yield
     trace._TRACER_PROVIDER_SET_ONCE._done = False
-    trace._TRACER_PROVIDER = trace.ProxyTracerProvider()
+    trace._TRACER_PROVIDER = None
     otel_metrics._internal._METER_PROVIDER_SET_ONCE._done = False
     otel_metrics._internal._METER_PROVIDER = None
