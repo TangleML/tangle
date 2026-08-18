@@ -2,8 +2,10 @@ import dataclasses
 import datetime
 import logging
 import typing
+import urllib.parse
 from typing import Any, Final, Optional
 
+import pydantic
 import sqlalchemy as sql
 from sqlalchemy import orm
 
@@ -1375,6 +1377,342 @@ class UserSettingsApiService:
 
 
 # endregion
+
+
+# ==== BannersApiService
+
+MAX_BANNER_TITLE_LENGTH = 120
+MAX_BANNER_BODY_LENGTH = 2000
+MAX_BANNER_ACTION_TEXT_LENGTH = 80
+# Must not exceed the length of the `Banner.action_url` column.
+MAX_BANNER_ACTION_URL_LENGTH = 2048
+
+
+def _convert_datetime_to_naive_utc(
+    value: datetime.datetime | None,
+) -> datetime.datetime | None:
+    """Converts a datetime to the "naive UTC" format that the DB stores.
+
+    Same conversion as `filter_query_sql._time_range_to_clause`: an aware datetime is
+    converted to UTC and then stripped of its timezone label, so that a `starts_at` of
+    `2026-01-01T12:00:00+02:00` is stored as `10:00`, not as `12:00`. A naive datetime
+    is already in the stored format, so it is returned unchanged (`bts.UtcDateTime`
+    makes the same assumption when reading such values back).
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def _validate_banner_title(title: str) -> str:
+    title = (title or "").strip()
+    if not title:
+        raise errors.ApiValidationError("Banner title must not be empty.")
+    if len(title) > MAX_BANNER_TITLE_LENGTH:
+        raise errors.ApiValidationError(
+            f"Banner title must be at most {MAX_BANNER_TITLE_LENGTH} characters, but got {len(title)}."
+        )
+    return title
+
+
+def _validate_banner_body(body: str) -> str:
+    body = (body or "").strip()
+    if not body:
+        raise errors.ApiValidationError("Banner body must not be empty.")
+    if len(body) > MAX_BANNER_BODY_LENGTH:
+        raise errors.ApiValidationError(
+            f"Banner body must be at most {MAX_BANNER_BODY_LENGTH} characters, but got {len(body)}."
+        )
+    return body
+
+
+def _validate_banner_action_url(action_url: str | None) -> str | None:
+    if action_url is None:
+        return None
+    action_url = action_url.strip()
+    if not action_url:
+        return None
+    if len(action_url) > MAX_BANNER_ACTION_URL_LENGTH:
+        raise errors.ApiValidationError(
+            f"Banner action URL must be at most {MAX_BANNER_ACTION_URL_LENGTH} characters, but got {len(action_url)}."
+        )
+    parsed_url = urllib.parse.urlparse(action_url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+        raise errors.ApiValidationError(
+            f"Banner action URL must be an absolute http or https URL, but got {action_url!r}."
+        )
+    return action_url
+
+
+def _validate_banner_action_text(action_text: str | None) -> str | None:
+    if action_text is None:
+        return None
+    action_text = action_text.strip()
+    if not action_text:
+        return None
+    if len(action_text) > MAX_BANNER_ACTION_TEXT_LENGTH:
+        raise errors.ApiValidationError(
+            f"Banner action text must be at most {MAX_BANNER_ACTION_TEXT_LENGTH} characters, but got {len(action_text)}."
+        )
+    return action_text
+
+
+def _validate_banner_cross_field_constraints(banner: bts.Banner) -> None:
+    if banner.action_text and not banner.action_url:
+        raise errors.ApiValidationError(
+            "Banner action text is only meaningful together with an action URL."
+        )
+    # A value loaded from the DB is timezone-aware, while a value that was just
+    # assigned is naive, so both are normalized before being compared.
+    starts_at = _convert_datetime_to_naive_utc(banner.starts_at)
+    ends_at = _convert_datetime_to_naive_utc(banner.ends_at)
+    if starts_at is not None and ends_at is not None and ends_at <= starts_at:
+        raise errors.ApiValidationError(
+            f"Banner ends_at ({ends_at}) must be after starts_at ({starts_at})."
+        )
+
+
+def _get_public_banner_fields(banner: bts.Banner) -> dict[str, Any]:
+    return dict(
+        id=banner.id,
+        title=banner.title,
+        body=banner.body,
+        variant=banner.variant,
+        action_url=banner.action_url,
+        action_text=banner.action_text,
+        starts_at=banner.starts_at,
+        ends_at=banner.ends_at,
+        is_dismissible=banner.is_dismissible,
+        created_at=banner.created_at,
+        updated_at=banner.updated_at,
+    )
+
+
+@dataclasses.dataclass(kw_only=True)
+class BannerResponse:
+    """A banner as exposed to all users.
+
+    `body` is untrusted Markdown that the backend does not sanitize (see `bts.Banner`).
+    """
+
+    id: bts.IdType
+    title: str
+    body: str
+    variant: bts.BannerVariant
+    action_url: str | None = None
+    action_text: str | None = None
+    starts_at: datetime.datetime | None = None
+    ends_at: datetime.datetime | None = None
+    is_dismissible: bool = False
+    created_at: datetime.datetime | None = None
+    updated_at: datetime.datetime | None = None
+
+    @staticmethod
+    def from_db(banner: bts.Banner) -> "BannerResponse":
+        return BannerResponse(**_get_public_banner_fields(banner))
+
+
+@dataclasses.dataclass(kw_only=True)
+class AdminBannerResponse(BannerResponse):
+    """A banner including the fields that are only exposed to admins."""
+
+    is_enabled: bool = True
+    created_by: str | None = None
+    updated_by: str | None = None
+    deleted_at: datetime.datetime | None = None
+
+    @staticmethod
+    def from_db(banner: bts.Banner) -> "AdminBannerResponse":
+        return AdminBannerResponse(
+            **_get_public_banner_fields(banner),
+            is_enabled=banner.is_enabled,
+            created_by=banner.created_by,
+            updated_by=banner.updated_by,
+            deleted_at=banner.deleted_at,
+        )
+
+
+@dataclasses.dataclass(kw_only=True)
+class ListBannersResponse:
+    banners: list[BannerResponse]
+
+
+@dataclasses.dataclass(kw_only=True)
+class ListAdminBannersResponse:
+    banners: list[AdminBannerResponse]
+
+
+@dataclasses.dataclass(kw_only=True)
+class CreateBannerRequest:
+    title: str
+    body: str
+    variant: bts.BannerVariant
+    action_url: str | None = None
+    action_text: str | None = None
+    # `AwareDatetime` requires timezone info (e.g. "2026-01-01T00:00:00Z"), so that
+    # the intended point in time is never guessed. Same as `filter_query_models`.
+    starts_at: pydantic.AwareDatetime | None = None
+    ends_at: pydantic.AwareDatetime | None = None
+    is_enabled: bool = True
+    is_dismissible: bool = False
+
+
+@dataclasses.dataclass(kw_only=True)
+class UpdateBannerRequest:
+    """A partial banner update. The fields that are not set (None) are not changed."""
+
+    title: str | None = None
+    body: str | None = None
+    variant: bts.BannerVariant | None = None
+    action_url: str | None = None
+    action_text: str | None = None
+    starts_at: pydantic.AwareDatetime | None = None
+    ends_at: pydantic.AwareDatetime | None = None
+    is_enabled: bool | None = None
+    is_dismissible: bool | None = None
+
+
+class BannersApiService_Sql:
+
+    def list_active(self, session: orm.Session) -> ListBannersResponse:
+        current_time = _get_current_time()
+        query = (
+            sql.select(bts.Banner)
+            .where(
+                bts.Banner.deleted_at.is_(None),
+                bts.Banner.is_enabled == True,
+                sql.or_(
+                    bts.Banner.starts_at.is_(None),
+                    bts.Banner.starts_at <= current_time,
+                ),
+                sql.or_(
+                    bts.Banner.ends_at.is_(None),
+                    bts.Banner.ends_at > current_time,
+                ),
+            )
+            .order_by(
+                # `starts_at DESC NULLS LAST`. The NULLS LAST modifier is not
+                # portable (MySQL does not support it), so the banners without
+                # `starts_at` are sorted last explicitly (False sorts before True).
+                bts.Banner.starts_at.is_(None),
+                bts.Banner.starts_at.desc(),
+                bts.Banner.created_at.desc(),
+                # MySQL `DATETIME` only has second precision, so `id` is needed to
+                # keep the order of banners with equal timestamps deterministic.
+                bts.Banner.id,
+            )
+        )
+        banners = session.scalars(query).all()
+        return ListBannersResponse(
+            banners=[BannerResponse.from_db(banner) for banner in banners]
+        )
+
+    def list_all(
+        self, session: orm.Session, include_deleted: bool = False
+    ) -> ListAdminBannersResponse:
+        query = sql.select(bts.Banner).order_by(
+            bts.Banner.created_at.desc(), bts.Banner.id
+        )
+        if not include_deleted:
+            query = query.where(bts.Banner.deleted_at.is_(None))
+        banners = session.scalars(query).all()
+        return ListAdminBannersResponse(
+            banners=[AdminBannerResponse.from_db(banner) for banner in banners]
+        )
+
+    def get(self, session: orm.Session, id: bts.IdType) -> AdminBannerResponse:
+        banner_row = session.get(bts.Banner, id)
+        if not banner_row:
+            raise errors.ItemNotFoundError(f"Banner with {id=} does not exist.")
+        return AdminBannerResponse.from_db(banner_row)
+
+    def create(
+        self,
+        session: orm.Session,
+        banner: CreateBannerRequest,
+        user_name: str | None = None,
+    ) -> AdminBannerResponse:
+        current_time = _get_current_time()
+        banner_row = bts.Banner(
+            title=_validate_banner_title(banner.title),
+            body=_validate_banner_body(banner.body),
+            variant=banner.variant,
+            action_url=_validate_banner_action_url(banner.action_url),
+            action_text=_validate_banner_action_text(banner.action_text),
+            starts_at=_convert_datetime_to_naive_utc(banner.starts_at),
+            ends_at=_convert_datetime_to_naive_utc(banner.ends_at),
+            is_enabled=banner.is_enabled,
+            is_dismissible=banner.is_dismissible,
+            created_by=user_name,
+            updated_by=user_name,
+            created_at=current_time,
+            updated_at=current_time,
+        )
+        _validate_banner_cross_field_constraints(banner_row)
+        session.add(banner_row)
+        session.commit()
+        session.refresh(banner_row)
+        return AdminBannerResponse.from_db(banner_row)
+
+    def update(
+        self,
+        session: orm.Session,
+        id: bts.IdType,
+        banner: UpdateBannerRequest,
+        user_name: str | None = None,
+    ) -> AdminBannerResponse:
+        banner_row = session.get(bts.Banner, id)
+        if not banner_row:
+            raise errors.ItemNotFoundError(f"Banner with {id=} does not exist.")
+        if banner_row.deleted_at is not None:
+            raise errors.ApiValidationError(
+                f"Banner with {id=} is deleted and cannot be updated."
+            )
+        if banner.title is not None:
+            banner_row.title = _validate_banner_title(banner.title)
+        if banner.body is not None:
+            banner_row.body = _validate_banner_body(banner.body)
+        if banner.variant is not None:
+            banner_row.variant = banner.variant
+        if banner.action_url is not None:
+            banner_row.action_url = _validate_banner_action_url(banner.action_url)
+        if banner.action_text is not None:
+            banner_row.action_text = _validate_banner_action_text(banner.action_text)
+        if banner.starts_at is not None:
+            banner_row.starts_at = _convert_datetime_to_naive_utc(banner.starts_at)
+        if banner.ends_at is not None:
+            banner_row.ends_at = _convert_datetime_to_naive_utc(banner.ends_at)
+        if banner.is_enabled is not None:
+            banner_row.is_enabled = banner.is_enabled
+        if banner.is_dismissible is not None:
+            banner_row.is_dismissible = banner.is_dismissible
+        _validate_banner_cross_field_constraints(banner_row)
+        banner_row.updated_by = user_name
+        banner_row.updated_at = _get_current_time()
+        session.commit()
+        session.refresh(banner_row)
+        return AdminBannerResponse.from_db(banner_row)
+
+    def delete(
+        self,
+        session: orm.Session,
+        id: bts.IdType,
+        user_name: str | None = None,
+    ) -> AdminBannerResponse:
+        """Soft-deletes the banner. Banners are never removed from the DB."""
+        banner_row = session.get(bts.Banner, id)
+        if not banner_row:
+            raise errors.ItemNotFoundError(f"Banner with {id=} does not exist.")
+        if banner_row.deleted_at is None:
+            current_time = _get_current_time()
+            banner_row.deleted_at = current_time
+            banner_row.updated_by = user_name
+            banner_row.updated_at = current_time
+            session.commit()
+            session.refresh(banner_row)
+        return AdminBannerResponse.from_db(banner_row)
 
 
 # ============

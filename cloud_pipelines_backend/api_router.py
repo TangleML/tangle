@@ -588,6 +588,90 @@ def _setup_routes_internal(
         )
     )
 
+    ### Banner routes
+
+    banner_service = api_server_sql.BannersApiService_Sql()
+
+    # `default_config` is not used for the banner routes because it excludes the
+    # fields that are null, which the banner responses need to include.
+
+    @router.get("/api/banners/active", tags=["banners"])
+    def get_active_banners(
+        session: SessionDep,
+        response: fastapi.Response,
+    ) -> api_server_sql.ListBannersResponse:
+        # A banner can start or expire at any moment, so responses must not be cached.
+        response.headers["Cache-Control"] = "no-store"
+        return banner_service.list_active(session=session)
+
+    admin_banner_write_dependencies = [
+        ensure_admin_user_dependency,
+        fastapi.Depends(check_not_readonly),
+    ]
+
+    @router.get(
+        "/api/admin/banners",
+        tags=["banners"],
+        dependencies=[ensure_admin_user_dependency],
+    )
+    def admin_list_banners(
+        session: SessionDep,
+        include_deleted: bool = False,
+    ) -> api_server_sql.ListAdminBannersResponse:
+        return banner_service.list_all(session=session, include_deleted=include_deleted)
+
+    @router.post(
+        "/api/admin/banners",
+        tags=["banners"],
+        dependencies=admin_banner_write_dependencies,
+    )
+    def admin_create_banner(
+        session: SessionDep,
+        banner: api_server_sql.CreateBannerRequest,
+        user_name: typing.Annotated[str | None, get_user_name_dependency],
+    ) -> api_server_sql.AdminBannerResponse:
+        return banner_service.create(
+            session=session, banner=banner, user_name=user_name
+        )
+
+    @router.get(
+        "/api/admin/banners/{id}",
+        tags=["banners"],
+        dependencies=[ensure_admin_user_dependency],
+    )
+    def admin_get_banner(
+        session: SessionDep,
+        id: backend_types_sql.IdType,
+    ) -> api_server_sql.AdminBannerResponse:
+        return banner_service.get(session=session, id=id)
+
+    @router.patch(
+        "/api/admin/banners/{id}",
+        tags=["banners"],
+        dependencies=admin_banner_write_dependencies,
+    )
+    def admin_update_banner(
+        session: SessionDep,
+        id: backend_types_sql.IdType,
+        banner: api_server_sql.UpdateBannerRequest,
+        user_name: typing.Annotated[str | None, get_user_name_dependency],
+    ) -> api_server_sql.AdminBannerResponse:
+        return banner_service.update(
+            session=session, id=id, banner=banner, user_name=user_name
+        )
+
+    @router.delete(
+        "/api/admin/banners/{id}",
+        tags=["banners"],
+        dependencies=admin_banner_write_dependencies,
+    )
+    def admin_delete_banner(
+        session: SessionDep,
+        id: backend_types_sql.IdType,
+        user_name: typing.Annotated[str | None, get_user_name_dependency],
+    ) -> api_server_sql.AdminBannerResponse:
+        return banner_service.delete(session=session, id=id, user_name=user_name)
+
     ### Admin routes
 
     @router.put(
