@@ -57,6 +57,10 @@ MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
 SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
     "tangleml.com/launchers/kubernetes/security_context.capability.IPC_LOCK"
 )
+JOB_DISRUPTION_RETRIES_ANNOTATION_KEY = (
+    "tangleml.com/launchers/kubernetes/job/disruption_retries"
+)
+_JOB_MAX_DISRUPTION_RETRIES = 10
 
 
 # Multi-node constants
@@ -996,6 +1000,70 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         self._delete_pod()
 
 
+def _configure_job_disruption_retries(
+    job_spec: k8s_client_lib.V1JobSpec,
+    *,
+    annotations: dict[str, Any] | None,
+) -> None:
+    """Configure bounded retries for Kubernetes-marked pod disruptions.
+
+    The policy is opt-in and leaves existing Jobs at zero retries. With retries
+    enabled, ``DisruptionTarget`` pods consume the finite retry budget and are
+    replaced, while a non-zero exit from the main container fails its index
+    immediately. The numeric backoff is also a finite guard for unclassified
+    infrastructure failures that do not expose a main-container exit code.
+    """
+    disruption_retries_value = (annotations or {}).get(
+        JOB_DISRUPTION_RETRIES_ANNOTATION_KEY, "0"
+    )
+    try:
+        disruption_retries = int(disruption_retries_value)
+    except (TypeError, ValueError) as ex:
+        raise interfaces.LauncherError(
+            f"Invalid {JOB_DISRUPTION_RETRIES_ANNOTATION_KEY}={disruption_retries_value!r}; "
+            f"expected an integer between 0 and {_JOB_MAX_DISRUPTION_RETRIES}."
+        ) from ex
+    if str(disruption_retries) != str(disruption_retries_value).strip():
+        raise interfaces.LauncherError(
+            f"Invalid {JOB_DISRUPTION_RETRIES_ANNOTATION_KEY}={disruption_retries_value!r}; "
+            f"expected an integer between 0 and {_JOB_MAX_DISRUPTION_RETRIES}."
+        )
+    if not 0 <= disruption_retries <= _JOB_MAX_DISRUPTION_RETRIES:
+        raise interfaces.LauncherError(
+            f"Invalid {JOB_DISRUPTION_RETRIES_ANNOTATION_KEY}={disruption_retries!r}; "
+            f"expected an integer between 0 and {_JOB_MAX_DISRUPTION_RETRIES}."
+        )
+
+    job_spec.backoff_limit_per_index = disruption_retries
+    if not disruption_retries:
+        return
+
+    job_spec.pod_failure_policy = k8s_client_lib.V1PodFailurePolicy(
+        rules=[
+            k8s_client_lib.V1PodFailurePolicyRule(
+                action="Count",
+                on_pod_conditions=[
+                    k8s_client_lib.V1PodFailurePolicyOnPodConditionsPattern(
+                        type="DisruptionTarget",
+                        status="True",
+                    )
+                ],
+            ),
+            k8s_client_lib.V1PodFailurePolicyRule(
+                action="FailIndex",
+                on_exit_codes=k8s_client_lib.V1PodFailurePolicyOnExitCodesRequirement(
+                    container_name=_MAIN_CONTAINER_NAME,
+                    operator="NotIn",
+                    values=[0],
+                ),
+            ),
+        ]
+    )
+    # Required when podFailurePolicy is configured. Waiting for a fully failed
+    # pod also makes the old/new attempt boundary unambiguous.
+    job_spec.pod_replacement_policy = "Failed"
+
+
 class _KubernetesJobLauncher(
     _KubernetesContainerLauncherBase,
     interfaces.ContainerTaskLauncher["LaunchedKubernetesJob"],
@@ -1198,6 +1266,20 @@ class _KubernetesJobLauncher(
             # This requires the service name to be known.
             pod.spec.subdomain = explicit_service_name
 
+        job_spec = k8s_client_lib.V1JobSpec(
+            template=k8s_client_lib.V1PodTemplateSpec(
+                metadata=pod.metadata,
+                spec=pod.spec,
+            ),
+            # Let's always use Indexed Jobs. There are no downsides.
+            completion_mode="Indexed",
+            # Without explicit max_failed_indexes=0, the job waits for all pods to end and then succeeds ("Complete") despite pod failures!
+            max_failed_indexes=0,
+            completions=num_nodes,
+            parallelism=num_nodes,
+        )
+        _configure_job_disruption_retries(job_spec, annotations=annotations)
+
         job = k8s_client_lib.V1Job(
             metadata=k8s_client_lib.V1ObjectMeta(
                 name=explicit_job_name,
@@ -1205,20 +1287,7 @@ class _KubernetesJobLauncher(
                 # annotations=self._pod_annotations,
                 # labels=self._pod_labels,
             ),
-            spec=k8s_client_lib.V1JobSpec(
-                template=k8s_client_lib.V1PodTemplateSpec(
-                    metadata=pod.metadata,
-                    spec=pod.spec,
-                ),
-                # Let's always use Indexed Jobs. There are no downsides.
-                completion_mode="Indexed",
-                # backoff_limit=0,
-                backoff_limit_per_index=0,
-                # Without explicit max_failed_indexes=0, the job waits for all pods to end and then succeeds ("Complete") despite pod failures!
-                max_failed_indexes=0,
-                completions=num_nodes,
-                parallelism=num_nodes,
-            ),
+            spec=job_spec,
         )
 
         job = self._transform_job_before_launching(job=job, annotations=annotations)
