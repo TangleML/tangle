@@ -36,7 +36,18 @@ _MAIN_CONTAINER_NAME = "main"
 
 # Kubernetes annotation keys. (Has strict naming policy. Single slash only etc.)
 _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY = "cloud-pipelines.net"
+_TANGLE_KUBERNETES_LABEL_KEY = "tangle.tangleml.com"
 _KUBERNETES_LAUNCHER_ANNOTATION_KEY = "cloud-pipelines.net/launchers.kubernetes"
+
+_DEFAULT_KUBERNETES_ANNOTATIONS = {
+    _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY: "true",
+    _TANGLE_KUBERNETES_LABEL_KEY: "true",
+    _KUBERNETES_LAUNCHER_ANNOTATION_KEY: "true",
+}
+_DEFAULT_KUBERNETES_LABELS = {
+    _TANGLE_KUBERNETES_LABEL_KEY: "true",
+}
+
 # ComponentSpec annotation keys
 RESOURCES_CPU_ANNOTATION_KEY = "cloud-pipelines.net/launchers/generic/resources.cpu"
 RESOURCES_MEMORY_ANNOTATION_KEY = (
@@ -180,11 +191,8 @@ class _KubernetesContainerLauncherBase:
         self._storage_provider = _storage_provider
         self._request_timeout = request_timeout
         self._pod_name_prefix = pod_name_prefix
-        self._pod_labels = pod_labels
-        self._pod_annotations = {
-            _CLOUD_PIPELINES_KUBERNETES_ANNOTATION_KEY: "true",
-            _KUBERNETES_LAUNCHER_ANNOTATION_KEY: "true",
-        } | (pod_annotations or {})
+        self._pod_labels = _DEFAULT_KUBERNETES_LABELS | (pod_labels or {})
+        self._pod_annotations = _DEFAULT_KUBERNETES_ANNOTATIONS | (pod_annotations or {})
         self._pod_postprocessor = pod_postprocessor
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
 
@@ -1173,6 +1181,8 @@ class _KubernetesJobLauncher(
                 metadata=k8s_client_lib.V1ObjectMeta(
                     name=explicit_service_name,
                     namespace=namespace,
+                    annotations=_DEFAULT_KUBERNETES_ANNOTATIONS,
+                    labels=_DEFAULT_KUBERNETES_LABELS,
                 ),
                 spec=k8s_client_lib.V1ServiceSpec(
                     # "Headless" service.
@@ -1203,7 +1213,9 @@ class _KubernetesJobLauncher(
                 name=explicit_job_name,
                 namespace=namespace,
                 # annotations=self._pod_annotations,
+                annotations=_DEFAULT_KUBERNETES_ANNOTATIONS,
                 # labels=self._pod_labels,
+                labels=_DEFAULT_KUBERNETES_LABELS,
             ),
             spec=k8s_client_lib.V1JobSpec(
                 template=k8s_client_lib.V1PodTemplateSpec(
