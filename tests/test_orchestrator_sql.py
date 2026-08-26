@@ -84,17 +84,33 @@ def _make_launched_container_mock() -> mock.MagicMock:
     return mock.MagicMock(return_value=launched_container_mock)
 
 
-def _process_queued_executions(
+def _make_orchestrator(
+    *,
     session_factory: Callable[[], orm.Session],
     launched_container_mock: mock.MagicMock,
-    max_number_of_executions: int = 20,
-) -> None:
-    orchestrator = orchestrator_sql.OrchestratorService_Sql(
+    queued_execution_interceptor: (
+        orchestrator_sql.QueuedExecutionInterceptor | None
+    ) = None,
+) -> orchestrator_sql.OrchestratorService_Sql:
+    """An orchestrator wired to mocks, launching through `launched_container_mock`."""
+    return orchestrator_sql.OrchestratorService_Sql(
         session_factory=session_factory,
         launcher=mock.MagicMock(launch_container_task=launched_container_mock),
         storage_provider=mock.MagicMock(),
         data_root_uri="file:///tmp/artifacts",
         logs_root_uri="file:///tmp/logs",
+        queued_execution_interceptor=queued_execution_interceptor,
+    )
+
+
+def _process_queued_executions(
+    session_factory: Callable[[], orm.Session],
+    launched_container_mock: mock.MagicMock,
+    max_number_of_executions: int = 20,
+) -> None:
+    orchestrator = _make_orchestrator(
+        session_factory=session_factory,
+        launched_container_mock=launched_container_mock,
     )
     session = session_factory()
     # Process the queued queue until it is drained. A bound guards against the
@@ -119,7 +135,7 @@ def _output_argument(task_id: str, output_name: str) -> structures.TaskOutputArg
 
 class TestQueuedExecutionSystemErrorSkipsDownstream:
     """Test orphans with SYSTEM_ERROR and WAITING_FOR_UPSTREAM.
-    
+        
     Currently covers the queued-execution failure handler
     (``OrchestratorService_Sql.internal_process_queued_executions_queue``): when
     processing a queued execution raises, the execution is marked ``SYSTEM_ERROR``
@@ -328,3 +344,174 @@ class TestQueuedExecutionSystemErrorSkipsDownstream:
             downstream.container_execution_status
             == bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
         )
+
+
+# --------------------------------------------------------------------------- #
+# The sweep must not select parked (UNINITIALIZED) executions.
+# --------------------------------------------------------------------------- #
+
+
+class TestSweepIgnoresUninitialized:
+    """`UNINITIALIZED` is off the launch path, not merely behind it.
+
+    Downstream (Oasis quota groups) parks an execution by setting it back to
+    `UNINITIALIZED`. That only hides the node if the sweep stops selecting the
+    status: were it still selected, the node would be picked again on the next
+    tick, redo everything above the gate, re-park -- and with no `ORDER BY` the
+    same low-id node would be chosen every time, spending the whole sweep budget
+    on one parked execution.
+    """
+
+    def test_uninitialized_execution_is_not_selected(self) -> None:
+        root_task = _make_graph_task_spec(
+            tasks={
+                "parked": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component()
+                    ),
+                ),
+            },
+        )
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, root_task)
+        launched_container_mock = _make_launched_container_mock()
+
+        # Park it, exactly as the downstream interceptor will.
+        session = session_factory()
+        _get_execution_node(session, "parked").container_execution_status = (
+            bts.ContainerExecutionStatus.UNINITIALIZED
+        )
+        session.commit()
+
+        orchestrator = _make_orchestrator(
+            session_factory=session_factory,
+            launched_container_mock=launched_container_mock,
+        )
+        selected = orchestrator.internal_process_queued_executions_queue(
+            session=session_factory()
+        )
+
+        assert selected is False, "the sweep selected a parked execution"
+        launched_container_mock.assert_not_called()
+        assert (
+            _get_execution_node(session_factory(), "parked").container_execution_status
+            == bts.ContainerExecutionStatus.UNINITIALIZED
+        ), "a parked execution must be left exactly as it was found"
+
+    def test_queued_execution_is_still_selected(self) -> None:
+        """The other half: narrowing the selection set did not break the sweep."""
+        root_task = _make_graph_task_spec(
+            tasks={
+                "runnable": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component()
+                    ),
+                ),
+            },
+        )
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, root_task)
+        launched_container_mock = _make_launched_container_mock()
+
+        orchestrator = _make_orchestrator(
+            session_factory=session_factory,
+            launched_container_mock=launched_container_mock,
+        )
+        selected = orchestrator.internal_process_queued_executions_queue(
+            session=session_factory()
+        )
+
+        assert selected is True
+        launched_container_mock.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# The interceptor seam: a downstream implementation can take an execution over.
+# --------------------------------------------------------------------------- #
+
+
+class _StubInterceptor:
+    """Records what it was called with and answers with a fixed verdict.
+
+    Stands in for the downstream (Oasis) quota gate. When it claims an execution it
+    behaves as the protocol requires -- sets a status of its own choosing and commits --
+    so the test exercises the contract, not just the branch.
+    """
+
+    def __init__(self, *, take_over: bool) -> None:
+        self._take_over = take_over
+        self.calls: list[str] = []
+
+    def intercept(self, *, session: orm.Session, execution: bts.ExecutionNode) -> bool:
+        self.calls.append(execution.id)
+        if not self._take_over:
+            return False
+        execution.container_execution_status = (
+            bts.ContainerExecutionStatus.UNINITIALIZED
+        )
+        session.commit()
+        return True
+
+
+def _single_task_pipeline() -> structures.TaskSpec:
+    return _make_graph_task_spec(
+        tasks={
+            "task": structures.TaskSpec(
+                component_ref=structures.ComponentReference(
+                    spec=_make_container_component()
+                ),
+            ),
+        },
+    )
+
+
+class TestQueuedExecutionInterceptor:
+    """`intercept` returning True must stop the launch, and False must change nothing."""
+
+    def test_true_takes_the_execution_off_the_launch_path(self) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launched_container_mock = _make_launched_container_mock()
+        interceptor = _StubInterceptor(take_over=True)
+
+        orchestrator = _make_orchestrator(
+            session_factory=session_factory,
+            launched_container_mock=launched_container_mock,
+            queued_execution_interceptor=interceptor,
+        )
+        orchestrator.internal_process_queued_executions_queue(session=session_factory())
+
+        assert len(interceptor.calls) == 1
+        launched_container_mock.assert_not_called()
+        node = _get_execution_node(session_factory(), "task")
+        assert (
+            node.container_execution_status
+            == bts.ContainerExecutionStatus.UNINITIALIZED
+        ), "the status the interceptor committed must survive"
+        assert node.container_execution is None, "no container may have been created"
+
+    def test_false_launches_exactly_as_before(self) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launched_container_mock = _make_launched_container_mock()
+        interceptor = _StubInterceptor(take_over=False)
+
+        orchestrator = _make_orchestrator(
+            session_factory=session_factory,
+            launched_container_mock=launched_container_mock,
+            queued_execution_interceptor=interceptor,
+        )
+        orchestrator.internal_process_queued_executions_queue(session=session_factory())
+
+        assert len(interceptor.calls) == 1
+        launched_container_mock.assert_called_once()
+
+    def test_no_interceptor_launches_exactly_as_before(self) -> None:
+        """The default. Every existing caller passes nothing and must be unaffected."""
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launched_container_mock = _make_launched_container_mock()
+
+        _process_queued_executions(session_factory, launched_container_mock)
+
+        launched_container_mock.assert_called_once()
