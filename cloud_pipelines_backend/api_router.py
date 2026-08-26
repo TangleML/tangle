@@ -13,6 +13,7 @@ import starlette.types
 from . import api_server_sql
 from . import backend_types_sql
 from . import component_library_api_server as components_api
+from . import compute_resources
 from . import database_ops
 from . import errors
 from .instrumentation import contextual_logging
@@ -139,6 +140,19 @@ def _setup_routes_internal(
         return fastapi.responses.JSONResponse(
             status_code=409,
             content={"message": str(exc)},
+        )
+
+    @app.exception_handler(errors.UnsupportedGpuError)
+    def handle_unsupported_gpu_error(
+        request: fastapi.Request, exc: errors.UnsupportedGpuError
+    ):
+        return fastapi.responses.JSONResponse(
+            status_code=fastapi.status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={
+                "reason": "unsupported_gpu",
+                "detail": str(exc),
+                "unsupported_gpus": exc.unsupported_gpus,
+            },
         )
 
     @app.exception_handler(errors.ApiValidationError)
@@ -340,6 +354,11 @@ def _setup_routes_internal(
     router.get("/api/pipeline_runs/", tags=["pipelineRuns"], **default_config)(
         inject_session_dependency(list_pipeline_runs_func)
     )
+    router.get(
+        "/api/pipeline_runs/capabilities",
+        tags=["pipelineRuns"],
+        **default_config,
+    )(compute_resources.get_pipeline_run_capabilities)
     router.get("/api/pipeline_runs/{id}", tags=["pipelineRuns"], **default_config)(
         inject_session_dependency(pipeline_run_service.get)
     )

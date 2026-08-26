@@ -26,3 +26,10 @@ class ApiValidationError(Exception):
     """Base for all filter/annotation validation errors -> 422."""
 
     pass
+
+
+class UnsupportedGpuError(ApiValidationError):
+    def __init__(self, *, unsupported_gpus: list[str]):
+        self.unsupported_gpus = unsupported_gpus
+        gpu_list = ", ".join(repr(gpu) for gpu in unsupported_gpus)
+        super().__init__(f"Unsupported GPU resource(s): {gpu_list}.")
