@@ -1,5 +1,6 @@
 import datetime
 import json
+import time
 from collections.abc import Callable
 
 import pytest
@@ -1957,3 +1958,44 @@ class TestPipelineRunServiceGet:
             assert summary.total_executions == 2
             assert summary.ended_executions == 1
             assert summary.has_ended is False
+
+
+class TestTerminateUpdatesExecutionNodeUpdatedAt:
+    """Regression test for the terminate() / updated_at gap: terminate()
+    only ever sets a running descendant's extra_data["desired_state"], it
+    never touches container_execution_status directly -- so a listener
+    scoped to status transitions would miss this. onupdate (fires on any
+    UPDATE issued for the row) covers it instead."""
+
+    def test_terminate_bumps_running_descendant_execution_node_updated_at(
+        self,
+    ) -> None:
+        session_factory = _initialize_db_and_get_session_factory()
+        service = api_server_sql.PipelineRunsApiService_Sql()
+
+        with session_factory() as session:
+            root = _create_execution_node(session=session)
+            running_child = _create_execution_node(
+                session=session,
+                parent=root,
+                status=bts.ContainerExecutionStatus.RUNNING,
+            )
+            _link_ancestor(
+                session=session, execution_node=running_child, ancestor_node=root
+            )
+            run = _create_pipeline_run(session=session, root_execution=root)
+            run_id = run.id
+            child_id = running_child.id
+            session.commit()
+            first_updated_at = running_child.updated_at
+        assert first_updated_at is not None
+
+        time.sleep(0.001)
+        with session_factory() as session:
+            service.terminate(session=session, id=run_id, skip_user_check=True)
+
+        with session_factory() as session:
+            child = session.get(bts.ExecutionNode, child_id)
+            assert child.extra_data["desired_state"] == "TERMINATED"
+            assert child.updated_at is not None
+            assert child.updated_at > first_updated_at
