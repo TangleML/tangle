@@ -104,6 +104,11 @@ def migrate_db(
             index.create(db_engine, checkfirst=True)
             break
 
+    for index in bts.PipelineRun.__table__.indexes:
+        if index.name == bts.PipelineRun._IX_PR_CREATED_AT_DESC_ID_DESC:
+            index.create(db_engine, checkfirst=True)
+            break
+
     database_migrations.migrate_secret_value_column(db_engine=db_engine)
 
     if do_skip_backfill:
