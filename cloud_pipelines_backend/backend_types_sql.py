@@ -98,6 +98,11 @@ class UtcDateTime(sql.TypeDecorator):
 
 _STR_MAX_LENGTH: Final[int] = 255
 
+# MySQL MEDIUMTEXT: 2^24 = 16,777,215 bytes
+# With utf8mb4 charset (4 bytes/char worst case): ~4,194,303 characters
+# With ASCII-only content (1 byte/char): ~16,777,215 characters
+_MEDIUMTEXT_LENGTH: Final[int] = 2**24
+
 
 class _TableBase(orm.MappedAsDataclass, orm.DeclarativeBase, kw_only=True):
     # Not really needed due to kw_only=True
