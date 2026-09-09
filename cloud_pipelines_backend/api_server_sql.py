@@ -106,6 +106,59 @@ class PipelineRunsApiService_Sql:
         if key.startswith(filter_query_sql.SYSTEM_KEY_PREFIX):
             raise errors.ApiValidationError(self._SYSTEM_KEY_RESERVED_MSG)
 
+    def _create_in_transaction(
+        self,
+        session: orm.Session,
+        root_task: structures.TaskSpec,
+        # Component library to avoid repeating component specs inside task specs
+        components: Optional[list[structures.ComponentReference]] = None,
+        # Arbitrary metadata. Can be used to specify user.
+        annotations: Optional[dict[str, Any]] = None,
+        created_by: str | None = None,
+    ) -> bts.PipelineRun:
+        """Creates a pipeline run inside a transaction the caller already owns.
+
+        Flushes, so the returned run has its ID populated, but never commits:
+        the caller decides when the work becomes durable. Use this when a run
+        must be written atomically with the caller's own rows. Callers that just
+        want a run created should use `create` instead.
+        """
+        # TODO: Validate the pipeline spec
+        # TODO: Load and validate all components
+        # TODO: Fetch missing components and populate component specs
+
+        pipeline_name = root_task.component_ref.spec.name
+
+        root_execution_node = _recursively_create_all_executions_and_artifacts_root(
+            session=session,
+            root_task_spec=root_task,
+        )
+
+        # Store into DB.
+        current_time = _get_current_time()
+        pipeline_run = bts.PipelineRun(
+            root_execution=root_execution_node,
+            created_at=current_time,
+            updated_at=current_time,
+            annotations=annotations,
+            created_by=created_by,
+            extra_data={
+                self._PIPELINE_NAME_EXTRA_DATA_KEY: pipeline_name,
+            },
+        )
+        session.add(pipeline_run)
+        # Flush to populate pipeline_run.id (server-generated) before inserting annotation FKs.
+        # TODO: Use ORM relationship instead of explicit flush + manual FK assignment.
+        session.flush()
+        _mirror_system_annotations(
+            session=session,
+            pipeline_run_id=pipeline_run.id,
+            created_by=created_by,
+            pipeline_name=pipeline_name,
+            annotations=annotations,
+        )
+        return pipeline_run
+
     def create(
         self,
         session: orm.Session,
@@ -116,43 +169,16 @@ class PipelineRunsApiService_Sql:
         annotations: Optional[dict[str, Any]] = None,
         created_by: str | None = None,
     ) -> PipelineRunResponse:
-        # TODO: Validate the pipeline spec
-        # TODO: Load and validate all components
-        # TODO: Fetch missing components and populate component specs
-
-        pipeline_name = root_task.component_ref.spec.name
-
+        # `session.begin()` commits when the block exits, so no explicit commit
+        # is needed here.
         with session.begin():
-
-            root_execution_node = _recursively_create_all_executions_and_artifacts_root(
+            pipeline_run = self._create_in_transaction(
                 session=session,
-                root_task_spec=root_task,
-            )
-
-            # Store into DB.
-            current_time = _get_current_time()
-            pipeline_run = bts.PipelineRun(
-                root_execution=root_execution_node,
-                created_at=current_time,
-                updated_at=current_time,
+                root_task=root_task,
+                components=components,
                 annotations=annotations,
                 created_by=created_by,
-                extra_data={
-                    self._PIPELINE_NAME_EXTRA_DATA_KEY: pipeline_name,
-                },
             )
-            session.add(pipeline_run)
-            # Flush to populate pipeline_run.id (server-generated) before inserting annotation FKs.
-            # TODO: Use ORM relationship instead of explicit flush + manual FK assignment.
-            session.flush()
-            _mirror_system_annotations(
-                session=session,
-                pipeline_run_id=pipeline_run.id,
-                created_by=created_by,
-                pipeline_name=pipeline_name,
-                annotations=annotations,
-            )
-            session.commit()
 
         session.refresh(pipeline_run)
         return PipelineRunResponse.from_db(pipeline_run)

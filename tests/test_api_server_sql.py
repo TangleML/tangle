@@ -433,6 +433,56 @@ class TestPipelineRunServiceCreate:
         )
 
 
+def _count_rows(*, session: orm.Session, table: type) -> int:
+    return session.scalar(sqlalchemy.select(sqlalchemy.func.count()).select_from(table))
+
+
+class TestCreateInTransaction:
+    """Pins the contract of `_create_in_transaction` for callers that own the transaction.
+
+    The method is private, so nothing outside this file is promised it exists or
+    that it stays free of an internal commit. These tests are what turns that
+    into a promise: a rename, a removal, or a commit creeping back in fails here
+    rather than in a consumer that batches the run with its own rows.
+    """
+
+    def test_flushes_so_the_caller_can_use_the_run_id(self, session_factory, service):
+        with session_factory() as session:
+            session.begin()
+            pipeline_run = service._create_in_transaction(
+                session, root_task=_make_task_spec("in-transaction")
+            )
+            assert pipeline_run.id is not None
+            assert pipeline_run.root_execution_id is not None
+            session.rollback()
+
+    def test_rollback_leaves_no_rows(self, session_factory, service):
+        with session_factory() as session:
+            session.begin()
+            service._create_in_transaction(
+                session, root_task=_make_task_spec("rolled-back")
+            )
+            session.rollback()
+
+        with session_factory() as session:
+            assert _count_rows(session=session, table=bts.PipelineRun) == 0
+            assert _count_rows(session=session, table=bts.ExecutionNode) == 0
+
+    def test_the_callers_commit_makes_the_run_durable(self, session_factory, service):
+        with session_factory() as session:
+            # The same shape `create` uses: the block commits on exit, so the
+            # test never commits by hand.
+            with session.begin():
+                pipeline_run = service._create_in_transaction(
+                    session, root_task=_make_task_spec("committed-by-caller")
+                )
+                run_id = pipeline_run.id
+
+        with session_factory() as session:
+            assert session.get(bts.PipelineRun, run_id) is not None
+            assert _count_rows(session=session, table=bts.PipelineRun) == 1
+
+
 class TestCreateMirrorsUserAnnotations:
     def test_create_mirrors_user_annotations(
         self,
