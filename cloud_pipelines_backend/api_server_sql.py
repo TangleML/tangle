@@ -666,6 +666,8 @@ class ExecutionNodesApiService_Sql:
     def get_graph_execution_state(
         self, session: orm.Session, id: bts.IdType
     ) -> GetGraphExecutionStateResponse:
+        if not session.get(bts.ExecutionNode, id):
+            raise errors.ItemNotFoundError(f"Execution with {id=} does not exist.")
         ExecutionNode_Child = orm.aliased(
             bts.ExecutionNode, name="child_execution_node"
         )
