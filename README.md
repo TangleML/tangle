@@ -67,7 +67,7 @@ Windows:
 cd tangle && backend\start_local.cmd
 ```
 
-4. Once the "start_local: Starting the orchestrator" message appears in the terminal, open the [http://localhost:8000](http://localhost:8000) URL in a Web browser and start use the app.
+4. Once the "start_local: Starting the orchestrator" message appears in the terminal, open the [http://localhost:8000](http://localhost:8000) URL in a Web browser and start using the app.
 Click the "New Pipeline" button at the top to start building a new pipeline.
 
 ### Try in Google Cloud Shell (free)
@@ -88,7 +88,7 @@ git clone https://github.com/TangleML/tangle-ui.git tangle/ui_build --branch sta
 cd tangle && backend/start_local.sh
 ```
 
-4. Once the "start_local: Starting the orchestrator", "View app at" messages appears in the terminal, open the <https://shell.cloud.google.com/devshell/proxy?port=8000> URL in another browser tab and start using the app.
+4. Once the "start_local: Starting the orchestrator", "View app at" messages appear in the terminal, open the <https://shell.cloud.google.com/devshell/proxy?port=8000> URL in another browser tab and start using the app.
 
 
 ## App features
@@ -117,7 +117,7 @@ cd tangle && backend/start_local.sh
     * Add your own components (public or private)
     * Easy to create your own components manually or using the Cloud Pipelines SDK
     * Components can be written in [any language](https://github.com/Ark-kun/pipeline_components/tree/master/components/sample) (Python, Shell, R, Java, C#, etc).
-    * Compatible with [Google Cloud Vertex AI Pipelines](https://cloud.google.com/vertex-ai/docs/pipelines/introduction) and [Kubeflow Pipelines](https://www.kubeflow.org/docs/components/pipelines/introduction/)
+    * Compatible with [Google Cloud Vertex AI Pipelines](https://cloud.google.com/vertex-ai/docs/pipelines/introduction) and [Kubeflow Pipelines](https://www.kubeflow.org/docs/components/pipelines/overview/)
     * Lots of pre-built components on GitHub: [Ark-kun/pipeline_components](https://github.com/Ark-kun/pipeline_components/tree/master/components).
 
 
@@ -128,7 +128,7 @@ When pipeline system runs a pipeline, it executes an interconnected graph of con
 
 A **pipeline** is a *graph* of interconnected component tasks.
 
-A **component** describes a certain command-line program inside a container. Component specification describes its signature (inputs, outputs), metadata (name, description and annotations) and implementation which specifies which container image to use, which program to start and and how to connect the inputs and outputs to the program's command-line arguments.
+A **component** describes a certain command-line program inside a container. Component specification describes its signature (inputs, outputs), metadata (name, description and annotations) and implementation which specifies which container image to use, which program to start and how to connect the inputs and outputs to the program's command-line arguments.
 Components can be written in any language. All Cloud Pipelines projects including Tangle supports arbitrary containers and arbitrary programs.
 
 A **task** describes an instance of a component and specifies the input arguments for the component's inputs. Tasks are connected together into a graph by linking some upstream task outputs to some downstream task inputs.
@@ -155,7 +155,7 @@ The Orchestrator launches container tasks using a specified Launcher, communicat
 ### Database
 
 The backend uses SqlAlchemy to abstract the database access, so any database engine supported by SqlAlchemy can be used.
-We officially support the Sqlite and MySQL databases.
+We officially support the SQLite and MySQL databases.
 
 ![DB diagram](./docs/db_diagram.svg)
 
