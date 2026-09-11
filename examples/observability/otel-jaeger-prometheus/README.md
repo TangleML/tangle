@@ -28,26 +28,34 @@ Set these environment variables when running the Tangle API so it sends traces a
 
 | Variable | Value | Description |
 |----------|--------|-------------|
-| `TANGLE_OTEL_EXPORTER_ENDPOINT` | `http://localhost:4317` | OTLP collector address (gRPC). Use `host.docker.internal:4317` if Tangle runs inside Docker. |
-| `TANGLE_OTEL_EXPORTER_PROTOCOL` | `grpc` | Protocol for the exporter (default). This stack only accepts gRPC. |
-| `TANGLE_ENV` | optional | Included in the service name (e.g. `tangle-development`). Default: `development`. |
+| `TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT` | `http://localhost:4317` | OTLP collector address for traces (gRPC). Use `host.docker.internal:4317` if Tangle runs inside Docker. |
+| `TANGLE_OTEL_TRACE_EXPORTER_PROTOCOL` | `grpc` | Protocol for the trace exporter (default). This stack only accepts gRPC. |
+| `TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT` | `http://localhost:4317` | OTLP collector address for metrics (gRPC). Use `host.docker.internal:4317` if Tangle runs inside Docker. |
+| `TANGLE_OTEL_METRIC_EXPORTER_PROTOCOL` | `grpc` | Protocol for the metric exporter (default). This stack only accepts gRPC. |
+| `TANGLE_ENV` | optional | Included in the service name (e.g. `tangle-development`). Default: `unknown`. |
+
+Traces and metrics are configured independently. Set only the trace variables to export traces alone, or only the metric variables to export metrics alone.
 
 Example (shell):
 
 ```bash
-export TANGLE_OTEL_EXPORTER_ENDPOINT=http://localhost:4317
-export TANGLE_OTEL_EXPORTER_PROTOCOL=grpc
+export TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT=http://localhost:4317
+export TANGLE_OTEL_TRACE_EXPORTER_PROTOCOL=grpc
+export TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT=http://localhost:4317
+export TANGLE_OTEL_METRIC_EXPORTER_PROTOCOL=grpc
 # then start your Tangle API
 ```
 
 Example (`.env` in the project root or where the API is started):
 
 ```
-TANGLE_OTEL_EXPORTER_ENDPOINT=http://localhost:4317
-TANGLE_OTEL_EXPORTER_PROTOCOL=grpc
+TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT=http://localhost:4317
+TANGLE_OTEL_TRACE_EXPORTER_PROTOCOL=grpc
+TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT=http://localhost:4317
+TANGLE_OTEL_METRIC_EXPORTER_PROTOCOL=grpc
 ```
 
-If `TANGLE_OTEL_EXPORTER_ENDPOINT` is unset, tracing and metrics export are disabled.
+If neither `TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT` nor `TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT` is set, tracing and metrics export are disabled.
 
 ## UIs
 
