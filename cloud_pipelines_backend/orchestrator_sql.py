@@ -627,9 +627,22 @@ class OrchestratorService_Sql:
         # If it returns True it has taken ownership: it decided what state the execution is
         # in and committed that itself. We stop here and do not launch.
         if self._queued_execution_interceptor is not None:
-            if self._queued_execution_interceptor.intercept(
-                session=session, execution=execution
-            ):
+            try:
+                intercepted = self._queued_execution_interceptor.intercept(
+                    session=session, execution=execution
+                )
+            except Exception:
+                # Fail open. An optional gate must not be able to stop the fleet: the
+                # failure mode of a broken interceptor is no gating, not no launches.
+                # No rollback here on purpose: a gate that raised mid-write leaves the
+                # session dirty, and the launch path below opens a new transaction before
+                # it writes anything, which discards it.
+                _logger.exception(
+                    f"Queued-execution interceptor raised on execution {execution.id}; "
+                    f"launching ungated."
+                )
+                intercepted = False
+            if intercepted:
                 return
 
         # Creating new container execution
