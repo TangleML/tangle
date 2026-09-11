@@ -76,6 +76,19 @@ def _get_execution_node(session: orm.Session, task_id: str) -> bts.ExecutionNode
     return node
 
 
+def _request_termination(*, session: orm.Session, task_id: str) -> None:
+    """Cancel a node the way a caller does -- by asking, not by writing the status.
+
+    `orchestrator_sql.py:606` keys the cancellation branch off the *request* in
+    `extra_data`, and reaches it before the interceptor. A test that set
+    `container_execution_status = CANCELLED` directly would never take that branch, because
+    the sweep only selects rows that are still QUEUED.
+    """
+    node = _get_execution_node(session, task_id)
+    node.extra_data = {**(node.extra_data or {}), "desired_state": "TERMINATED"}
+    session.commit()
+
+
 def _make_launched_container_mock() -> mock.MagicMock:
     launched_container_mock = mock.MagicMock(
         status=launcher_interfaces.ContainerStatus.PENDING,
@@ -608,3 +621,84 @@ class TestQueuedExecutionInterceptor:
         _process_queued_executions(session_factory, launched_container_mock)
 
         launched_container_mock.assert_called_once()
+
+
+class TestInterceptorIsOfferedOnlyLaunchableExecutions:
+    """The seam's *position*, not its return value.
+
+    The interceptor sits at `orchestrator_sql.py:626`, after every earlier exit from
+    `internal_process_one_queued_execution`::
+
+        cache hit?  --yes--> reuse the cached execution, return      :584
+            |no
+        cancelled?  --yes--> CANCELLED, skip downstream, return      :624
+            |no
+        intercept()   <-- only executions that would otherwise launch reach here
+            |
+        launch
+
+    Moving the seam one branch earlier would offer implementations executions that are
+    never going to run, and whatever work an implementation does per offer would be spent on
+    them. Both tests use an interceptor that intercepts everything, so a call that should not
+    happen shows up as a launch that did not.
+    """
+
+    def test_a_cancelled_execution_is_never_offered(self) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        _request_termination(session=session_factory(), task_id="task")
+        launched_container_mock = _make_launched_container_mock()
+        interceptor = _StubInterceptor(intercepted=True)
+
+        orchestrator = _make_orchestrator(
+            session_factory=session_factory,
+            launched_container_mock=launched_container_mock,
+            queued_execution_interceptor=interceptor,
+        )
+        orchestrator.internal_process_queued_executions_queue(session=session_factory())
+
+        assert interceptor.calls == [], "cancellation is decided before the seam"
+        launched_container_mock.assert_not_called()
+        node = _get_execution_node(session_factory(), "task")
+        assert node.container_execution_status == bts.ContainerExecutionStatus.CANCELLED
+
+    def test_a_cache_hit_is_never_offered(self) -> None:
+        """Caching is on by default; only `max_cache_staleness == "P0D"` turns it off."""
+        session_factory = _create_session_factory()
+        launched_container_mock = _make_launched_container_mock()
+
+        # The first run has nothing to reuse, so it launches and leaves a PENDING container
+        # execution behind -- the cache candidate the second run finds.
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        _make_orchestrator(
+            session_factory=session_factory,
+            launched_container_mock=launched_container_mock,
+        ).internal_process_queued_executions_queue(session=session_factory())
+        launched_container_mock.assert_called_once()
+
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        interceptor = _StubInterceptor(intercepted=True)
+        _make_orchestrator(
+            session_factory=session_factory,
+            launched_container_mock=launched_container_mock,
+            queued_execution_interceptor=interceptor,
+        ).internal_process_queued_executions_queue(session=session_factory())
+
+        assert interceptor.calls == [], "the cache hit is decided before the seam"
+        assert (
+            launched_container_mock.call_count == 1
+        ), "the second run must have reused, not launched"
+        # Pin that a cache hit is what happened, so the test cannot pass because the second
+        # node was never processed at all.
+        reused = [
+            node
+            for node in session_factory()
+            .scalars(
+                sql.select(bts.ExecutionNode).where(
+                    bts.ExecutionNode.task_id_in_parent_execution == "task"
+                )
+            )
+            .all()
+            if (node.extra_data or {}).get("reused_from_execution_node_id")
+        ]
+        assert len(reused) == 1, "exactly one of the two nodes must be a cache reuse"
