@@ -39,6 +39,21 @@ class OrchestratorError(RuntimeError):
     pass
 
 
+class QueuedExecutionInterceptor(typing.Protocol):
+    """Given a chance to take a queued execution off the launch path.
+
+    Implemented downstream. Called on the orchestrator's session once the execution is
+    known to be launchable -- inputs present, not conditionally skipped, no cache hit, not
+    cancelled. An implementation that returns True owns the execution from that point: it
+    sets whatever status it wants and commits. The orchestrator makes no assumption about
+    which status that is.
+    """
+
+    def intercept(self, *, session: orm.Session, execution: bts.ExecutionNode) -> bool:
+        """True if this execution was taken over and must not launch; False to continue."""
+        ...
+
+
 class OrchestratorService_Sql:
     def __init__(
         self,
@@ -57,6 +72,7 @@ class OrchestratorService_Sql:
         _max_container_execution_refresh_error_retries: int = 3,
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
+        queued_execution_interceptor: QueuedExecutionInterceptor | None = None,
     ):
         self._session_factory = session_factory
         self._launcher = launcher
@@ -75,6 +91,7 @@ class OrchestratorService_Sql:
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
+        self._queued_execution_interceptor = queued_execution_interceptor
 
     def run_loop(self):
         while True:
@@ -124,12 +141,8 @@ class OrchestratorService_Sql:
         query_start_timestamp = time.monotonic_ns()
         query = (
             sql.select(bts.ExecutionNode).where(
-                bts.ExecutionNode.container_execution_status.in_(
-                    (
-                        bts.ContainerExecutionStatus.UNINITIALIZED,
-                        bts.ContainerExecutionStatus.QUEUED,
-                    )
-                )
+                bts.ExecutionNode.container_execution_status
+                == bts.ContainerExecutionStatus.QUEUED
             )
             # TODO: Maybe add last_processed_at
             # .order_by(bts.ExecutionNode.last_processed_at)
@@ -609,6 +622,28 @@ class OrchestratorService_Sql:
             )
             session.commit()
             return
+
+        # Give the interceptor a chance to take this execution off the launch path.
+        # If it returns True it has taken ownership: it decided what state the execution is
+        # in and committed that itself. We stop here and do not launch.
+        if self._queued_execution_interceptor is not None:
+            try:
+                intercepted = self._queued_execution_interceptor.intercept(
+                    session=session, execution=execution
+                )
+            except Exception:
+                # Fail open. An optional gate must not be able to stop the fleet: the
+                # failure mode of a broken interceptor is no gating, not no launches.
+                # No rollback here on purpose: a gate that raised mid-write leaves the
+                # session dirty, and the launch path below opens a new transaction before
+                # it writes anything, which discards it.
+                _logger.exception(
+                    f"Queued-execution interceptor raised on execution {execution.id}; "
+                    f"launching ungated."
+                )
+                intercepted = False
+            if intercepted:
+                return
 
         # Creating new container execution
         container_execution_uuid = _generate_random_id()

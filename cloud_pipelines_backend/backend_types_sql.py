@@ -12,8 +12,15 @@ IdType: typing.TypeAlias = str
 
 
 class ContainerExecutionStatus(str, enum.Enum):
+    """The lifecycle status of an execution node.
+
+    `UNINITIALIZED` is the parked state: an execution a `QueuedExecutionInterceptor`
+    took off the launch path. The queued sweep deliberately does not select it, so a
+    parked execution stays invisible until whoever parked it puts it back to `QUEUED`.
+    """
+
     INVALID = "INVALID"  # Compatibility with Vertex AI CustomJob
-    UNINITIALIZED = "UNINITIALIZED"  # Remove
+    UNINITIALIZED = "UNINITIALIZED"  # Parked by an interceptor; not swept
     QUEUED = "QUEUED"  # Before WAITING_FOR_UPSTREAM or STARTING
     # READY_TO_START = "READY_TO_START"  # Input artifacts ready, but no job ID
     WAITING_FOR_UPSTREAM = "WAITING_FOR_UPSTREAM"
