@@ -176,8 +176,14 @@ def _coerce_disk_size_gb(spec: Any) -> int:
         return max(1, int(spec))
     s = str(spec).strip().lower()
     multipliers = {
-        "ti": 1024.0, "gi": 1.0, "mi": 1 / 1024, "ki": 1 / 1024 / 1024,
-        "t": 1000.0, "g": 1.0, "m": 1 / 1000, "k": 1 / 1000 / 1000,
+        "ti": 1024.0,
+        "gi": 1.0,
+        "mi": 1 / 1024,
+        "ki": 1 / 1024 / 1024,
+        "t": 1000.0,
+        "g": 1.0,
+        "m": 1 / 1000,
+        "k": 1 / 1000 / 1000,
     }
     for suffix, mult in sorted(multipliers.items(), key=lambda kv: -len(kv[0])):
         if s.endswith(suffix):
@@ -190,7 +196,8 @@ def _coerce_disk_size_gb(spec: Any) -> int:
     except ValueError:
         _logger.warning(
             "Could not parse ephemeral-storage spec %r; defaulting to %d GiB.",
-            spec, _DEFAULT_DISK_SIZE_GB,
+            spec,
+            _DEFAULT_DISK_SIZE_GB,
         )
         return _DEFAULT_DISK_SIZE_GB
 
@@ -219,9 +226,7 @@ class SkyPilotKubernetesLauncher(
         priority_class: Optional[str] = None,
         use_spot: Optional[bool] = None,
         job_name_prefix: str = "tangle-",
-        storage_provider: Optional[
-            storage_provider_interfaces.StorageProvider
-        ] = None,
+        storage_provider: Optional[storage_provider_interfaces.StorageProvider] = None,
     ):
         """
         Args:
@@ -320,9 +325,7 @@ class SkyPilotKubernetesLauncher(
             job_id = int(job_id_or_ids[0])
         else:
             job_id = int(job_id_or_ids)
-        _logger.info(
-            "Submitted SkyPilot managed job %s (job_id=%d)", job_name, job_id
-        )
+        _logger.info("Submitted SkyPilot managed job %s (job_id=%d)", job_name, job_id)
 
         return SkyPilotLaunchedJob(
             handle=_SkyPilotJobHandle(
@@ -363,9 +366,7 @@ class SkyPilotKubernetesLauncher(
         cpus = annotations.get(RESOURCES_CPU_ANNOTATION_KEY)
         memory = annotations.get(RESOURCES_MEMORY_ANNOTATION_KEY)
         accelerators = annotations.get(RESOURCES_ACCELERATORS_ANNOTATION_KEY)
-        ephemeral_storage = annotations.get(
-            RESOURCES_EPHEMERAL_STORAGE_ANNOTATION_KEY
-        )
+        ephemeral_storage = annotations.get(RESOURCES_EPHEMERAL_STORAGE_ANNOTATION_KEY)
 
         # Multi-node count
         num_nodes_str = annotations.get(MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY, "1")
@@ -486,7 +487,8 @@ class SkyPilotKubernetesLauncher(
                 "Output '%s' uri=%r is not a cloud URI; the SkyPilot launcher "
                 "will not persist it back to Tangle's storage. Use a cloud "
                 "StorageProvider (gs://, s3://, ...) to persist outputs.",
-                output_name, uri,
+                output_name,
+                uri,
             )
             sanitized = naming_utils.sanitize_file_name(output_name)
             return f"/tmp/outputs/{sanitized}/{_CONTAINER_FILE_NAME}"
@@ -557,7 +559,9 @@ class SkyPilotKubernetesLauncher(
         spot_value = annotations.get(SPOT_ANNOTATION_KEY)
         if spot_value is not None:
             resources_kwargs["use_spot"] = str(spot_value).lower() in (
-                "1", "true", "yes",
+                "1",
+                "true",
+                "yes",
             )
         elif self._default_use_spot is not None:
             resources_kwargs["use_spot"] = self._default_use_spot
@@ -593,9 +597,7 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
         self,
         handle: _SkyPilotJobHandle,
         *,
-        storage_provider: Optional[
-            storage_provider_interfaces.StorageProvider
-        ] = None,
+        storage_provider: Optional[storage_provider_interfaces.StorageProvider] = None,
     ):
         self._handle = handle
         self._storage_provider = storage_provider
@@ -766,9 +768,7 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
         cls,
         d: dict[str, Any],
         *,
-        storage_provider: Optional[
-            storage_provider_interfaces.StorageProvider
-        ] = None,
+        storage_provider: Optional[storage_provider_interfaces.StorageProvider] = None,
     ) -> "SkyPilotLaunchedJob":
         sk = d["skypilot"]
         return cls(
@@ -812,8 +812,10 @@ class SkyPilotLaunchedJob(interfaces.LaunchedContainer):
                 ),
                 storage_provider=self._storage_provider,
             )
-        get = (lambda k: rec.get(k)) if isinstance(rec, dict) else (
-            lambda k: getattr(rec, k, None)
+        get = (
+            (lambda k: rec.get(k))
+            if isinstance(rec, dict)
+            else (lambda k: getattr(rec, k, None))
         )
         status_str = _status_to_string(get("status"))
         started_at = get("start_at")

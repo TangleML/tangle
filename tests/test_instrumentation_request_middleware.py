@@ -100,6 +100,7 @@ class TestRequestContextMiddleware:
 
     def test_middleware_adds_request_id_to_response_headers(self):
         """Test that middleware adds request_id to response headers."""
+
         def test_route(request):
             return Response("ok")
 
@@ -115,6 +116,7 @@ class TestRequestContextMiddleware:
 
     def test_middleware_clears_request_id_after_request(self):
         """Test that middleware clears request_id after request completes."""
+
         def test_route(request):
             assert contextual_logging.get_context_metadata("request_id") is not None
             return Response("ok")
@@ -135,6 +137,7 @@ class TestRequestContextMiddleware:
 
     def test_middleware_generates_unique_request_ids(self):
         """Test that middleware generates unique request_ids for each request."""
+
         def test_route(request):
             return Response("ok")
 
@@ -171,6 +174,7 @@ class TestRequestContextMiddleware:
 
     def test_middleware_handles_exception_in_route(self):
         """Test that middleware clears request_id even when route raises exception."""
+
         def test_route(request):
             request_id_during_exception = contextual_logging.get_context_metadata(
                 "request_id"

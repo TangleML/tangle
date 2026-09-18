@@ -18,6 +18,7 @@ Requires SkyPilot's `kubernetes.allowed_contexts` to include both
 contexts and the launcher to be initialized with `infra=None` so the
 optimizer can pick per task.
 """
+
 from __future__ import annotations
 import datetime, json, os, time, urllib.request, urllib.error
 
@@ -26,8 +27,10 @@ BASE = os.environ.get("TANGLE_API_URL", "http://localhost:8000")
 
 def post(path, body):
     req = urllib.request.Request(
-        BASE + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+        BASE + path,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())
@@ -109,9 +112,10 @@ prepare_spec = {
         "container": {
             "image": "python:3.11-slim",
             "command": [
-                "bash", "-c",
+                "bash",
+                "-c",
                 'set -euo pipefail; mkdir -p "$(dirname "$0")"; '
-                f"python3 -c 'import json,sys; json.dump({json.dumps(_PROMPTS)}, open(sys.argv[1], \"w\"))' \"$0\"; "
+                f'python3 -c \'import json,sys; json.dump({json.dumps(_PROMPTS)}, open(sys.argv[1], "w"))\' "$0"; '
                 'echo "wrote prompts to $0"; cat "$0"',
                 {"outputPath": "prompts"},
             ],
@@ -135,13 +139,14 @@ def _make_inference_spec(suffix: str) -> dict:
                 "image": "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime",
                 "env": {"COMPONENT_VARIANT": suffix},
                 "command": [
-                    "bash", "-c",
-                    'set -euo pipefail; '
+                    "bash",
+                    "-c",
+                    "set -euo pipefail; "
                     'export PROMPTS_PATH="$0"; export OUTPUT_PATH="$1"; '
                     # transformers isn't bundled in pytorch image — pip
                     # install once, ~10s on a cold pod.
-                    'pip install -q --no-cache-dir transformers==4.41.1 >/dev/null; '
-                    'nvidia-smi -L; '
+                    "pip install -q --no-cache-dir transformers==4.41.1 >/dev/null; "
+                    "nvidia-smi -L; "
                     f"python3 -u <<'PYEOF'\n{_INFER_PY}\nPYEOF",
                     {"inputPath": "prompts"},
                     {"outputPath": "completions"},
@@ -163,22 +168,23 @@ compare_spec = {
         "container": {
             "image": "python:3.11-slim",
             "command": [
-                "bash", "-c",
+                "bash",
+                "-c",
                 'set -euo pipefail; mkdir -p "$(dirname "$2")"; '
                 'python3 - "$0" "$1" "$2" <<\'PY\'\n'
-                'import json, sys\n'
-                'a = json.load(open(sys.argv[1]))   # gke-l4\n'
-                'b = json.load(open(sys.argv[2]))   # nebius-h100\n'
+                "import json, sys\n"
+                "a = json.load(open(sys.argv[1]))   # gke-l4\n"
+                "b = json.load(open(sys.argv[2]))   # nebius-h100\n"
                 'lines = ["=== Multi-cluster inference comparison ==="]\n'
-                'for pa, pb in zip(a, b):\n'
-                '    lines.append(f"prompt: {pa[\'prompt\']!r}")\n'
-                '    lines.append(f"  gke-l4       ({pa[\'gpu\']} on {pa[\'host\']}, {pa[\'elapsed_ms\']}ms): {pa[\'completion\']!r}")\n'
-                '    lines.append(f"  nebius-h100  ({pb[\'gpu\']} on {pb[\'host\']}, {pb[\'elapsed_ms\']}ms): {pb[\'completion\']!r}")\n'
+                "for pa, pb in zip(a, b):\n"
+                "    lines.append(f\"prompt: {pa['prompt']!r}\")\n"
+                "    lines.append(f\"  gke-l4       ({pa['gpu']} on {pa['host']}, {pa['elapsed_ms']}ms): {pa['completion']!r}\")\n"
+                "    lines.append(f\"  nebius-h100  ({pb['gpu']} on {pb['host']}, {pb['elapsed_ms']}ms): {pb['completion']!r}\")\n"
                 '    lines.append("")\n'
                 'report = "\\n".join(lines)\n'
-                'print(report)\n'
+                "print(report)\n"
                 'open(sys.argv[3], "w").write(report + "\\n")\n'
-                'PY',
+                "PY",
                 {"inputPath": "gke_l4_completions"},
                 {"inputPath": "nebius_h100_completions"},
                 {"outputPath": "report"},
@@ -205,7 +211,9 @@ pipeline_spec = {
                 "infer_gke_l4": {
                     "componentRef": {"spec": _make_inference_spec("gke-l4")},
                     "arguments": {
-                        "prompts": {"taskOutput": {"taskId": "prepare", "outputName": "prompts"}}
+                        "prompts": {
+                            "taskOutput": {"taskId": "prepare", "outputName": "prompts"}
+                        }
                     },
                     "annotations": {
                         "cloud-pipelines.net/launchers/generic/resources.cpu": "2",
@@ -220,7 +228,9 @@ pipeline_spec = {
                 "infer_nebius_h100": {
                     "componentRef": {"spec": _make_inference_spec("nebius-h100")},
                     "arguments": {
-                        "prompts": {"taskOutput": {"taskId": "prepare", "outputName": "prompts"}}
+                        "prompts": {
+                            "taskOutput": {"taskId": "prepare", "outputName": "prompts"}
+                        }
                     },
                     "annotations": {
                         "cloud-pipelines.net/launchers/generic/resources.cpu": "2",
@@ -235,8 +245,18 @@ pipeline_spec = {
                 "compare": {
                     "componentRef": {"spec": compare_spec},
                     "arguments": {
-                        "gke_l4_completions": {"taskOutput": {"taskId": "infer_gke_l4", "outputName": "completions"}},
-                        "nebius_h100_completions": {"taskOutput": {"taskId": "infer_nebius_h100", "outputName": "completions"}},
+                        "gke_l4_completions": {
+                            "taskOutput": {
+                                "taskId": "infer_gke_l4",
+                                "outputName": "completions",
+                            }
+                        },
+                        "nebius_h100_completions": {
+                            "taskOutput": {
+                                "taskId": "infer_nebius_h100",
+                                "outputName": "completions",
+                            }
+                        },
                     },
                     "annotations": {
                         "cloud-pipelines.net/launchers/generic/resources.cpu": "1",
@@ -262,7 +282,11 @@ deadline = time.time() + 1800
 last = None
 while time.time() < deadline:
     state = get(f"/api/executions/{root_exec}/graph_execution_state")
-    line = json.dumps(state.get("child_execution_status_stats", {})) if state else "<no state>"
+    line = (
+        json.dumps(state.get("child_execution_status_stats", {}))
+        if state
+        else "<no state>"
+    )
     if line != last:
         print(f"  [{time.strftime('%H:%M:%S')}] {line}", flush=True)
         last = line
@@ -271,12 +295,15 @@ while time.time() < deadline:
     for child_id, status_dict in stats.items():
         for status, count in status_dict.items():
             summary[status] = summary.get(status, 0) + count
-    if any(summary.get(k, 0) > 0 for k in ("FAILED", "SYSTEM_ERROR", "INVALID", "CANCELLED")):
+    if any(
+        summary.get(k, 0) > 0
+        for k in ("FAILED", "SYSTEM_ERROR", "INVALID", "CANCELLED")
+    ):
         break
-    if (summary.get("SUCCEEDED", 0) >= 4 and
-            not any(summary.get(k, 0) > 0
-                    for k in ("PENDING", "QUEUED", "RUNNING", "WAITING_FOR_UPSTREAM",
-                              "STARTING"))):
+    if summary.get("SUCCEEDED", 0) >= 4 and not any(
+        summary.get(k, 0) > 0
+        for k in ("PENDING", "QUEUED", "RUNNING", "WAITING_FOR_UPSTREAM", "STARTING")
+    ):
         break
     time.sleep(20)
 
@@ -285,8 +312,10 @@ details = get(f"/api/executions/{root_exec}/details")
 child_ids = (details or {}).get("child_task_execution_ids", {}) or {}
 for task_id, exec_id in child_ids.items():
     cstate = get(f"/api/executions/{exec_id}/container_state")
-    print(f"  {task_id}: status={(cstate or {}).get('status')}  "
-          f"exit_code={(cstate or {}).get('exit_code')}")
+    print(
+        f"  {task_id}: status={(cstate or {}).get('status')}  "
+        f"exit_code={(cstate or {}).get('exit_code')}"
+    )
     if cstate and cstate.get("debug_info", {}).get("skypilot"):
         sky = cstate["debug_info"]["skypilot"]
         print(f"    sky job_id={sky.get('job_id')}  name={sky.get('job_name')}")

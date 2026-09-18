@@ -9,6 +9,7 @@ Usage:
 
 Idempotent — already-published components return 409 and are skipped.
 """
+
 from __future__ import annotations
 import json
 import os

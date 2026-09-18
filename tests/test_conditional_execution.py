@@ -258,14 +258,18 @@ def _run_single_conditional_task(
 
 class TestConditionalExecutionOrchestration:
     def test_constant_true_launches_container(self) -> None:
-        session_factory, launched_container_mock = _run_single_conditional_task("TruE\n")
+        session_factory, launched_container_mock = _run_single_conditional_task(
+            "TruE\n"
+        )
 
         launched_container_mock.assert_called_once()
         child = _get_execution_node(session_factory(), "child")
         assert child.container_execution_status != bts.ContainerExecutionStatus.SKIPPED
 
     def test_constant_false_skips_container(self) -> None:
-        session_factory, launched_container_mock = _run_single_conditional_task("FalsE\n")
+        session_factory, launched_container_mock = _run_single_conditional_task(
+            "FalsE\n"
+        )
 
         launched_container_mock.assert_not_called()
         child = _get_execution_node(session_factory(), "child")

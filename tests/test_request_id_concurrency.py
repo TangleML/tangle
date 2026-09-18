@@ -37,7 +37,9 @@ def test_request_id_isolation_with_concurrent_requests():
         assert contextual_logging.get_context_metadata("request_id") == request_id
         return JSONResponse({"request_id": request_id})
 
-    app = Starlette(routes=[Route("/endpoint1", endpoint1), Route("/endpoint2", endpoint2)])
+    app = Starlette(
+        routes=[Route("/endpoint1", endpoint1), Route("/endpoint2", endpoint2)]
+    )
     app.add_middleware(RequestContextMiddleware)
     client = TestClient(app)
 

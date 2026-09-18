@@ -73,6 +73,7 @@ if storage_bucket:
     scheme = bucket_uri.split("://", 1)[0]
     if scheme == "gs":
         from cloud_pipelines.orchestration.storage_providers import google_cloud_storage
+
         storage_provider = google_cloud_storage.GoogleCloudStorageProvider()
     else:
         raise ValueError(
@@ -84,6 +85,7 @@ if storage_bucket:
     logs_root_uri = bucket_uri + "/logs"
 else:
     from cloud_pipelines.orchestration.storage_providers import local_storage
+
     storage_provider = local_storage.LocalStorageProvider()
     artifacts_root_uri = artifacts_dir_path.as_posix()
     logs_root_uri = logs_dir_path.as_posix()
@@ -99,9 +101,7 @@ launcher = SkyPilotKubernetesLauncher(
     # Empty string -> None (let optimizer pick / use API server's in-cluster).
     infra=_infra_env if _infra_env else None,
     pool=os.environ.get("SKYPILOT_POOL"),
-    default_image=os.environ.get(
-        "DEFAULT_CONTAINER_IMAGE", "python:3.11-slim"
-    ),
+    default_image=os.environ.get("DEFAULT_CONTAINER_IMAGE", "python:3.11-slim"),
     default_labels={"managed-by": "tangle"},
     annotation_to_label_keys={
         # Propagate the priority-class annotation through as a K8s pod label
@@ -127,6 +127,8 @@ def get_user_details(request: fastapi.Request):
         name=ADMIN_USER_NAME,
         permissions=api_router.Permissions(read=True, write=True, admin=True),
     )
+
+
 # endregion
 
 # region: Logging
@@ -153,7 +155,11 @@ LOGGING_CONFIG = {
     },
     "loggers": {
         "": {"level": "INFO", "handlers": ["default"], "propagate": False},
-        "uvicorn.error": {"level": "DEBUG", "handlers": ["default"], "propagate": False},
+        "uvicorn.error": {
+            "level": "DEBUG",
+            "handlers": ["default"],
+            "propagate": False,
+        },
         "uvicorn.access": {"level": "DEBUG", "handlers": ["default"]},
         "watchfiles.main": {"level": "WARNING", "handlers": ["default"]},
     },
@@ -164,6 +170,7 @@ logger = logging.getLogger(__name__)
 
 # region: OpenTelemetry (no-op if not configured)
 from cloud_pipelines_backend.instrumentation import opentelemetry as otel
+
 otel.setup_providers()
 # endregion
 
@@ -192,6 +199,8 @@ def run_configured_orchestrator():
         sleep_seconds_between_queue_sweeps=5.0,
     )
     orchestrator.run_loop()
+
+
 # endregion
 
 # region: API server
@@ -221,7 +230,8 @@ app.add_middleware(api_tracing.RequestContextMiddleware)
 def handle_error(request: fastapi.Request, exc: BaseException):
     exception_str = traceback.format_exception(type(exc), exc, exc.__traceback__)
     response = fastapi.responses.JSONResponse(
-        status_code=503, content={"exception": exception_str},
+        status_code=503,
+        content={"exception": exception_str},
     )
     request_id = contextual_logging.get_context_metadata("request_id")
     if request_id:

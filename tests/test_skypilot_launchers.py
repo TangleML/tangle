@@ -18,8 +18,16 @@ def _stub_sky(monkeypatch):
     sky_mod = types.ModuleType("sky")
 
     class _FakeTask:
-        def __init__(self, *, name=None, run=None, envs=None, num_nodes=1,
-                     file_mounts=None, **kwargs):
+        def __init__(
+            self,
+            *,
+            name=None,
+            run=None,
+            envs=None,
+            num_nodes=1,
+            file_mounts=None,
+            **kwargs,
+        ):
             self.name = name
             self.run = run
             self.envs = envs or {}
@@ -67,13 +75,15 @@ def _stub_sky(monkeypatch):
         return ([12345], None)
 
     def _fake_queue(refresh=False, job_ids=None, **kwargs):
-        return [{
-            "job_id": (job_ids or [12345])[0],
-            "status": "RUNNING",
-            "start_at": 1700000000.0,
-            "end_at": None,
-            "failure_reason": None,
-        }]
+        return [
+            {
+                "job_id": (job_ids or [12345])[0],
+                "status": "RUNNING",
+                "start_at": 1700000000.0,
+                "end_at": None,
+                "failure_reason": None,
+            }
+        ]
 
     def _fake_cancel(job_ids=None, **kwargs):
         return {"cancelled": list(job_ids or [])}
@@ -96,15 +106,20 @@ def _stub_sky(monkeypatch):
     sys.modules.pop("cloud_pipelines_backend.launchers.skypilot_launchers", None)
 
 
-def _make_component(image="python:3.11", command=None, args=None, env=None,
-                    inputs=None, name="test"):
+def _make_component(
+    image="python:3.11", command=None, args=None, env=None, inputs=None, name="test"
+):
     from cloud_pipelines_backend import component_structures as structures
+
     return structures.ComponentSpec(
         name=name,
         inputs=[structures.InputSpec(n) for n in (inputs or [])],
         implementation=structures.ContainerImplementation(
             container=structures.ContainerSpec(
-                image=image, command=command, args=args, env=env,
+                image=image,
+                command=command,
+                args=args,
+                env=env,
             )
         ),
     )
@@ -169,7 +184,10 @@ def test_resource_annotations_propagate():
 
 def test_multi_node_dynamic_data():
     from cloud_pipelines_backend import component_structures as structures
-    from cloud_pipelines_backend.launchers import interfaces, kubernetes_launchers as k8sL
+    from cloud_pipelines_backend.launchers import (
+        interfaces,
+        kubernetes_launchers as k8sL,
+    )
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
         SkyPilotKubernetesLauncher,
     )
@@ -184,11 +202,15 @@ def test_multi_node_dynamic_data():
     )
     input_arguments = {
         "rank": interfaces.InputArgument(
-            total_size=0, is_dir=False, staging_uri="",
+            total_size=0,
+            is_dir=False,
+            staging_uri="",
             dynamic_data="system/multi_node/node_index",
         ),
         "nnodes": interfaces.InputArgument(
-            total_size=0, is_dir=False, staging_uri="",
+            total_size=0,
+            is_dir=False,
+            staging_uri="",
             dynamic_data="system/multi_node/number_of_nodes",
         ),
     }
@@ -288,7 +310,8 @@ def test_annotation_to_label_propagation():
 
 def test_serialize_round_trip():
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
-        SkyPilotLaunchedJob, _SkyPilotJobHandle,
+        SkyPilotLaunchedJob,
+        _SkyPilotJobHandle,
     )
     from cloud_pipelines_backend.launchers import interfaces
 
@@ -311,14 +334,18 @@ def test_serialize_round_trip():
 
 def test_status_mapping_terminal_states():
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
-        SkyPilotLaunchedJob, _SkyPilotJobHandle,
+        SkyPilotLaunchedJob,
+        _SkyPilotJobHandle,
     )
     from cloud_pipelines_backend.launchers import interfaces
 
     def make(status):
         return SkyPilotLaunchedJob(
             handle=_SkyPilotJobHandle(
-                job_id=1, job_name="x", output_uris={}, log_uri="",
+                job_id=1,
+                job_name="x",
+                output_uris={},
+                log_uri="",
                 cached_status=status,
             )
         )
@@ -366,7 +393,10 @@ def test_default_image_fallback():
 
 
 def test_num_nodes_out_of_range():
-    from cloud_pipelines_backend.launchers import interfaces, kubernetes_launchers as k8sL
+    from cloud_pipelines_backend.launchers import (
+        interfaces,
+        kubernetes_launchers as k8sL,
+    )
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
         SkyPilotKubernetesLauncher,
     )
@@ -393,7 +423,8 @@ def test_skypilot_only_num_nodes_above_tangle_k8s_cap():
     """Tangle's kubernetes_launchers caps num_nodes at 16; SkyPilot scales further."""
     from cloud_pipelines_backend.launchers import kubernetes_launchers as k8sL
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
-        SkyPilotKubernetesLauncher, _MULTI_NODE_MAX_NUMBER_OF_NODES,
+        SkyPilotKubernetesLauncher,
+        _MULTI_NODE_MAX_NUMBER_OF_NODES,
     )
 
     # Sanity: this launcher's cap exceeds Tangle K8s launcher's hardcoded 16.
@@ -420,7 +451,8 @@ def test_skypilot_only_use_spot_with_recovery():
     jobs. Tangle's kubernetes_launchers only has GKE-specific spot via node selector
     (KUBERNETES_GOOGLE_USE_SPOT_VMS_ANNOTATION_KEY) and no preemption recovery."""
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
-        SkyPilotKubernetesLauncher, SPOT_ANNOTATION_KEY,
+        SkyPilotKubernetesLauncher,
+        SPOT_ANNOTATION_KEY,
     )
 
     component = _make_component(command=["true"])
@@ -507,7 +539,8 @@ def test_skypilot_only_s3_file_mount_accepted():
     )
     input_arguments = {
         "dataset": interfaces.InputArgument(
-            total_size=10**9, is_dir=False,
+            total_size=10**9,
+            is_dir=False,
             uri="s3://my-bucket/datasets/foo.parquet",
             staging_uri="",
         ),
@@ -533,7 +566,8 @@ def test_skypilot_only_first_class_priority_class():
     pod_postprocessor to set spec.priorityClassName — there's no annotation API
     for it out of the box."""
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
-        SkyPilotKubernetesLauncher, PRIORITY_CLASS_ANNOTATION_KEY,
+        SkyPilotKubernetesLauncher,
+        PRIORITY_CLASS_ANNOTATION_KEY,
     )
 
     component = _make_component(command=["true"])
@@ -618,13 +652,13 @@ def test_multistep_with_cloud_uris_passes_through():
     # Storage provider has put step 1's output at this gs:// URI; Tangle hands
     # it to step 2 verbatim as InputArgument.uri:
     upstream_uri = "gs://tangle-test/by_execution/abc123/outputs/message_file/data"
-    downstream_output_uri = (
-        "gs://tangle-test/by_execution/def456/outputs/shouted/data"
-    )
+    downstream_output_uri = "gs://tangle-test/by_execution/def456/outputs/shouted/data"
     input_arguments = {
         "message_file": interfaces.InputArgument(
-            total_size=10**6, is_dir=False,
-            uri=upstream_uri, staging_uri="",
+            total_size=10**6,
+            is_dir=False,
+            uri=upstream_uri,
+            staging_uri="",
         ),
     }
     launcher = SkyPilotKubernetesLauncher(infra="kubernetes")
@@ -663,7 +697,8 @@ def test_input_local_uri_raises_actionable_error():
     )
     input_arguments = {
         "dataset": interfaces.InputArgument(
-            total_size=10**6, is_dir=False,
+            total_size=10**6,
+            is_dir=False,
             uri="data/artifacts/by_execution/abc/inputs/dataset/data",  # local
             staging_uri="",
         ),
@@ -697,7 +732,9 @@ def test_output_local_uri_skipped_no_mount():
         component_spec=component,
         container_spec=component.implementation.container,
         input_arguments={},
-        output_uris={"greeting": "data/artifacts/by_execution/abc/outputs/greeting/data"},
+        output_uris={
+            "greeting": "data/artifacts/by_execution/abc/outputs/greeting/data"
+        },
         annotations={},
     )
     # No file_mounts entry for the local output URI.
@@ -714,7 +751,8 @@ def test_end_to_end_lifecycle_through_stubbed_sky():
     """
     from cloud_pipelines_backend.launchers import interfaces
     from cloud_pipelines_backend.launchers.skypilot_launchers import (
-        SkyPilotKubernetesLauncher, SkyPilotLaunchedJob,
+        SkyPilotKubernetesLauncher,
+        SkyPilotLaunchedJob,
     )
 
     component = _make_component(
