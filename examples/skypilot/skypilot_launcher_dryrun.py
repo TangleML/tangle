@@ -33,8 +33,16 @@ def _stub_sky() -> dict:
     sky_mod = types.ModuleType("sky")
 
     class _FakeTask:
-        def __init__(self, *, name=None, run=None, envs=None, num_nodes=1,
-                     file_mounts=None, **kwargs):
+        def __init__(
+            self,
+            *,
+            name=None,
+            run=None,
+            envs=None,
+            num_nodes=1,
+            file_mounts=None,
+            **kwargs,
+        ):
             self.name = name
             self.run = run
             self.envs = envs or {}
@@ -82,13 +90,15 @@ def _stub_sky() -> dict:
         return ([20251029], None)
 
     def _queue(refresh=False, job_ids=None, **kwargs):
-        return [{
-            "job_id": (job_ids or [20251029])[0],
-            "status": "RUNNING",
-            "start_at": 1700000000.0,
-            "end_at": None,
-            "failure_reason": None,
-        }]
+        return [
+            {
+                "job_id": (job_ids or [20251029])[0],
+                "status": "RUNNING",
+                "start_at": 1700000000.0,
+                "end_at": None,
+                "failure_reason": None,
+            }
+        ]
 
     def _cancel(job_ids=None, **kwargs):
         cancellations.append(list(job_ids or []))
@@ -137,18 +147,24 @@ def main() -> None:
                 image="ghcr.io/example/finetune:1.0",
                 command=["torchrun"],
                 args=[
-                    structures.ConcatPlaceholder([
-                        "--nnodes=",
-                        structures.InputValuePlaceholder("nnodes"),
-                    ]),
-                    structures.ConcatPlaceholder([
-                        "--node_rank=",
-                        structures.InputValuePlaceholder("rank"),
-                    ]),
-                    structures.ConcatPlaceholder([
-                        "--master_addr=",
-                        structures.InputValuePlaceholder("master"),
-                    ]),
+                    structures.ConcatPlaceholder(
+                        [
+                            "--nnodes=",
+                            structures.InputValuePlaceholder("nnodes"),
+                        ]
+                    ),
+                    structures.ConcatPlaceholder(
+                        [
+                            "--node_rank=",
+                            structures.InputValuePlaceholder("rank"),
+                        ]
+                    ),
+                    structures.ConcatPlaceholder(
+                        [
+                            "--master_addr=",
+                            structures.InputValuePlaceholder("master"),
+                        ]
+                    ),
                     "train.py",
                     "--data",
                     structures.InputPathPlaceholder("dataset"),
@@ -193,21 +209,28 @@ def main() -> None:
         # Multi-node dynamic data: get bridged to bash env vars set from
         # SKYPILOT_NUM_NODES / SKYPILOT_NODE_RANK / SKYPILOT_NODE_IPS.
         "nnodes": _ifaces.InputArgument(
-            total_size=0, is_dir=False, staging_uri="",
+            total_size=0,
+            is_dir=False,
+            staging_uri="",
             dynamic_data="system/multi_node/number_of_nodes",
         ),
         "rank": _ifaces.InputArgument(
-            total_size=0, is_dir=False, staging_uri="",
+            total_size=0,
+            is_dir=False,
+            staging_uri="",
             dynamic_data="system/multi_node/node_index",
         ),
         "master": _ifaces.InputArgument(
-            total_size=0, is_dir=False, staging_uri="",
+            total_size=0,
+            is_dir=False,
+            staging_uri="",
             dynamic_data="system/multi_node/node_0_address",
         ),
         # SkyPilot accepts s3:// directly via file_mounts. Tangle's K8s
         # launcher only does GCS (gcsfuse) or HostPath today.
         "dataset": _ifaces.InputArgument(
-            total_size=10**9, is_dir=False,
+            total_size=10**9,
+            is_dir=False,
             uri="s3://example-datasets/finetune.parquet",
             staging_uri="",
         ),
@@ -225,10 +248,10 @@ def main() -> None:
             # Resource asks
             "cloud-pipelines.net/launchers/generic/resources.cpu": "16+",
             "cloud-pipelines.net/launchers/generic/resources.memory": "256",
-            "cloud-pipelines.net/launchers/generic/resources.accelerators":
-                json.dumps({"nvidia-tesla-h100": 8}),  # Tangle's JSON form
-            "cloud-pipelines.net/launchers/generic/resources.ephemeral_storage":
-                "1Ti",
+            "cloud-pipelines.net/launchers/generic/resources.accelerators": json.dumps(
+                {"nvidia-tesla-h100": 8}
+            ),  # Tangle's JSON form
+            "cloud-pipelines.net/launchers/generic/resources.ephemeral_storage": "1Ti",
             # 32 nodes — above Tangle K8s launcher's hardcoded cap of 16.
             "tangleml.com/launchers/kubernetes/multi_node/number_of_nodes": "32",
             # SkyPilot-only: spot instances with auto-recovery via managed jobs.
@@ -244,8 +267,7 @@ def main() -> None:
     res = task.resources
     print(f"  Submitted job_id = {handle.job_id}")
     print(f"  Job name         = {submission['name']}")
-    print(f"  num_nodes        = {task.num_nodes}  "
-          f"(Tangle K8s cap is 16)")
+    print(f"  num_nodes        = {task.num_nodes}  " f"(Tangle K8s cap is 16)")
     print(f"  resources        = {res.kwargs}")
     print(f"  pool kwarg       = {submission['kwargs'].get('pool')}")
     print(f"  file_mounts      = {task.file_mounts}")

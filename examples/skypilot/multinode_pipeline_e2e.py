@@ -12,6 +12,7 @@ Worker pods authenticate to GCS via a GCP service-account key mounted
 by SkyPilot's helm chart (gcpCredentials.enabled=true), so storage
 mounts work outside GKE.
 """
+
 from __future__ import annotations
 import datetime, json, os, time, urllib.request, urllib.error
 
@@ -20,8 +21,10 @@ BASE = os.environ.get("TANGLE_API_URL", "http://localhost:8000")
 
 def post(path, body):
     req = urllib.request.Request(
-        BASE + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST",
+        BASE + path,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())
@@ -138,8 +141,9 @@ training_spec = {
             "image": "pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime",
             "env": {"PIPELINE_RUN_TS": ts},
             "command": [
-                "bash", "-c",
-                'set -euo pipefail; '
+                "bash",
+                "-c",
+                "set -euo pipefail; "
                 'export MASTER_ADDR="${TANGLE_MULTI_NODE_NODE_0_ADDRESS:-localhost}"; '
                 'export MASTER_PORT="29500"; '
                 'export RANK="${TANGLE_MULTI_NODE_NODE_INDEX:-0}"; '
@@ -149,7 +153,7 @@ training_spec = {
                 'export EPOCHS="5"; export BATCH_SIZE="128"; export LR="0.01"; '
                 'echo "[$(hostname)] rank=$RANK/$WORLD_SIZE master=$MASTER_ADDR:$MASTER_PORT"; '
                 'nvidia-smi -L 2>/dev/null || echo "nvidia-smi unavailable"; '
-                f'python3 -u <<\'PYEOF\'\n{_TRAIN_PY}\nPYEOF',
+                f"python3 -u <<'PYEOF'\n{_TRAIN_PY}\nPYEOF",
                 {"outputPath": "checkpoint"},
                 {"outputPath": "training_log"},
             ],
@@ -193,7 +197,11 @@ deadline = time.time() + 1800
 last = None
 while time.time() < deadline:
     state = get(f"/api/executions/{root_exec}/graph_execution_state")
-    line = json.dumps(state.get("child_execution_status_stats", {})) if state else "<no state>"
+    line = (
+        json.dumps(state.get("child_execution_status_stats", {}))
+        if state
+        else "<no state>"
+    )
     if line != last:
         print(f"  [{time.strftime('%H:%M:%S')}] {line}", flush=True)
         last = line
@@ -202,25 +210,34 @@ while time.time() < deadline:
     for child_id, status_dict in stats.items():
         for status, count in status_dict.items():
             summary[status] = summary.get(status, 0) + count
-    if any(summary.get(k, 0) > 0 for k in ("FAILED", "SYSTEM_ERROR", "INVALID", "CANCELLED")):
+    if any(
+        summary.get(k, 0) > 0
+        for k in ("FAILED", "SYSTEM_ERROR", "INVALID", "CANCELLED")
+    ):
         break
-    if (summary.get("SUCCEEDED", 0) >= 1 and
-            not any(summary.get(k, 0) > 0
-                    for k in ("PENDING", "QUEUED", "RUNNING", "WAITING_FOR_UPSTREAM",
-                              "STARTING"))):
+    if summary.get("SUCCEEDED", 0) >= 1 and not any(
+        summary.get(k, 0) > 0
+        for k in ("PENDING", "QUEUED", "RUNNING", "WAITING_FOR_UPSTREAM", "STARTING")
+    ):
         break
     time.sleep(15)
 
 print(f"\n=== final root state ===")
-print(json.dumps(get(f"/api/executions/{root_exec}/graph_execution_state"), indent=2)[:2500])
+print(
+    json.dumps(get(f"/api/executions/{root_exec}/graph_execution_state"), indent=2)[
+        :2500
+    ]
+)
 
 print(f"\n=== child task statuses ===")
 details = get(f"/api/executions/{root_exec}/details")
 child_ids = (details or {}).get("child_task_execution_ids", {}) or {}
 for task_id, exec_id in child_ids.items():
     cstate = get(f"/api/executions/{exec_id}/container_state")
-    print(f"  {task_id}: status={(cstate or {}).get('status')}  "
-          f"exit_code={(cstate or {}).get('exit_code')}")
+    print(
+        f"  {task_id}: status={(cstate or {}).get('status')}  "
+        f"exit_code={(cstate or {}).get('exit_code')}"
+    )
     if cstate and cstate.get("debug_info", {}).get("skypilot"):
         sky = cstate["debug_info"]["skypilot"]
         print(f"    sky job_id={sky.get('job_id')}  name={sky.get('job_name')}")
