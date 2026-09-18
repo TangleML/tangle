@@ -1218,6 +1218,25 @@ class _KubernetesJobLauncher(
                 max_failed_indexes=0,
                 completions=num_nodes,
                 parallelism=num_nodes,
+                # Retry infrastructure disruptions only:
+                #   DisruptionTarget -> Ignore  -> not charged -> replacement Pod
+                #   anything else    -> charged -> budget is 0 -> index fails
+                # Kubernetes sets DisruptionTarget for preemption, eviction, taint-based
+                # deletion, node loss and graceful node shutdown -- never for a task's
+                # own exit code.
+                pod_failure_policy=k8s_client_lib.V1PodFailurePolicy(
+                    rules=[
+                        k8s_client_lib.V1PodFailurePolicyRule(
+                            action="Ignore",
+                            on_pod_conditions=[
+                                k8s_client_lib.V1PodFailurePolicyOnPodConditionsPattern(
+                                    type="DisruptionTarget",
+                                    status="True",
+                                )
+                            ],
+                        )
+                    ]
+                ),
             ),
         )
 
