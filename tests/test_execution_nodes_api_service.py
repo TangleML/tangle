@@ -90,6 +90,13 @@ class TestGetGraphExecutionState:
         assert result.child_execution_status_summary.ended_executions == 0
         assert result.child_execution_status_summary.has_ended is True
 
+    def test_missing_execution_raises_not_found(self):
+        """An absent execution raises ItemNotFoundError (404) instead of
+        returning empty stats that look like a finished graph."""
+        with self.session_factory() as session:
+            with pytest.raises(errors.ItemNotFoundError):
+                self.service.get_graph_execution_state(session, "does-not-exist")
+
     def test_children_with_no_status_are_excluded(self):
         """Children whose container_execution_status is None are not counted."""
         with self.session_factory() as session:
