@@ -168,6 +168,17 @@ Currently the following launchers are supported:
 * Local Kubernetes using local storage via HostPath volumes
 * Google Cloud Kubernetes Engine using Google Cloud Storage
 
+Kubernetes Job tasks can opt into bounded replacement of infrastructure-disrupted pods:
+
+```yaml
+annotations:
+  tangleml.com/launchers/kubernetes/job/disruption_retries: "1"
+```
+
+The launcher retries pods marked by Kubernetes with `DisruptionTarget=True`; a non-zero exit from the
+main container still fails immediately. The default is `0` (no retries). Only enable this for
+restart-safe components because a disrupted attempt may have produced partial external side effects.
+
 More launchers may be added in the future.
 
 ### Credits
