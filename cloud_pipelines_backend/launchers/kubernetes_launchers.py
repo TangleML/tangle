@@ -192,7 +192,9 @@ class _KubernetesContainerLauncherBase:
         self._request_timeout = request_timeout
         self._pod_name_prefix = pod_name_prefix
         self._pod_labels = _DEFAULT_KUBERNETES_LABELS | (pod_labels or {})
-        self._pod_annotations = _DEFAULT_KUBERNETES_ANNOTATIONS | (pod_annotations or {})
+        self._pod_annotations = _DEFAULT_KUBERNETES_ANNOTATIONS | (
+            pod_annotations or {}
+        )
         self._pod_postprocessor = pod_postprocessor
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
 
@@ -756,7 +758,6 @@ class KubernetesWithGcsFuseContainerLauncher(GoogleKubernetesEngineLauncher):
 
 
 class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
-
     def __init__(
         self,
         pod_name: str,
@@ -1200,7 +1201,6 @@ class _KubernetesJobLauncher(
                     _request_timeout=self._request_timeout,
                 )
             except Exception as ex:
-
                 raise interfaces.LauncherError(
                     f"Failed to create Kubernetes Service {explicit_service_name}: {_kubernetes_serialize(service)}"
                 ) from ex
