@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import kubernetes.client.exceptions
 from kubernetes import client as k8s_client_lib
+from kubernetes import informer as k8s_informer_lib
 from kubernetes import watch as k8s_watch_lib
 
 from cloud_pipelines.orchestration.launchers import naming_utils
@@ -184,6 +185,7 @@ class _KubernetesContainerLauncherBase:
             [str, str, str, bool],
             tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
         ],
+        _use_informer_cache: bool = True,
     ):
         self._namespace = namespace
         self._service_account_name = service_account_name
@@ -197,6 +199,24 @@ class _KubernetesContainerLauncherBase:
         )
         self._pod_postprocessor = pod_postprocessor
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
+
+        self._use_informer_cache = _use_informer_cache
+        if _use_informer_cache:
+            core_api_client = k8s_client_lib.CoreV1Api(self._api_client)
+            # TODO: Hack the cache class so that DELETE events do not remove objects form the cache.
+            # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
+            # But Tangle has only recently started labelling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
+            # TODO: Filter by namespace. But Tangle executions can be submitted to multiple namespaces. So, we'll need multiple informers.
+            self._pod_informer = k8s_informer_lib.SharedInformer(
+                # list_func=core_api_client.list_namespaced_pod,
+                # namespace=namespace,
+                list_func=core_api_client.list_pod_for_all_namespaces,
+                namespace=None,
+                label_selector=None,
+            )
+            self._pod_informer.start()
+        else:
+            self._pod_informer = None
 
         try:
             k8s_client_lib.VersionApi(self._api_client).get_code(
@@ -925,12 +945,17 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
 
     def get_refreshed(self) -> "LaunchedKubernetesContainer":
         launcher = self._get_launcher()
-        core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-        pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
-            name=self._pod_name,
-            namespace=self._namespace,
-            _request_timeout=launcher._request_timeout,
-        )
+        if launcher._pod_informer:
+            pod: k8s_client_lib.V1Pod = launcher._pod_informer.cache.get(
+                self._debug_pod
+            )
+        else:
+            core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
+            pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
+                name=self._pod_name,
+                namespace=self._namespace,
+                _request_timeout=launcher._request_timeout,
+            )
         new_launched_container = copy.copy(self)
         new_launched_container._debug_pod = pod
         return new_launched_container
@@ -1026,6 +1051,7 @@ class _KubernetesJobLauncher(
             [str, str, str, bool],
             tuple[k8s_client_lib.V1Volume, k8s_client_lib.V1VolumeMount],
         ],
+        _use_informer_cache: bool = True,
     ):
         super().__init__(
             namespace=namespace,
@@ -1038,7 +1064,23 @@ class _KubernetesJobLauncher(
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
+            _use_informer_cache=_use_informer_cache,
         )
+        if _use_informer_cache:
+            batch_api_client = k8s_client_lib.BatchV1Api(self._api_client)
+            # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
+            # But Tangle has only recently started labelling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
+            # TODO: Filter by namespace. But Tangle executions can be submitted to multiple namespaces. So, we'll need multiple informers.
+            self._job_informer = k8s_informer_lib.SharedInformer(
+                # list_func=batch_api_client.list_namespaced_job,
+                # namespace=namespace,
+                list_func=batch_api_client.list_job_for_all_namespaces,
+                namespace=None,
+                label_selector=None,
+            )
+            self._job_informer.start()
+        else:
+            self._pod_informer = None
 
     def launch_container_task(
         self,
@@ -1514,23 +1556,45 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
     def get_refreshed(self) -> "LaunchedKubernetesJob":
         launcher = self._get_launcher()
-        batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
-        job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
-            name=self._job_name,
-            namespace=self._namespace,
-            _request_timeout=launcher._request_timeout,
-        )
-        # Refreshing the job pods. We do not strictly need them.
-        # But this information is useful for debugging and it will also allow slightly better status reporting.
-        core_api_client = k8s_client_lib.CoreV1Api(launcher._api_client)
-        pod_list_response: k8s_client_lib.V1PodList = (
-            core_api_client.list_namespaced_pod(
+        self._debug_job
+        if launcher._job_informer:
+            job: k8s_client_lib.V1Job = launcher._job_informer.cache.get(
+                self._debug_job
+            )
+        else:
+            batch_api_client = k8s_client_lib.BatchV1Api(
+                api_client=launcher._api_client
+            )
+            job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
+                name=self._job_name,
                 namespace=self._namespace,
-                label_selector=f"job-name={self._job_name}",
-                watch=False,
                 _request_timeout=launcher._request_timeout,
             )
-        )
+        # Refresh the job pods
+        if launcher._pod_informer:
+            # Problem: We do not know the pod names since they have randomly generated suffixes.
+            pod_key_prefix = f"{self._namespace}/{self._job_name}-"
+            pods: list[k8s_client_lib.V1Pod] = []
+            for pod_key in launcher._pod_informer.cache.list_keys():
+                if pod_key.startswith(pod_key_prefix):
+                    pod = launcher._pod_informer.cache.get(pod_key)
+                    if pod:
+                        # We could check that the pod belongs to our job. But the conflict is unlikely to happen in reality without an adversarial access to the cluster.
+                        pods.append(pod)
+        else:
+            # Refreshing the job pods. We do not strictly need them.
+            # But this information is useful for debugging and it will also allow slightly better status reporting.
+            core_api_client = k8s_client_lib.CoreV1Api(launcher._api_client)
+            pod_list_response: k8s_client_lib.V1PodList = (
+                core_api_client.list_namespaced_pod(
+                    namespace=self._namespace,
+                    label_selector=f"job-name={self._job_name}",
+                    watch=False,
+                    _request_timeout=launcher._request_timeout,
+                )
+            )
+            pods = pod_list_response.items
+
         # Preserving missing Pod information. We're starting with the Pod info that we already have instead of starting form nothing.
         # This way if some Pods are now missing, we do not lose their information that we've obtained in the past.
         pod_map = copy.copy(self._debug_pods)
@@ -1540,7 +1604,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             # In this case we want to get the latest Pods.
             # Alternatively, we could store all pods, but this can complicate the routines that determine status and get logs.
             pods_sorted_by_creation_time = sorted(
-                pod_list_response.items,
+                pods,
                 key=lambda pod: pod.metadata.creation_timestamp or "",
             )
             for pod in pods_sorted_by_creation_time:
@@ -1557,7 +1621,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                     )
                 pod_map[index_str] = pod
         else:
-            for pod in pod_list_response.items:
+            for pod in pods:
                 index_str: str = pod.metadata.name
                 pod_map[index_str] = pod
         new_launched_container = copy.copy(self)
