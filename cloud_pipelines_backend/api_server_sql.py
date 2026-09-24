@@ -576,6 +576,7 @@ class ExecutionNodeReference:
 @dataclasses.dataclass
 class GetContainerExecutionStateResponse:
     status: bts.ContainerExecutionStatus
+    updated_at: datetime.datetime | None = None
     exit_code: int | None = None
     started_at: datetime.datetime | None = None
     ended_at: datetime.datetime | None = None
@@ -836,6 +837,7 @@ class ExecutionNodesApiService_Sql:
 
         return GetContainerExecutionStateResponse(
             status=container_execution.status,
+            updated_at=container_execution.updated_at,
             exit_code=container_execution.exit_code,
             started_at=container_execution.started_at,
             ended_at=container_execution.ended_at,
