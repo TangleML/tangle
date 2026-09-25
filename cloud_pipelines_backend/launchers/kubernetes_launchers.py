@@ -1157,6 +1157,7 @@ class _KubernetesJobLauncher(
         # we should prohibit/ignore changing pod namespace in the pod post-processor.
         namespace = pod.metadata.namespace
 
+        service: k8s_client_lib.V1Service | None = None
         if enable_multi_node:
             main_container_spec = pod.spec.containers[0]
             main_container_spec.env = main_container_spec.env or []
@@ -1176,9 +1177,25 @@ class _KubernetesJobLauncher(
                     ),
                 ),
             )
-            # The headless Service is created after the Job so it can carry a
-            # garbage-collectable owner reference. Set the subdomain on the Pod
-            # template now so every indexed Pod receives its stable DNS name.
+            # Handling cross-pod communication.
+            # Creating headless Kubernetes Service to give all pods in the job a stable DNS name to communicate with each other.
+            service = k8s_client_lib.V1Service(
+                metadata=k8s_client_lib.V1ObjectMeta(
+                    name=explicit_service_name,
+                    namespace=namespace,
+                    annotations=_DEFAULT_KUBERNETES_ANNOTATIONS,
+                    labels=_DEFAULT_KUBERNETES_LABELS,
+                ),
+                spec=k8s_client_lib.V1ServiceSpec(
+                    # "Headless" service.
+                    cluster_ip="None",
+                    selector={
+                        "job-name": explicit_job_name,
+                    },
+                ),
+            )
+            # Setting Pod's spec.subdomain to exact name of teh service.
+            # This requires the service name to be known.
             pod.spec.subdomain = explicit_service_name
 
         job = k8s_client_lib.V1Job(
@@ -1245,34 +1262,21 @@ class _KubernetesJobLauncher(
         _logger.info(f"Created Kubernetes Job {job_name} in namespace {job_namespace}")
 
         if enable_multi_node:
-            # Give all Pods in the indexed Job stable DNS names for cross-Pod
-            # communication. Owning the Service from the Job makes Kubernetes
-            # garbage-collect the Service (and its EndpointSlice) whenever the
-            # Job is deleted, including deletion outside Tangle's cleanup path.
-            service = k8s_client_lib.V1Service(
-                metadata=k8s_client_lib.V1ObjectMeta(
-                    name=explicit_service_name,
-                    namespace=job_namespace,
-                    annotations=_DEFAULT_KUBERNETES_ANNOTATIONS,
-                    labels=_DEFAULT_KUBERNETES_LABELS,
-                    owner_references=[
-                        k8s_client_lib.V1OwnerReference(
-                            api_version="batch/v1",
-                            kind="Job",
-                            name=job_name,
-                            uid=job_uid,
-                        )
-                    ],
-                ),
-                spec=k8s_client_lib.V1ServiceSpec(
-                    cluster_ip="None",
-                    selector={"job-name": job_name},
-                ),
-            )
+            assert service
+            # The Job's server-assigned UID is required to make the Service a
+            # garbage-collected dependent of the Job.
+            service.metadata.owner_references = [
+                k8s_client_lib.V1OwnerReference(
+                    api_version="batch/v1",
+                    kind="Job",
+                    name=job_name,
+                    uid=job_uid,
+                )
+            ]
             core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
             try:
-                core_api_client.create_namespaced_service(
-                    namespace=job_namespace,
+                _: k8s_client_lib.V1Service = core_api_client.create_namespaced_service(
+                    namespace=namespace,
                     body=service,
                     _request_timeout=self._request_timeout,
                 )
