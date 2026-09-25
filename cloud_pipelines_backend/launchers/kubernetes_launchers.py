@@ -1157,6 +1157,7 @@ class _KubernetesJobLauncher(
         # we should prohibit/ignore changing pod namespace in the pod post-processor.
         namespace = pod.metadata.namespace
 
+        service: k8s_client_lib.V1Service | None = None
         if enable_multi_node:
             main_container_spec = pod.spec.containers[0]
             main_container_spec.env = main_container_spec.env or []
@@ -1193,17 +1194,6 @@ class _KubernetesJobLauncher(
                     },
                 ),
             )
-            core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
-            try:
-                _: k8s_client_lib.V1Service = core_api_client.create_namespaced_service(
-                    namespace=namespace,
-                    body=service,
-                    _request_timeout=self._request_timeout,
-                )
-            except Exception as ex:
-                raise interfaces.LauncherError(
-                    f"Failed to create Kubernetes Service {explicit_service_name}: {_kubernetes_serialize(service)}"
-                ) from ex
             # Setting Pod's spec.subdomain to exact name of teh service.
             # This requires the service name to be known.
             pod.spec.subdomain = explicit_service_name
@@ -1268,7 +1258,47 @@ class _KubernetesJobLauncher(
 
         job_name: str = created_job.metadata.name
         job_namespace: str = created_job.metadata.namespace
+        job_uid: str = created_job.metadata.uid
         _logger.info(f"Created Kubernetes Job {job_name} in namespace {job_namespace}")
+
+        if enable_multi_node:
+            assert service
+            # The Job's server-assigned UID is required to make the Service a
+            # garbage-collected dependent of the Job.
+            service.metadata.owner_references = [
+                k8s_client_lib.V1OwnerReference(
+                    api_version="batch/v1",
+                    kind="Job",
+                    name=job_name,
+                    uid=job_uid,
+                )
+            ]
+            core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
+            try:
+                _: k8s_client_lib.V1Service = core_api_client.create_namespaced_service(
+                    namespace=namespace,
+                    body=service,
+                    _request_timeout=self._request_timeout,
+                )
+            except Exception as ex:
+                # Do not leave a runnable multi-node Job without the Service its
+                # Pod DNS names depend on. If the Service request succeeded but
+                # its response was lost, its owner reference also removes it.
+                try:
+                    batch_api_client.delete_namespaced_job(
+                        name=job_name,
+                        namespace=job_namespace,
+                        grace_period_seconds=0,
+                        propagation_policy="Background",
+                        _request_timeout=self._request_timeout,
+                    )
+                except Exception:
+                    _logger.exception(
+                        f"Failed to roll back Kubernetes Job {job_name} after Service creation failed."
+                    )
+                raise interfaces.LauncherError(
+                    f"Failed to create Kubernetes Service {explicit_service_name}: {_kubernetes_serialize(service)}"
+                ) from ex
 
         launched_container = LaunchedKubernetesJob(
             job_name=job_name,
@@ -1687,12 +1717,34 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     def _delete_job(self):
         launcher = self._get_launcher()
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=launcher._api_client)
-        batch_api_client.delete_namespaced_job(
-            name=self._job_name,
-            namespace=self._namespace,
-            grace_period_seconds=10,
-            propagation_policy="Foreground",
-        )
+        try:
+            batch_api_client.delete_namespaced_job(
+                name=self._job_name,
+                namespace=self._namespace,
+                grace_period_seconds=10,
+                propagation_policy="Foreground",
+                _request_timeout=launcher._request_timeout,
+            )
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status != http.HTTPStatus.NOT_FOUND:
+                raise
+
+        # Jobs created before Services gained owner references still need
+        # explicit cleanup. New Services normally disappear through Kubernetes
+        # garbage collection; deleting by the deterministic Job name keeps this
+        # operation idempotent in both cases.
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
+        try:
+            core_api_client.delete_namespaced_service(
+                name=self._job_name,
+                namespace=self._namespace,
+                grace_period_seconds=0,
+                propagation_policy="Background",
+                _request_timeout=launcher._request_timeout,
+            )
+        except kubernetes.client.exceptions.ApiException as ex:
+            if ex.status != http.HTTPStatus.NOT_FOUND:
+                raise
 
     def terminate(self):
         self._delete_job()
