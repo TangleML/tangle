@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import pathlib
+import threading
 import typing
 from typing import Any, Optional
 
@@ -213,12 +214,14 @@ class _KubernetesContainerLauncherBase:
         # Informer listens to Kubernetes events and prepares a warm cache of Pod states so that refreshing a launched container is instantaneous.
         core_api_client = k8s_client_lib.CoreV1Api(self._api_client)
         # TODO: Hack the cache class so that DELETE events do not remove objects form the cache.
-        self._pod_informer = k8s_informer_lib.SharedInformer(
-            # TODO: Filter by namespace. But Tangle executions can be submitted to multiple namespaces. So, we'll need multiple informers.
-            # list_func=core_api_client.list_namespaced_pod,
-            # namespace=namespace,
-            list_func=core_api_client.list_pod_for_all_namespaces,
-            namespace=None,
+        self._pod_informer = MultiNamespaceInformer(
+            # Namespace filtering.
+            # We want to filter by namespace. But Tangle executions can be submitted to multiple namespaces.
+            # We could use cluster-global `list_pod_for_all_namespaces`, but then Tangle would need the special cluster-wide RBAC permissions which are usually not given.
+            # The SharedInformer class can only either watch all namespaces or a single namespace.
+            # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
+            list_func=core_api_client.list_namespaced_pod,
+            initial_namespaces=[namespace],
             # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
             # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
             # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
@@ -944,9 +947,8 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
     def get_refreshed(self) -> "LaunchedKubernetesContainer":
         launcher = self._get_launcher()
         if launcher._pod_informer:
-            pod: k8s_client_lib.V1Pod = launcher._pod_informer.cache.get(
-                self._debug_pod
-            )
+            pod_cache = launcher._pod_informer.get_cache(self._namespace)
+            pod: k8s_client_lib.V1Pod = pod_cache.get(self._debug_pod)
         else:
             core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
             pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
@@ -1066,12 +1068,16 @@ class _KubernetesJobLauncher(
         # Initializing the Informer.
         # Informer listens to Kubernetes events and prepares a warm cache of Pod and Job states so that refreshing a launched container is instantaneous.
         batch_api_client = k8s_client_lib.BatchV1Api(self._api_client)
-        self._job_informer = k8s_informer_lib.SharedInformer(
-            # TODO: Filter by namespace. But Tangle executions can be submitted to multiple namespaces. So, we'll need multiple informers.
-            # list_func=batch_api_client.list_namespaced_job,
-            # namespace=namespace,
-            list_func=batch_api_client.list_job_for_all_namespaces,
-            namespace=None,
+        self._job_informer = MultiNamespaceInformer(
+            # Namespace filtering.
+            # We want to filter by namespace. But Tangle executions can be submitted to multiple namespaces.
+            # We could use cluster-global `list_job_for_all_namespaces`, but then Tangle would need the special cluster-wide RBAC permissions which are usually not given.
+            # The SharedInformer class can only either watch all namespaces or a single namespace.
+            # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
+            list_func=batch_api_client.list_namespaced_job,
+            initial_namespaces=[namespace],
+            # list_func=batch_api_client.list_job_for_all_namespaces,
+            # namespace=None,
             # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
             # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
             # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
@@ -1555,9 +1561,8 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         launcher = self._get_launcher()
         self._debug_job
         if launcher._job_informer:
-            job: k8s_client_lib.V1Job = launcher._job_informer.cache.get(
-                self._debug_job
-            )
+            job_cache = launcher._job_informer.get_cache(self._namespace)
+            job: k8s_client_lib.V1Job = job_cache.get(self._debug_job)
         else:
             batch_api_client = k8s_client_lib.BatchV1Api(
                 api_client=launcher._api_client
@@ -1569,12 +1574,13 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             )
         # Refresh the job pods
         if launcher._pod_informer:
+            pod_cache = launcher._job_informer.get_cache(self._namespace)
             # Problem: We do not know the pod names since they have randomly generated suffixes.
             pod_key_prefix = f"{self._namespace}/{self._job_name}-"
             pods: list[k8s_client_lib.V1Pod] = []
-            for pod_key in launcher._pod_informer.cache.list_keys():
+            for pod_key in pod_cache.list_keys():
                 if pod_key.startswith(pod_key_prefix):
-                    pod = launcher._pod_informer.cache.get(pod_key)
+                    pod = pod_cache.get(pod_key)
                     if pod:
                         # We could check that the pod belongs to our job. But the conflict is unlikely to happen in reality without an adversarial access to the cluster.
                         pods.append(pod)
@@ -1997,3 +2003,65 @@ def _launcher_error_from_api_exception(
     return interfaces.LauncherError(
         f"{message}: {exception!r}", is_retriable=is_retriable
     )
+
+
+class MultiNamespaceInformer:
+    def __init__(
+        self,
+        *,
+        initial_namespaces: list[str] | None = None,
+        list_func,
+        resync_period=0,
+        label_selector=None,
+        field_selector=None,
+        key_func=None,
+    ):
+        self._list_func = list_func
+        self._resync_period = resync_period
+        self._label_selector = label_selector
+        self._field_selector = field_selector
+        self._key_func = key_func
+        self._informers: dict[str, k8s_informer_lib.SharedInformer] = {}
+        self._lock = threading.Lock()
+        for namespace in initial_namespaces or []:
+            self._get_or_create_informer(namespace)
+
+    def _get_or_create_informer(
+        self, namespace: str
+    ) -> k8s_informer_lib.SharedInformer:
+        informer = self._informers.get(namespace)
+        if informer:
+            return informer
+        _logger.debug(
+            f"MultiNamespaceInformer: Creating new informer for list_func={self._list_func}, namespace={namespace}"
+        )
+        informer = k8s_informer_lib.SharedInformer(
+            list_func=self._list_func,
+            namespace=namespace,
+            resync_period=self._resync_period,
+            label_selector=self._label_selector,
+            field_selector=self._field_selector,
+            key_func=self._key_func,
+        )
+        # Prefill the cache
+        informer._initial_list()
+        self._informers[namespace] = informer
+        return informer
+
+    def get_cache(self, namespace: str):
+        informer = self._informers.get(namespace)
+        if informer:
+            return informer.cache
+        with self._lock:
+            informer = self._get_or_create_informer(namespace)
+            return informer.cache
+
+    def start(self):
+        with self._lock:
+            for informer in self._informers.values():
+                informer.start()
+
+    def stop(self):
+        with self._lock:
+            for informer in self._informers.values():
+                informer.stop()
