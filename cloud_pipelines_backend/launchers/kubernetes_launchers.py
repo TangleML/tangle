@@ -1605,7 +1605,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             pods: list[k8s_client_lib.V1Pod] = []
             for pod_key in pod_cache.list_keys():
                 if pod_key.startswith(pod_key_prefix):
-                    pod = pod_cache.get(pod_key)
+                    pod = pod_cache.get_by_key(pod_key)
                     if pod:
                         # We could check that the pod belongs to our job. But the conflict is unlikely to happen in reality without an adversarial access to the cluster.
                         pods.append(pod)
