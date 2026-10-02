@@ -1259,8 +1259,12 @@ class _KubernetesJobLauncher(
                 namespace=namespace,
                 # annotations=self._pod_annotations,
                 annotations=_DEFAULT_KUBERNETES_ANNOTATIONS,
-                # labels=self._pod_labels,
-                labels=_DEFAULT_KUBERNETES_LABELS,
+                # ! Kubernetes gotcha: If Job labels are empty, Kubernetes copies the labels from the Job's Pod template (but not annotations).
+                # https://github.com/kubernetes/kubernetes/blob/b1dc9d16763d2546b8464a09307471f3411ab391/pkg/apis/batch/v1/defaults.go#L49-L52
+                # So, changing code from no labels to some default labels stops that special behavior, causing pod template labels to not being propagated to Job itself.
+                # We need to preserve this "copy Job labels from pod template labels" behavior until consumers can migrate to specifying the Job labels explicitly.
+                # We could accomplish this via `labels=None`, but it's better to make the copy explicit since most people do not know about the label copy behavior quirk.
+                labels=pod.metadata.labels,
             ),
             spec=k8s_client_lib.V1JobSpec(
                 template=k8s_client_lib.V1PodTemplateSpec(
