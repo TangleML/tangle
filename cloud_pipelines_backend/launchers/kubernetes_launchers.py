@@ -2036,6 +2036,7 @@ class MultiNamespaceInformer:
         self._key_func = key_func
         self._informers: dict[str, k8s_informer_lib.SharedInformer] = {}
         self._lock = threading.Lock()
+        self._is_active = False
         for namespace in initial_namespaces or []:
             self._get_or_create_informer(namespace)
 
@@ -2059,6 +2060,8 @@ class MultiNamespaceInformer:
         # Prefill the cache
         informer._initial_list()
         self._informers[namespace] = informer
+        if self._is_active:
+            informer.start()
         return informer
 
     def get_cache(self, namespace: str):
@@ -2071,10 +2074,12 @@ class MultiNamespaceInformer:
 
     def start(self):
         with self._lock:
+            self._is_active = True
             for informer in self._informers.values():
                 informer.start()
 
     def stop(self):
         with self._lock:
+            self._is_active = False
             for informer in self._informers.values():
                 informer.stop()
