@@ -105,6 +105,7 @@ def migrate_db(
             break
 
     database_migrations.migrate_secret_value_column(db_engine=db_engine)
+    database_migrations.migrate_component_text_column(db_engine=db_engine)
 
     if do_skip_backfill:
         _logger.info("Skipping annotation backfills")
