@@ -946,12 +946,17 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
 
     def get_refreshed(self) -> "LaunchedKubernetesContainer":
         launcher = self._get_launcher()
+        pod: k8s_client_lib.V1Pod | None = None
         if launcher._pod_informer:
             pod_cache = launcher._pod_informer.get_cache(self._namespace)
-            pod: k8s_client_lib.V1Pod = pod_cache.get(self._debug_pod)
-        else:
+            pod = pod_cache.get(self._debug_pod)
+        # The fallback to real API call should not be needed, but leaving it just in case
+        if not pod:
+            _logger.error(
+                f"The informer cache did not have the Pod: name={self._pod_name}, namespace={self._namespace}"
+            )
             core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
-            pod: k8s_client_lib.V1Pod = core_api_client.read_namespaced_pod(
+            pod = core_api_client.read_namespaced_pod(
                 name=self._pod_name,
                 namespace=self._namespace,
                 _request_timeout=launcher._request_timeout,
@@ -1563,15 +1568,19 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
     def get_refreshed(self) -> "LaunchedKubernetesJob":
         launcher = self._get_launcher()
-        self._debug_job
+        job: k8s_client_lib.V1Job | None = None
         if launcher._job_informer:
             job_cache = launcher._job_informer.get_cache(self._namespace)
-            job: k8s_client_lib.V1Job = job_cache.get(self._debug_job)
-        else:
+            job = job_cache.get(self._debug_job)
+        # The fallback to real API call should not be needed, but leaving it just in case
+        if not job:
+            _logger.error(
+                f"The informer cache did not have the Job: name={self._job_name}, namespace={self._namespace}"
+            )
             batch_api_client = k8s_client_lib.BatchV1Api(
                 api_client=launcher._api_client
             )
-            job: k8s_client_lib.V1Job = batch_api_client.read_namespaced_job(
+            job = batch_api_client.read_namespaced_job(
                 name=self._job_name,
                 namespace=self._namespace,
                 _request_timeout=launcher._request_timeout,
