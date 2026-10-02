@@ -1587,7 +1587,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             )
         # Refresh the job pods
         if launcher._pod_informer:
-            pod_cache = launcher._job_informer.get_cache(self._namespace)
+            pod_cache = launcher._pod_informer.get_cache(self._namespace)
             # Problem: We do not know the pod names since they have randomly generated suffixes.
             pod_key_prefix = f"{self._namespace}/{self._job_name}-"
             pods: list[k8s_client_lib.V1Pod] = []
