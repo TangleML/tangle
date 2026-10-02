@@ -1601,14 +1601,13 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         if launcher._pod_informer:
             pod_cache = launcher._pod_informer.get_cache(self._namespace)
             # Problem: We do not know the pod names since they have randomly generated suffixes.
-            pod_key_prefix = f"{self._namespace}/{self._job_name}-"
+            pod_name_prefix = f"{self._job_name}-"
             pods: list[k8s_client_lib.V1Pod] = []
-            for pod_key in pod_cache.list_keys():
-                if pod_key.startswith(pod_key_prefix):
-                    pod = pod_cache.get_by_key(pod_key)
-                    if pod:
-                        # We could check that the pod belongs to our job. But the conflict is unlikely to happen in reality without an adversarial access to the cluster.
-                        pods.append(pod)
+            pod: k8s_client_lib.V1Pod
+            for pod in pod_cache.list():
+                if pod.metadata.name.startswith(pod_name_prefix):
+                    # We could check that the pod belongs to our job. But the conflict is unlikely to happen in reality without an adversarial access to the cluster.
+                    pods.append(pod)
         else:
             # Refreshing the job pods. We do not strictly need them.
             # But this information is useful for debugging and it will also allow slightly better status reporting.
