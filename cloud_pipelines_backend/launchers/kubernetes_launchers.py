@@ -214,20 +214,26 @@ class _KubernetesContainerLauncherBase:
         # Informer listens to Kubernetes events and prepares a warm cache of Pod states so that refreshing a launched container is instantaneous.
         core_api_client = k8s_client_lib.CoreV1Api(self._api_client)
         # TODO: Hack the cache class so that DELETE events do not remove objects form the cache.
-        self._pod_informer = MultiNamespaceInformer(
-            # Namespace filtering.
-            # We want to filter by namespace. But Tangle executions can be submitted to multiple namespaces.
-            # We could use cluster-global `list_pod_for_all_namespaces`, but then Tangle would need the special cluster-wide RBAC permissions which are usually not given.
-            # The SharedInformer class can only either watch all namespaces or a single namespace.
-            # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
-            list_func=core_api_client.list_namespaced_pod,
-            initial_namespaces=[namespace],
-            # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
-            # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
-            # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
-            label_selector=None,
-        )
-        self._pod_informer.start()
+        try:
+            self._pod_informer = MultiNamespaceInformer(
+                # Namespace filtering.
+                # We want to filter by namespace. But Tangle executions can be submitted to multiple namespaces.
+                # We could use cluster-global `list_pod_for_all_namespaces`, but then Tangle would need the special cluster-wide RBAC permissions which are usually not given.
+                # The SharedInformer class can only either watch all namespaces or a single namespace.
+                # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
+                list_func=core_api_client.list_namespaced_pod,
+                initial_namespaces=[namespace],
+                # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
+                # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
+                # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
+                label_selector=None,
+            )
+            self._pod_informer.start()
+        except Exception:
+            _logger.exception(f"Failed to start pod informer for {namespace=}.")
+            # The failure can happen if the backend does not have Kubernetes permission to list Pods.
+            # Fall back from using informer cache to using API calls.
+            self._pod_informer = None
 
     def _prepare_kubernetes_pod(
         self,
@@ -1073,22 +1079,28 @@ class _KubernetesJobLauncher(
         # Initializing the Informer.
         # Informer listens to Kubernetes events and prepares a warm cache of Pod and Job states so that refreshing a launched container is instantaneous.
         batch_api_client = k8s_client_lib.BatchV1Api(self._api_client)
-        self._job_informer = MultiNamespaceInformer(
-            # Namespace filtering.
-            # We want to filter by namespace. But Tangle executions can be submitted to multiple namespaces.
-            # We could use cluster-global `list_job_for_all_namespaces`, but then Tangle would need the special cluster-wide RBAC permissions which are usually not given.
-            # The SharedInformer class can only either watch all namespaces or a single namespace.
-            # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
-            list_func=batch_api_client.list_namespaced_job,
-            initial_namespaces=[namespace],
-            # list_func=batch_api_client.list_job_for_all_namespaces,
-            # namespace=None,
-            # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
-            # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
-            # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
-            label_selector=None,
-        )
-        self._job_informer.start()
+        try:
+            self._job_informer = MultiNamespaceInformer(
+                # Namespace filtering.
+                # We want to filter by namespace. But Tangle executions can be submitted to multiple namespaces.
+                # We could use cluster-global `list_job_for_all_namespaces`, but then Tangle would need the special cluster-wide RBAC permissions which are usually not given.
+                # The SharedInformer class can only either watch all namespaces or a single namespace.
+                # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
+                list_func=batch_api_client.list_namespaced_job,
+                initial_namespaces=[namespace],
+                # list_func=batch_api_client.list_job_for_all_namespaces,
+                # namespace=None,
+                # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
+                # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
+                # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
+                label_selector=None,
+            )
+            self._job_informer.start()
+        except Exception:
+            _logger.exception(f"Failed to start Job informer for {namespace=}.")
+            # The failure can happen if the backend does not have Kubernetes permission to list Jobs.
+            # Fall back from using informer cache to using API calls.
+            self._job_informer = None
 
     def launch_container_task(
         self,
