@@ -10,6 +10,8 @@ from sqlalchemy import orm
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import errors
+from .access_control import checks as access_control_checks
+from .access_control import runs as access_control_runs
 from . import filter_query_sql
 
 if typing.TYPE_CHECKING:
@@ -209,9 +211,12 @@ class PipelineRunsApiService_Sql:
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
-        if not skip_user_check and (terminated_by != pipeline_run.created_by):
-            raise errors.PermissionError(
-                f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be terminated by {terminated_by}"
+        if not skip_user_check:
+            access_control_runs.require_run_scope(
+                session=session,
+                pipeline_run=pipeline_run,
+                caller=access_control_checks.Caller(email=terminated_by),
+                scope=access_control_runs.RunScope.CANCEL,
             )
         _logger.info(
             f"{pipeline_run.id=} The pipeline run is being cancelled by {terminated_by}."
@@ -408,9 +413,12 @@ class PipelineRunsApiService_Sql:
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
-        if not skip_user_check and (user_name != pipeline_run.created_by):
-            raise errors.PermissionError(
-                f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be changed by {user_name}"
+        if not skip_user_check:
+            access_control_runs.require_run_scope(
+                session=session,
+                pipeline_run=pipeline_run,
+                caller=access_control_checks.Caller(email=user_name),
+                scope=access_control_runs.RunScope.ANNOTATE,
             )
         _mirror_single_pipeline_run_annotation(
             session=session,
@@ -433,9 +441,12 @@ class PipelineRunsApiService_Sql:
         pipeline_run = session.get(bts.PipelineRun, id)
         if not pipeline_run:
             raise errors.ItemNotFoundError(f"Pipeline run {id} not found.")
-        if not skip_user_check and (user_name != pipeline_run.created_by):
-            raise errors.PermissionError(
-                f"The pipeline run {id} was started by {pipeline_run.created_by} and cannot be changed by {user_name}"
+        if not skip_user_check:
+            access_control_runs.require_run_scope(
+                session=session,
+                pipeline_run=pipeline_run,
+                caller=access_control_checks.Caller(email=user_name),
+                scope=access_control_runs.RunScope.ANNOTATE,
             )
 
         existing_annotation = session.get(bts.PipelineRunAnnotation, (id, key))
