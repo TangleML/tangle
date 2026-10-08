@@ -6,22 +6,33 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "alembic>=1.18.5",
+    "anyio>=4.10",
+    "apscheduler>=3.10,<4",
     "bugsnag>=4.9.1,<5",
     "cloud-pipelines>=0.26.7.29",
+    "elasticsearch<9",
     "fastapi[standard]>=0.141.1",
+    "httpx>=0.25.0",
+    "jinja2>=3.1.5",
     "kubernetes>=36.0.3",
     "opentelemetry-api>=1.44.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.41.1",
     "opentelemetry-exporter-otlp-proto-http>=1.39.1",
     "opentelemetry-instrumentation-fastapi>=0.60b1",
     "opentelemetry-sdk>=1.39.1",
+    "pydantic>=2.11",
+    "pyyaml",
+    "requests>=2.34.2",
     "sqlalchemy>=2.0.51",
+    "websockets",
 ]
 
 [dependency-groups]
 dev = [
     "black>=26.5.1",
+    "exceptiongroup>=1.0.2; python_version < '3.11'",
     "kubernetes-stubs-elephant-fork>=36.0.3.post1",
+    "pymysql>=1.2.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
@@ -43,6 +54,9 @@ cloud-pipelines = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib"
+markers = [
+    "mysql: needs a real MySQL 8; set QUOTA_MYSQL_TEST_URI. Skipped by default.",
+]
 [tool.setuptools.packages.find]
 include = ["cloud_pipelines_backend*"]
 namespaces = true

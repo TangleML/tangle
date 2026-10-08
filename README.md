@@ -41,6 +41,11 @@ If you duplicate Tangle to an organization, you’ll get a single-tenant multi-u
 
 You can also deploy Tangle to other environments (local or cloud).
 
+## API integrations
+
+See [reusable API integrations](docs/reusable_routes.md) for embedding saved pipelines,
+schedules, triggers, quotas, projects, search, notices, Tangent, and HTTP forwarding.
+
 ## Installation
 
 ### Try on local machine

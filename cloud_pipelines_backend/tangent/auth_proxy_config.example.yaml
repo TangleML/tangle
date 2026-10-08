@@ -1,0 +1,44 @@
+# Example auth proxy config. See `auth_proxy_mitmproxy_addon.py` for the schema.
+#
+# Every value below is either the string itself or a reference to a secret:
+#     value: constant1
+#     value: {secret: {name: secret1}}
+# Both spellings are shown below.
+
+# Values that the rules reference by name, so that the rules themselves can be shown to the
+# user: the management API edits rules and secrets separately, and never reads a value back.
+secrets:
+  secret1:
+    value: secret_constant1
+
+rules:
+  # `url_pattern` is a URL prefix, the scheme is optional. Omit it to match every request.
+  - id: rule1
+    url_pattern: api.openai.com
+    # Applied in order, to every matching request.
+    handlers:
+      - url_replace:
+          old_substring: api.openai.com
+          new_substring: ai-proxy.example.io
+      - url_regexp_replace:
+          pattern: ^https://ai-proxy\.example\.io/v(\d+)/
+          replacement: https://ai-proxy.example.io/api/v\1/
+      - set_header:
+          name: X-Tangent-Proxied
+          value: constant1
+      - set_cookie:
+          name: SECURITY_TOKEN
+          value:
+            secret:
+              name: secret1
+      # Each half takes its own value, so only the password has to be a secret. A half that
+      # is left out is empty.
+      - set_basic_auth_header:
+          username: username1
+          password:
+            secret:
+              name: secret1
+      - set_bearer_auth_header:
+          value:
+            secret:
+              name: secret1
