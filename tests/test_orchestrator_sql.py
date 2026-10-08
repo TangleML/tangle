@@ -702,3 +702,132 @@ class TestInterceptorIsOfferedOnlyLaunchableExecutions:
             if (node.extra_data or {}).get("reused_from_execution_node_id")
         ]
         assert len(reused) == 1, "exactly one of the two nodes must be a cache reuse"
+
+
+def _get_run_execution_node(
+    session: orm.Session, pipeline_run: bts.PipelineRun
+) -> bts.ExecutionNode:
+    node = session.scalar(
+        sql.select(bts.ExecutionNode)
+        .join(
+            bts.ExecutionToAncestorExecutionLink,
+            bts.ExecutionToAncestorExecutionLink.execution_id == bts.ExecutionNode.id,
+        )
+        .where(
+            bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
+            == pipeline_run.root_execution_id
+        )
+    )
+    assert node is not None
+    return node
+
+
+def _cancel_run_racing_a_stale_status_write(
+    session_factory: Callable[[], orm.Session], pipeline_run_id: bts.IdType
+) -> None:
+    """Cancel a run, then commit a status from a session that read its node earlier.
+
+    The status-history listener rewrites the node's whole `extra_data`, so the stale
+    write drops the cancellation flag the API had just committed on the node.
+    """
+    stale_session = session_factory()
+    stale_node = _get_run_execution_node(
+        stale_session, stale_session.get(bts.PipelineRun, pipeline_run_id)
+    )
+    _ = stale_node.extra_data
+
+    api_server_sql.PipelineRunsApiService_Sql().terminate(
+        session=session_factory(), id=pipeline_run_id, terminated_by="user1"
+    )
+
+    stale_node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+    stale_session.commit()
+
+    session = session_factory()
+    node = _get_run_execution_node(
+        session, session.get(bts.PipelineRun, pipeline_run_id)
+    )
+    assert "desired_state" not in (
+        node.extra_data or {}
+    ), "the race must drop the node flag"
+
+
+def _make_running_orchestrator(
+    session_factory: Callable[[], orm.Session],
+    launched_container_mock: mock.MagicMock,
+) -> orchestrator_sql.OrchestratorService_Sql:
+    orchestrator = _make_orchestrator(
+        session_factory=session_factory,
+        launched_container_mock=launched_container_mock,
+    )
+    launched_container = launched_container_mock.return_value
+    orchestrator._launcher.deserialize_launched_container_from_dict.return_value = (
+        launched_container
+    )
+    orchestrator._launcher.get_refreshed_launched_container_from_dict.return_value = (
+        launched_container
+    )
+    return orchestrator
+
+
+class TestCancellationSurvivesStaleStatusWrite:
+    """Shopify/ml-infrastructure#1316."""
+
+    def test_cancelled_run_terminates_its_container(self) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launched_container_mock = _make_launched_container_mock()
+        _process_queued_executions(session_factory, launched_container_mock)
+        pipeline_run_id = session_factory().scalar(sql.select(bts.PipelineRun.id))
+
+        _cancel_run_racing_a_stale_status_write(session_factory, pipeline_run_id)
+        _make_running_orchestrator(
+            session_factory, launched_container_mock
+        ).internal_process_running_executions_queue(session=session_factory())
+
+        launched_container_mock.return_value.terminate.assert_called_once()
+        session = session_factory()
+        container_execution = session.scalar(sql.select(bts.ContainerExecution))
+        assert container_execution.status == bts.ContainerExecutionStatus.CANCELLED
+        node = _get_run_execution_node(
+            session, session.get(bts.PipelineRun, pipeline_run_id)
+        )
+        assert node.container_execution_status == bts.ContainerExecutionStatus.CANCELLED
+
+    def test_shared_container_is_terminated_only_when_every_run_is_cancelled(
+        self,
+    ) -> None:
+        session_factory = _create_session_factory()
+        launched_container_mock = _make_launched_container_mock()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        _process_queued_executions(session_factory, launched_container_mock)
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        _process_queued_executions(session_factory, launched_container_mock)
+        assert launched_container_mock.call_count == 1, "the second run must reuse"
+        session = session_factory()
+        first_run_id, second_run_id = session.scalars(
+            sql.select(bts.PipelineRun.id).order_by(bts.PipelineRun.created_at)
+        ).all()
+        assert (
+            _get_run_execution_node(session, session.get(bts.PipelineRun, first_run_id))
+            .container_execution_id
+            == _get_run_execution_node(
+                session, session.get(bts.PipelineRun, second_run_id)
+            ).container_execution_id
+        )
+        orchestrator = _make_running_orchestrator(
+            session_factory, launched_container_mock
+        )
+        terminate = launched_container_mock.return_value.terminate
+
+        _cancel_run_racing_a_stale_status_write(session_factory, first_run_id)
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        terminate.assert_not_called()
+
+        _cancel_run_racing_a_stale_status_write(session_factory, second_run_id)
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        terminate.assert_called_once()
