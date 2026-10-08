@@ -158,11 +158,11 @@ def _make_job_launcher():
 )
 def test_get_max_retries_valid(value, expected):
     annotations = {} if value is None else {_RETRIES_KEY: value}
-    assert kubernetes_launchers._get_max_retries(annotations) == expected
+    assert common_annotations.get_max_retries(annotations) == expected
 
 
 def test_get_max_retries_no_annotations():
-    assert kubernetes_launchers._get_max_retries(None) == 0
+    assert common_annotations.get_max_retries(None) == 0
 
 
 @pytest.mark.parametrize(
@@ -170,7 +170,7 @@ def test_get_max_retries_no_annotations():
 )
 def test_get_max_retries_invalid_fails_closed(value):
     with pytest.raises(interfaces.LauncherError, match="retries.max_retries"):
-        kubernetes_launchers._get_max_retries({_RETRIES_KEY: value})
+        common_annotations.get_max_retries({_RETRIES_KEY: value})
 
 
 # Job launcher
@@ -339,6 +339,7 @@ def _make_failed_launched_job(
     tmp_path: pathlib.Path,
     latest_pods: dict[str, k8s_client_lib.V1Pod],
     completions: int = 1,
+    backoff_limit_per_index: int = 2,
 ) -> kubernetes_launchers.LaunchedKubernetesJob:
     job = k8s_client_lib.V1Job(
         metadata=k8s_client_lib.V1ObjectMeta(name="tangle-ce-123", namespace="default"),
@@ -346,7 +347,7 @@ def _make_failed_launched_job(
             template=k8s_client_lib.V1PodTemplateSpec(),
             completion_mode="Indexed",
             completions=completions,
-            backoff_limit_per_index=2,
+            backoff_limit_per_index=backoff_limit_per_index,
         ),
         status=k8s_client_lib.V1JobStatus(
             failed=3,
@@ -433,6 +434,36 @@ def test_upload_log_single_attempt_is_unchanged(cluster, tmp_path):
     assert launched.exit_code == 1
 
 
+def test_get_log_without_retries_only_collects_latest_attempts(cluster, tmp_path):
+    # Multiple pods per index can also appear without retries (e.g. disruptions or suspend/resume).
+    # Without retries, only the latest Pods are used (the previous behavior).
+    pods = _set_up_three_attempts(cluster)
+    launched = _make_failed_launched_job(
+        cluster, tmp_path, {"0": pods[2]}, backoff_limit_per_index=0
+    )
+
+    assert launched.get_log() == "2026-10-07T12:02:01.000000000Z attempt three\n"
+
+
+def test_attempt_pods_prefer_fresh_listed_pod_state(cluster, tmp_path):
+    pods = _set_up_three_attempts(cluster)
+    stale_latest_pod = _make_pod(
+        "tangle-ce-123-0-ccccc", "0", _T0 + datetime.timedelta(minutes=2), 0
+    )
+    launched = _make_failed_launched_job(cluster, tmp_path, {"0": stale_latest_pod})
+
+    attempt_pods = launched._get_all_attempt_pods()
+
+    assert list(attempt_pods) == ["0"]
+    assert [pod.metadata.name for pod in attempt_pods["0"]] == [
+        "tangle-ce-123-0-aaaaa",
+        "tangle-ce-123-0-bbbbb",
+        "tangle-ce-123-0-ccccc",
+    ]
+    # The deduplicated latest Pod is the freshly listed one.
+    assert attempt_pods["0"][2] is pods[2]
+
+
 def test_get_log_falls_back_to_latest_attempts_when_listing_fails(
     cluster, tmp_path, monkeypatch
 ):
@@ -450,7 +481,6 @@ def test_get_log_falls_back_to_latest_attempts_when_listing_fails(
 
 
 def test_multi_index_merge_keeps_attempt_headers_in_order(cluster, tmp_path):
-    # Multiple pods per index can also appear without retries (e.g. disruptions or suspend/resume).
     index_0_old = _make_pod("tangle-ce-123-0-aaaaa", "0", _T0, exit_code=1)
     index_0_new = _make_pod(
         "tangle-ce-123-0-bbbbb", "0", _T0 + datetime.timedelta(minutes=1), 1

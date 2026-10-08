@@ -70,15 +70,10 @@ MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
 SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
     "tangleml.com/launchers/kubernetes/security_context.capability.IPC_LOCK"
 )
-# Launcher-agnostic number of ADDITIONAL attempts after the first one (integer, 0..5).
-# Absent or 0 means no retries (the previous behavior).
 # On Kubernetes, retries map to the Job's native `backoffLimitPerIndex`.
 RETRIES_MAX_RETRIES_ANNOTATION_KEY = (
-    "tangleml.com/launchers/generic/retries.max_retries"
+    common_annotations.RETRIES_MAX_RETRIES_ANNOTATION_KEY
 )
-
-# Retries constants
-_RETRIES_MAX_MAX_RETRIES = 5
 
 
 # Multi-node constants
@@ -97,24 +92,6 @@ _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 _T = typing.TypeVar("_T")
 
 _CONTAINER_FILE_NAME = "data"
-
-
-def _get_max_retries(annotations: dict[str, Any] | None) -> int:
-    """Parses and validates the retries annotation. Fails closed on invalid values."""
-    value = (annotations or {}).get(RETRIES_MAX_RETRIES_ANNOTATION_KEY)
-    if value is None:
-        return 0
-    # Annotation values are not guaranteed to be strings.
-    value_str = str(value)
-    try:
-        max_retries = int(value_str)
-    except ValueError:
-        max_retries = None
-    if max_retries is None or not (0 <= max_retries <= _RETRIES_MAX_MAX_RETRIES):
-        raise interfaces.LauncherError(
-            f"Invalid value for the {RETRIES_MAX_RETRIES_ANNOTATION_KEY} annotation. The value must be an integer between 0 and {_RETRIES_MAX_MAX_RETRIES}, but got {value_str!r}."
-        )
-    return max_retries
 
 
 def _create_volume_and_volume_mount_host_path(
@@ -585,7 +562,7 @@ class _KubernetesPodLauncher(
     ) -> "LaunchedKubernetesContainer":
         # Bare Pods cannot do bounded retries (restartPolicy=OnFailure restarts forever).
         # Invalid values still fail closed. Valid values are ignored so that pipelines stay portable across launchers.
-        max_retries = _get_max_retries(annotations)
+        max_retries = common_annotations.get_max_retries(annotations)
         if max_retries > 0:
             _logger.warning(
                 f"The {RETRIES_MAX_RETRIES_ANNOTATION_KEY}={max_retries} annotation is not supported by the Kubernetes Pod launcher and will be ignored. The task will run without retries."
@@ -1147,7 +1124,7 @@ class _KubernetesJobLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesJob":
-        max_retries = _get_max_retries(annotations)
+        max_retries = common_annotations.get_max_retries(annotations)
 
         namespace = self._choose_namespace(annotations=annotations)
 
@@ -1779,12 +1756,16 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
 
         `_debug_pods` only keeps the latest Pod for each index. When a failed Pod gets retried,
         the earlier Pods still exist in the cluster (until the Job is deleted), so we list them here.
-        The latest attempt is always the Pod from `_debug_pods`.
+        This is only done for Jobs that have retries enabled. Otherwise only the latest Pods are returned (as before).
         """
-        attempt_pods = {pod_key: [pod] for pod_key, pod in self._debug_pods.items()}
+        latest_pods = {pod_key: [pod] for pod_key, pod in self._debug_pods.items()}
         job_spec = self._debug_job.spec
-        if not (job_spec and job_spec.completion_mode == "Indexed"):
-            return attempt_pods
+        if not (
+            job_spec
+            and job_spec.completion_mode == "Indexed"
+            and (job_spec.backoff_limit_per_index or 0) > 0
+        ):
+            return latest_pods
         launcher = self._get_launcher()
         core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
         try:
@@ -1801,22 +1782,23 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             _logger.exception(
                 f"Failed to list the Pods of job {self._job_name}. Only the logs of the latest attempts will be collected."
             )
-            return attempt_pods
-        latest_pod_names = {pod.metadata.name for pod in self._debug_pods.values()}
-        earlier_pods: dict[str, list[k8s_client_lib.V1Pod]] = {}
-        for pod in pods:
-            if pod.metadata.name in latest_pod_names:
-                continue
+            return latest_pods
+        # The listed Pods come last so that their (fresher) state wins during deduplication.
+        all_pods = list(self._debug_pods.values()) + pods
+        # Deduplicating the Pods by name.
+        all_pods = list({pod.metadata.name: pod for pod in all_pods}.values())
+        # Using the same ordering as `get_refreshed`, so the latest attempt is the Pod from `_debug_pods`.
+        # (Sorting is stable. Pods without creation timestamp keep their relative order.)
+        pods_in_chronological_order = sorted(
+            all_pods,
+            key=lambda pod: pod.metadata.creation_timestamp or "",
+        )
+        attempt_pods_per_index: dict[str, list[k8s_client_lib.V1Pod]] = {}
+        for pod in pods_in_chronological_order:
             index_str = _get_job_pod_completion_index(pod)
-            if index_str is None or index_str not in attempt_pods:
-                continue
-            earlier_pods.setdefault(index_str, []).append(pod)
-        for index_str, pods_for_index in earlier_pods.items():
-            pods_for_index.sort(
-                key=lambda pod: pod.metadata.creation_timestamp or "",
-            )
-            attempt_pods[index_str] = pods_for_index + attempt_pods[index_str]
-        return attempt_pods
+            if index_str is not None:
+                attempt_pods_per_index.setdefault(index_str, []).append(pod)
+        return attempt_pods_per_index
 
     def _get_all_logs(self) -> dict[str, str]:
         logs = {}
@@ -2040,7 +2022,7 @@ class _KubernetesPodOrJobLauncher(
             or annotations
             and MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY in annotations
             # Bare Pods cannot do bounded retries. Only Jobs support them.
-            or _get_max_retries(annotations) > 0
+            or common_annotations.get_max_retries(annotations) > 0
         ):
             return self._job_launcher.launch_container_task(
                 component_spec=component_spec,
