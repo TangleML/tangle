@@ -100,9 +100,11 @@ def migrate_db(
             index.create(db_engine, checkfirst=True)
 
     for index in bts.PipelineRunAnnotation.__table__.indexes:
-        if index.name == bts.PipelineRunAnnotation._IX_ANNOTATION_RUN_ID_KEY_VALUE:
+        if index.name in (
+            bts.PipelineRunAnnotation._IX_ANNOTATION_RUN_ID_KEY_VALUE,
+            bts.PipelineRunAnnotation._IX_ANNOTATION_KEY_VALUE,
+        ):
             index.create(db_engine, checkfirst=True)
-            break
 
     database_migrations.migrate_secret_value_column(db_engine=db_engine)
 

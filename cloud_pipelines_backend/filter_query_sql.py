@@ -26,6 +26,7 @@ class PipelineRunAnnotationSystemKey(str, enum.Enum):
     CREATED_BY = f"{_PIPELINE_RUN_KEY_PREFIX}created_by"
     PIPELINE_NAME = f"{_PIPELINE_RUN_KEY_PREFIX}name"
     CREATED_AT = f"{_PIPELINE_RUN_KEY_PREFIX}date.created_at"
+    ENDED_AT = f"{_PIPELINE_RUN_KEY_PREFIX}ended_at"
 
 
 SYSTEM_KEY_SUPPORTED_PREDICATES: dict[PipelineRunAnnotationSystemKey, set[type]] = {
@@ -42,6 +43,9 @@ SYSTEM_KEY_SUPPORTED_PREDICATES: dict[PipelineRunAnnotationSystemKey, set[type]]
     },
     PipelineRunAnnotationSystemKey.CREATED_AT: {
         filter_query_models.TimeRangePredicate,
+    },
+    PipelineRunAnnotationSystemKey.ENDED_AT: {
+        filter_query_models.KeyExistsPredicate,
     },
 }
 
