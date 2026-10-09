@@ -902,8 +902,7 @@ class OrchestratorService_Sql:
                 "desired_state"
             ) == "TERMINATED" or (
                 pipeline_run is not None
-                and (pipeline_run.extra_data or {}).get("desired_state")
-                == "TERMINATED"
+                and (pipeline_run.extra_data or {}).get("desired_state") == "TERMINATED"
             )
             if should_terminate:
                 votes_to_terminate.append(execution_node)

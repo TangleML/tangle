@@ -809,8 +809,9 @@ class TestCancellationSurvivesStaleStatusWrite:
             sql.select(bts.PipelineRun.id).order_by(bts.PipelineRun.created_at)
         ).all()
         assert (
-            _get_run_execution_node(session, session.get(bts.PipelineRun, first_run_id))
-            .container_execution_id
+            _get_run_execution_node(
+                session, session.get(bts.PipelineRun, first_run_id)
+            ).container_execution_id
             == _get_run_execution_node(
                 session, session.get(bts.PipelineRun, second_run_id)
             ).container_execution_id
