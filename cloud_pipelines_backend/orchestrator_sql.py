@@ -20,6 +20,7 @@ from cloud_pipelines.orchestration.launchers import naming_utils
 
 from . import backend_types_sql as bts
 from . import component_structures as structures
+from . import filter_query_sql
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import bugsnag_instrumentation
@@ -1374,11 +1375,15 @@ _HISTORY_KEY = bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 def _handle_container_execution_status_set(
     execution: bts.ExecutionNode,
     value: bts.ContainerExecutionStatus | None,
-    _old_value: object,
+    old_value: object,
     _initiator: object,
 ) -> None:
     if value is None:
         return
+    if (value in bts.CONTAINER_STATUSES_ENDED) != (
+        old_value in bts.CONTAINER_STATUSES_ENDED
+    ):
+        execution._run_end_check_pending = True
     if execution.extra_data is None:
         execution.extra_data = {}
     history: list = execution.extra_data.get(_HISTORY_KEY, [])
@@ -1393,3 +1398,104 @@ def _handle_container_execution_status_set(
         _HISTORY_KEY: history + [entry],
     }
     execution._status_changed = True
+
+
+@sql_event.listens_for(orm.Session, "after_flush")
+def _handle_after_flush(session: orm.Session, _flush_context: object) -> None:
+    """Sync the ended_at annotation of runs whose executions entered or left ended."""
+    execution_ids = set()
+    for obj in list(session.new) + list(session.dirty):
+        if isinstance(obj, bts.ExecutionNode) and obj._run_end_check_pending:
+            execution_ids.add(obj.id)
+            obj._run_end_check_pending = False
+    if not execution_ids:
+        return
+    connection = session.connection()
+    pipeline_runs = _get_pipeline_runs_containing_executions(
+        connection=connection, execution_ids=execution_ids
+    )
+    for pipeline_run_id, root_execution_id in pipeline_runs.items():
+        _reconcile_pipeline_run_ended_at_annotation(
+            connection=connection,
+            pipeline_run_id=pipeline_run_id,
+            root_execution_id=root_execution_id,
+        )
+
+
+def _get_pipeline_runs_containing_executions(
+    *,
+    connection: sql.Connection,
+    execution_ids: set[bts.IdType],
+) -> dict[bts.IdType, bts.IdType]:
+    """Map each run containing any of the executions to its root execution id."""
+    link = bts.ExecutionToAncestorExecutionLink
+    as_descendant = (
+        sql.select(bts.PipelineRun.id, bts.PipelineRun.root_execution_id)
+        .join(link, link.ancestor_execution_id == bts.PipelineRun.root_execution_id)
+        .where(link.execution_id.in_(execution_ids))
+    )
+    as_root = sql.select(bts.PipelineRun.id, bts.PipelineRun.root_execution_id).where(
+        bts.PipelineRun.root_execution_id.in_(execution_ids)
+    )
+    rows = connection.execute(sql.union(as_descendant, as_root)).all()
+    return {pipeline_run_id: root_id for pipeline_run_id, root_id in rows}
+
+
+def _pipeline_run_has_ended(
+    *,
+    connection: sql.Connection,
+    root_execution_id: bts.IdType,
+) -> bool:
+    """Whether the run has container executions and all of them have ended."""
+    status = bts.ExecutionNode.container_execution_status
+    link = bts.ExecutionToAncestorExecutionLink
+    root_status = connection.execute(
+        sql.select(status).where(bts.ExecutionNode.id == root_execution_id)
+    ).scalar_one_or_none()
+    if root_status is not None and root_status not in bts.CONTAINER_STATUSES_ENDED:
+        return False
+    descendants = (
+        sql.select(bts.ExecutionNode.id)
+        .join(link, link.execution_id == bts.ExecutionNode.id)
+        .where(link.ancestor_execution_id == root_execution_id)
+        .where(status.is_not(None))
+    )
+    unfinished_descendant = connection.execute(
+        descendants.where(status.not_in(bts.CONTAINER_STATUSES_ENDED)).limit(1)
+    ).first()
+    if unfinished_descendant is not None:
+        return False
+    if root_status is not None:
+        return True
+    return connection.execute(descendants.limit(1)).first() is not None
+
+
+def _reconcile_pipeline_run_ended_at_annotation(
+    *,
+    connection: sql.Connection,
+    pipeline_run_id: bts.IdType,
+    root_execution_id: bts.IdType,
+) -> None:
+    """Write the ended_at annotation when the run has ended, else remove it."""
+    annotation = bts.PipelineRunAnnotation
+    key = filter_query_sql.PipelineRunAnnotationSystemKey.ENDED_AT
+    this_annotation = sql.and_(
+        annotation.pipeline_run_id == pipeline_run_id, annotation.key == key
+    )
+    is_annotated = (
+        connection.execute(sql.select(annotation.key).where(this_annotation)).first()
+        is not None
+    )
+    has_ended = _pipeline_run_has_ended(
+        connection=connection, root_execution_id=root_execution_id
+    )
+    if has_ended and not is_annotated:
+        connection.execute(
+            sql.insert(annotation).values(
+                pipeline_run_id=pipeline_run_id,
+                key=key,
+                value=_get_current_time().isoformat(),
+            )
+        )
+    elif is_annotated and not has_ended:
+        connection.execute(sql.delete(annotation).where(this_annotation))
