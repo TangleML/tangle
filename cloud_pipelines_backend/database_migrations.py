@@ -795,3 +795,86 @@ def migrate_secret_value_column(
             f" column={column.name}, current_type={curr_col_type},"
             f" target_type={type_sql}, dialect={dialect}"
         )
+
+
+def migrate_add_execution_node_updated_at_column(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> bool:
+    """Idempotent: add execution_node.updated_at if the column is missing.
+
+    Inspects the actual DB columns and skips (silently -- this runs on
+    every startup, and logging a no-op every time would be noise) if
+    `updated_at` is already present.
+
+    Uses Alembic's batch_alter_table so that one code path covers every
+    dialect: MySQL, PostgreSQL, and SQLite.
+
+    Returns:
+        True if the column was just added this call, False if it already
+        existed.
+    """
+    table = bts.ExecutionNode.__table__
+    column = table.c.updated_at
+
+    inspector = sqlalchemy.inspect(db_engine)
+    db_columns = {c["name"] for c in inspector.get_columns(table.name)}
+    if column.name in db_columns:
+        return False
+
+    _logger.info(f"Adding column: {table.name}.{column.name}")
+    try:
+        with db_engine.connect() as conn:
+            ctx = alembic_migration.MigrationContext.configure(conn)
+            op = alembic_operations.Operations(ctx)
+            with op.batch_alter_table(table.name) as batch_op:
+                batch_op.add_column(
+                    sqlalchemy.Column(column.name, column.type, nullable=True)
+                )
+            conn.commit()
+        _logger.info(f"Adding column: {table.name}.{column.name} - complete")
+    except Exception:
+        _logger.exception(f"Adding column failed: {table.name}.{column.name}")
+        raise
+    return True
+
+
+def backfill_execution_node_updated_at(
+    *,
+    session: orm.Session,
+    auto_commit: bool,
+) -> int:
+    """Idempotent backfill: stamp execution_node.updated_at for pre-existing rows.
+
+    UPDATE execution_node SET updated_at = :now WHERE updated_at IS NULL
+
+    Every pre-existing row (created before this column existed) gets a
+    single flat timestamp -- the time this backfill runs -- rather than a
+    per-row reconstructed value.
+
+    Idempotent: a second call updates 0 rows (`WHERE updated_at IS NULL`
+    only matches rows no earlier call has already stamped).
+
+    Args:
+        session: SQLAlchemy session. Caller controls the transaction
+            when auto_commit=False.
+        auto_commit: Must be explicitly set. True commits after update.
+            False defers commit to the caller (e.g. migrate_db, which
+            batches this with other migration steps before committing).
+
+    Returns:
+        Number of rows updated.
+    """
+    _logger.info("Starting backfill for `execution_node.updated_at`")
+
+    stmt = (
+        sqlalchemy.update(bts.ExecutionNode)
+        .where(bts.ExecutionNode.updated_at.is_(None))
+        .values(updated_at=bts._utcnow())
+    )
+    result = session.execute(stmt)
+    rowcount = result.rowcount
+    _logger.info(f"Backfill execution_node.updated_at: {rowcount} rows updated")
+    if auto_commit:
+        session.commit()
+    return rowcount
