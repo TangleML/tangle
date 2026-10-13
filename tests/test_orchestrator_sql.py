@@ -832,3 +832,90 @@ class TestCancellationSurvivesStaleStatusWrite:
             session=session_factory()
         )
         terminate.assert_called_once()
+
+
+class TestFailedTerminationIsRetried:
+    """Shopify/ml-infrastructure#1318."""
+
+    def test_retriable_termination_error_keeps_retrying_until_terminated(
+        self,
+    ) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launched_container_mock = _make_launched_container_mock()
+        _process_queued_executions(session_factory, launched_container_mock)
+        pipeline_run_id = session_factory().scalar(sql.select(bts.PipelineRun.id))
+        launched_container = launched_container_mock.return_value
+        failure_count = 5
+        launched_container.terminate.side_effect = [
+            launcher_interfaces.LauncherError(
+                "The platform was unavailable", is_retriable=True
+            )
+        ] * failure_count + [None]
+        orchestrator = _make_running_orchestrator(
+            session_factory, launched_container_mock
+        )
+        assert (
+            failure_count > orchestrator._max_container_execution_refresh_error_retries
+        )
+
+        _cancel_run_racing_a_stale_status_write(session_factory, pipeline_run_id)
+        for _ in range(failure_count):
+            orchestrator.internal_process_running_executions_queue(
+                session=session_factory()
+            )
+        session = session_factory()
+        container_execution = session.scalar(sql.select(bts.ContainerExecution))
+        assert container_execution.status == bts.ContainerExecutionStatus.PENDING
+        node = _get_run_execution_node(
+            session, session.get(bts.PipelineRun, pipeline_run_id)
+        )
+        assert (
+            "The platform was unavailable"
+            in node.extra_data[
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+            ]
+        )
+
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+
+        assert launched_container.terminate.call_count == failure_count + 1
+        launched_container.upload_log.assert_called_once()
+        session = session_factory()
+        container_execution = session.scalar(sql.select(bts.ContainerExecution))
+        assert container_execution.status == bts.ContainerExecutionStatus.CANCELLED
+        assert (
+            bts.CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+            not in (container_execution.extra_data or {})
+        )
+        node = _get_run_execution_node(
+            session, session.get(bts.PipelineRun, pipeline_run_id)
+        )
+        assert node.container_execution_status == bts.ContainerExecutionStatus.CANCELLED
+        assert bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY not in (
+            node.extra_data or {}
+        )
+
+    def test_non_retriable_termination_error_is_a_system_error(self) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launched_container_mock = _make_launched_container_mock()
+        _process_queued_executions(session_factory, launched_container_mock)
+        pipeline_run_id = session_factory().scalar(sql.select(bts.PipelineRun.id))
+        launched_container_mock.return_value.terminate.side_effect = (
+            launcher_interfaces.LauncherError("Something went definitively wrong")
+        )
+
+        api_server_sql.PipelineRunsApiService_Sql().terminate(
+            session=session_factory(), id=pipeline_run_id, terminated_by="user1"
+        )
+        _make_running_orchestrator(
+            session_factory, launched_container_mock
+        ).internal_process_running_executions_queue(session=session_factory())
+
+        container_execution = session_factory().scalar(
+            sql.select(bts.ContainerExecution)
+        )
+        assert container_execution.status == bts.ContainerExecutionStatus.SYSTEM_ERROR
