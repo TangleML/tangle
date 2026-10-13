@@ -866,6 +866,9 @@ class TestFailedTerminationIsRetried:
         session = session_factory()
         container_execution = session.scalar(sql.select(bts.ContainerExecution))
         assert container_execution.status == bts.ContainerExecutionStatus.PENDING
+        assert container_execution.extra_data[
+            bts.CONTAINER_EXECUTION_EXTRA_DATA_TERMINATION_LOGS_UPLOADED_KEY
+        ]
         node = _get_run_execution_node(
             session, session.get(bts.PipelineRun, pipeline_run_id)
         )

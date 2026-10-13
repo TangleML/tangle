@@ -918,11 +918,12 @@ class OrchestratorService_Sql:
                 )
             else:
                 _logger.info("Terminating container execution.")
-                # A failed termination leaves an error message on the still running
-                # container execution. Its logs were uploaded on the first attempt.
+                if container_execution.extra_data is None:
+                    container_execution.extra_data = {}
+                # Logs are uploaded only on the first termination attempt.
                 is_termination_retry = bool(
-                    (container_execution.extra_data or {}).get(
-                        bts.CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+                    container_execution.extra_data.get(
+                        bts.CONTAINER_EXECUTION_EXTRA_DATA_TERMINATION_LOGS_UPLOADED_KEY
                     )
                 )
                 # We should preserve the logs before terminating/deleting the container
@@ -931,6 +932,9 @@ class OrchestratorService_Sql:
                         _retry(lambda: launched_container.upload_log())
                     except Exception:
                         _logger.exception("Error uploading logs before termination.")
+                    container_execution.extra_data[
+                        bts.CONTAINER_EXECUTION_EXTRA_DATA_TERMINATION_LOGS_UPLOADED_KEY
+                    ] = True
                 # Requesting container termination.
                 # Termination might not happen immediately (e.g. Kubernetes has grace period).
                 try:
