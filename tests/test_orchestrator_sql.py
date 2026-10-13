@@ -734,7 +734,6 @@ def _cancel_run_racing_a_stale_status_write(
     stale_node = _get_run_execution_node(
         stale_session, stale_session.get(bts.PipelineRun, pipeline_run_id)
     )
-    _ = stale_node.extra_data
 
     api_server_sql.PipelineRunsApiService_Sql().terminate(
         session=session_factory(), id=pipeline_run_id, terminated_by="user1"
