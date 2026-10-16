@@ -344,7 +344,7 @@ class ExecutionNode(_TableBase):
     )
 
     parent_execution_id: orm.Mapped[IdType | None] = orm.mapped_column(
-        sql.ForeignKey("execution_node.id"), default=None, init=False
+        sql.ForeignKey("execution_node.id"), default=None, init=False, index=True
     )
     task_id_in_parent_execution: orm.Mapped[str | None] = orm.mapped_column(
         default=None

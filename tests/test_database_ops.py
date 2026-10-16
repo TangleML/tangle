@@ -44,6 +44,18 @@ class TestMigrateDb:
             table_name="execution_node",
         )
 
+    def test_creates_execution_node_parent_execution_id_index(self) -> None:
+        bare_engine = self._bare_engine()
+        assert "ix_execution_node_parent_execution_id" not in _get_index_names(
+            engine=bare_engine,
+            table_name="execution_node",
+        )
+        database_ops.migrate_db(db_engine=bare_engine, do_skip_backfill=False)
+        assert "ix_execution_node_parent_execution_id" in _get_index_names(
+            engine=bare_engine,
+            table_name="execution_node",
+        )
+
     def test_creates_annotation_run_id_key_value_index(self) -> None:
         bare_engine = self._bare_engine()
         assert (
