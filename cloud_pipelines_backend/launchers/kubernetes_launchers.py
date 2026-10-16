@@ -70,6 +70,10 @@ MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
 SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
     "tangleml.com/launchers/kubernetes/security_context.capability.IPC_LOCK"
 )
+# On Kubernetes, retries map to the Job's native `backoffLimitPerIndex`.
+RETRIES_MAX_RETRIES_ANNOTATION_KEY = (
+    common_annotations.RETRIES_MAX_RETRIES_ANNOTATION_KEY
+)
 
 
 # Multi-node constants
@@ -556,6 +560,14 @@ class _KubernetesPodLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesContainer":
+        # Bare Pods cannot do bounded retries (restartPolicy=OnFailure restarts forever).
+        # Invalid values still fail closed. Valid values are ignored so that pipelines stay portable across launchers.
+        max_retries = common_annotations.get_max_retries(annotations)
+        if max_retries > 0:
+            _logger.warning(
+                f"The {RETRIES_MAX_RETRIES_ANNOTATION_KEY}={max_retries} annotation is not supported by the Kubernetes Pod launcher and will be ignored. The task will run without retries."
+            )
+
         namespace = self._choose_namespace(annotations=annotations)
 
         # Resolving the dynamic data arguments
@@ -1112,6 +1124,8 @@ class _KubernetesJobLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedKubernetesJob":
+        max_retries = common_annotations.get_max_retries(annotations)
+
         namespace = self._choose_namespace(annotations=annotations)
 
         # We have 2 options regarding job name:
@@ -1152,6 +1166,12 @@ class _KubernetesJobLauncher(
         if not (0 < num_nodes <= _MULTI_NODE_MAX_NUMBER_OF_NODES):
             raise interfaces.LauncherError(
                 f"Invalid number of nodes for multi-node execution. Number of nodes must be between 1 and {_MULTI_NODE_MAX_NUMBER_OF_NODES}, but got {num_nodes}."
+            )
+        # `backoffLimitPerIndex` restarts only the failed node (index), while multi-node workloads
+        # (e.g. torchrun/DDP) usually need the whole group to be restarted. So we do not support this yet.
+        if num_nodes > 1 and max_retries > 0:
+            raise interfaces.LauncherError(
+                f"Retries are not supported for multi-node execution. Got {RETRIES_MAX_RETRIES_ANNOTATION_KEY}={max_retries} with {num_nodes} nodes."
             )
         explicit_service_name = explicit_resource_name
         if enable_multi_node:
@@ -1281,14 +1301,17 @@ class _KubernetesJobLauncher(
                 # Let's always use Indexed Jobs. There are no downsides.
                 completion_mode="Indexed",
                 # backoff_limit=0,
-                backoff_limit_per_index=0,
+                # ! Behavior: The per-index retry budget is user-configurable via the retries annotation.
+                # It defaults to 0 (no retries) when the annotation is absent.
+                # Kubernetes applies its native exponential back-off between attempts (10s, doubling, capped at 6m).
+                backoff_limit_per_index=max_retries,
                 # Without explicit max_failed_indexes=0, the job waits for all pods to end and then succeeds ("Complete") despite pod failures!
                 max_failed_indexes=0,
                 completions=num_nodes,
                 parallelism=num_nodes,
-                # Retry infrastructure disruptions only:
+                # Infrastructure disruptions are always retried for free:
                 #   DisruptionTarget -> Ignore  -> not charged -> replacement Pod
-                #   anything else    -> charged -> budget is 0 -> index fails
+                #   anything else    -> charged -> budget is max_retries -> index fails once exhausted
                 # Kubernetes sets DisruptionTarget for preemption, eviction, taint-based
                 # deletion, node loss and graceful node shutdown -- never for a task's
                 # own exit code.
@@ -1661,6 +1684,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
             # This can happen when Job gets suspended and resumed multiple times and Pods can get stuck in "Terminating" phase.
             # In this case we want to get the latest Pods.
             # Alternatively, we could store all pods, but this can complicate the routines that determine status and get logs.
+            # Note: Retried Pods (see the retries annotation) also produce multiple pods per index. The logs of all attempts are collected by `_get_all_attempt_pods`.
             pods_sorted_by_creation_time = sorted(
                 pods,
                 key=lambda pod: pod.metadata.creation_timestamp or "",
@@ -1727,12 +1751,84 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 return None
             raise
 
+    def _get_all_attempt_pods(self) -> dict[str, list[k8s_client_lib.V1Pod]]:
+        """Returns all known Pods (attempts) for each pod key, ordered from the earliest to the latest attempt.
+
+        `_debug_pods` only keeps the latest Pod for each index. When a failed Pod gets retried,
+        the earlier Pods still exist in the cluster (until the Job is deleted), so we list them here.
+        This is only done for Jobs that have retries enabled. Otherwise only the latest Pods are returned (as before).
+        """
+        latest_pods = {pod_key: [pod] for pod_key, pod in self._debug_pods.items()}
+        job_spec = self._debug_job.spec
+        if not (
+            job_spec
+            and job_spec.completion_mode == "Indexed"
+            and (job_spec.backoff_limit_per_index or 0) > 0
+        ):
+            return latest_pods
+        launcher = self._get_launcher()
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=launcher._api_client)
+        try:
+            pod_list_response: k8s_client_lib.V1PodList = (
+                core_api_client.list_namespaced_pod(
+                    namespace=self._namespace,
+                    label_selector=f"job-name={self._job_name}",
+                    watch=False,
+                    _request_timeout=launcher._request_timeout,
+                )
+            )
+            pods = pod_list_response.items
+        except Exception:
+            _logger.exception(
+                f"Failed to list the Pods of job {self._job_name}. Only the logs of the latest attempts will be collected."
+            )
+            return latest_pods
+        # The listed Pods come last so that their (fresher) state wins during deduplication.
+        all_pods = list(self._debug_pods.values()) + pods
+        # Deduplicating the Pods by name.
+        all_pods = list({pod.metadata.name: pod for pod in all_pods}.values())
+        # Using the same ordering as `get_refreshed`, so the latest attempt is the Pod from `_debug_pods`.
+        # (Sorting is stable. Pods without creation timestamp keep their relative order.)
+        pods_in_chronological_order = sorted(
+            all_pods,
+            key=lambda pod: pod.metadata.creation_timestamp or "",
+        )
+        attempt_pods_per_index: dict[str, list[k8s_client_lib.V1Pod]] = {}
+        for pod in pods_in_chronological_order:
+            index_str = _get_job_pod_completion_index(pod)
+            if index_str is not None:
+                attempt_pods_per_index.setdefault(index_str, []).append(pod)
+        return attempt_pods_per_index
+
     def _get_all_logs(self) -> dict[str, str]:
         logs = {}
-        for pod_key, pod in self._debug_pods.items():
-            log = self._get_log_by_pod_key(pod.metadata.name)
-            if log:
-                logs[pod_key] = log
+        for pod_key, pods in self._get_all_attempt_pods().items():
+            if len(pods) == 1:
+                log = self._get_log_by_pod_key(pods[0].metadata.name)
+                if log:
+                    logs[pod_key] = log
+                continue
+            # There were multiple attempts (retries). Concatenating the logs of all attempts in order.
+            # Each attempt starts with a header line. The header line is timestamped with the Pod creation time,
+            # so that the header stays in place when the logs of multiple pod keys are merged and sorted by timestamp.
+            has_any_log = False
+            attempt_log_parts: list[str] = []
+            for attempt_idx, pod in enumerate(pods):
+                log = self._get_log_by_pod_key(pod.metadata.name)
+                has_any_log = has_any_log or bool(log)
+                header = f"========== Attempt {attempt_idx + 1} of {len(pods)} (Pod {pod.metadata.name}) =========="
+                if not log:
+                    header += " (log is not available)"
+                timestamp = _format_kubernetes_log_timestamp(
+                    pod.metadata.creation_timestamp
+                )
+                if timestamp:
+                    header = f"{timestamp} {header}"
+                attempt_log_parts.append(header + "\n")
+                if log:
+                    attempt_log_parts.append(log if log.endswith("\n") else log + "\n")
+            if has_any_log:
+                logs[pod_key] = "".join(attempt_log_parts)
         return logs
 
     def _merge_logs(self, logs: dict[str, str | None]) -> str:
@@ -1925,6 +2021,8 @@ class _KubernetesPodOrJobLauncher(
             self._always_launch_jobs
             or annotations
             and MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY in annotations
+            # Bare Pods cannot do bounded retries. Only Jobs support them.
+            or common_annotations.get_max_retries(annotations) > 0
         ):
             return self._job_launcher.launch_container_task(
                 component_spec=component_spec,
@@ -2020,6 +2118,21 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
+
+
+def _get_job_pod_completion_index(pod: k8s_client_lib.V1Pod) -> str | None:
+    if not (pod.metadata and pod.metadata.annotations):
+        return None
+    return pod.metadata.annotations.get("batch.kubernetes.io/job-completion-index")
+
+
+def _format_kubernetes_log_timestamp(timestamp: Any) -> str | None:
+    """Formats a timestamp the same way Kubernetes formats the log line timestamps (RFC3339 with fixed nanoseconds)."""
+    if not isinstance(timestamp, datetime.datetime):
+        return None
+    if timestamp.tzinfo:
+        timestamp = timestamp.astimezone(datetime.timezone.utc)
+    return timestamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{timestamp.microsecond:06d}000Z"
 
 
 def _serialize_kubernetes_object_to_compact_dict(obj) -> dict[str, Any]:

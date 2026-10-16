@@ -12,6 +12,7 @@ import docker.models.containers
 from cloud_pipelines.orchestration.launchers import naming_utils
 from cloud_pipelines.orchestration.storage_providers import local_storage
 from .. import component_structures as structures
+from . import common_annotations
 from . import container_component_utils
 from . import interfaces
 
@@ -85,6 +86,13 @@ class DockerContainerLauncher(
         log_uri: str,
         annotations: dict[str, Any] | None = None,
     ) -> "LaunchedDockerContainer":
+        # Invalid values still fail closed. Valid values are ignored so that pipelines stay portable across launchers.
+        max_retries = common_annotations.get_max_retries(annotations)
+        if max_retries > 0:
+            _logger.warning(
+                f"The {common_annotations.RETRIES_MAX_RETRIES_ANNOTATION_KEY}={max_retries} annotation is not supported by the local Docker launcher and will be ignored. The task will run without retries."
+            )
+
         container_spec = component_spec.implementation.container
         # TODO: Validate the output URIs. Don't forget about (`C:\*` and `C:/*` paths)
 
