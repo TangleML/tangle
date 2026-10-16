@@ -882,12 +882,28 @@ class OrchestratorService_Sql:
         # Handling cancellation
         votes_to_terminate = []
         votes_to_not_terminate = []
-        # TODO: Get the desired state from the pipeline runs, not execution nodes
         execution_nodes = container_execution.execution_nodes
         for execution_node in execution_nodes:
+            # A stale session can rewrite the node's `extra_data` and drop its flag,
+            # so the pipeline run's flag is checked too.
+            pipeline_run = session.scalar(
+                sql.select(bts.PipelineRun)
+                .join(
+                    bts.ExecutionToAncestorExecutionLink,
+                    bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
+                    == bts.PipelineRun.root_execution_id,
+                )
+                .where(
+                    bts.ExecutionToAncestorExecutionLink.execution_id
+                    == execution_node.id
+                )
+            )
             should_terminate = (execution_node.extra_data or {}).get(
                 "desired_state"
-            ) == "TERMINATED"
+            ) == "TERMINATED" or (
+                pipeline_run is not None
+                and (pipeline_run.extra_data or {}).get("desired_state") == "TERMINATED"
+            )
             if should_terminate:
                 votes_to_terminate.append(execution_node)
             else:
