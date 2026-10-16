@@ -918,14 +918,47 @@ class OrchestratorService_Sql:
                 )
             else:
                 _logger.info("Terminating container execution.")
+                if container_execution.extra_data is None:
+                    container_execution.extra_data = {}
+                # Logs are uploaded only on the first termination attempt.
+                is_termination_retry = bool(
+                    container_execution.extra_data.get(
+                        bts.CONTAINER_EXECUTION_EXTRA_DATA_TERMINATION_LOGS_UPLOADED_KEY
+                    )
+                )
                 # We should preserve the logs before terminating/deleting the container
-                try:
-                    _retry(lambda: launched_container.upload_log())
-                except Exception:
-                    _logger.exception("Error uploading logs before termination.")
+                if not is_termination_retry:
+                    try:
+                        _retry(lambda: launched_container.upload_log())
+                    except Exception:
+                        _logger.exception("Error uploading logs before termination.")
+                    container_execution.extra_data[
+                        bts.CONTAINER_EXECUTION_EXTRA_DATA_TERMINATION_LOGS_UPLOADED_KEY
+                    ] = True
                 # Requesting container termination.
                 # Termination might not happen immediately (e.g. Kubernetes has grace period).
-                launched_container.terminate()
+                try:
+                    launched_container.terminate()
+                except launcher_interfaces.LauncherError as ex:
+                    if not ex.is_retriable:
+                        raise
+                    # The container may still be running. Keep the execution in its
+                    # current status so that a later sweep retries the termination.
+                    _logger.warning(
+                        f"Could not terminate container execution. Retrying on a later sweep: {ex!r}"
+                    )
+                    _record_orchestration_error_message(
+                        container_execution=container_execution,
+                        execution_nodes=execution_nodes,
+                        message=f"Could not terminate the container. Retrying: {ex}",
+                    )
+                    session.commit()
+                    return
+                if is_termination_retry:
+                    _clear_orchestration_error_message(
+                        container_execution=container_execution,
+                        execution_nodes=execution_nodes,
+                    )
                 container_execution.ended_at = _get_current_time()
                 # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
                 container_execution.status = bts.ContainerExecutionStatus.CANCELLED
@@ -1354,6 +1387,19 @@ def _record_orchestration_error_message(
         execution_node.extra_data[
             bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
         ] = message
+
+
+def _clear_orchestration_error_message(
+    container_execution: bts.ContainerExecution,
+    execution_nodes: list[bts.ExecutionNode],
+):
+    (container_execution.extra_data or {}).pop(
+        bts.CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY, None
+    )
+    for execution_node in execution_nodes:
+        (execution_node.extra_data or {}).pop(
+            bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY, None
+        )
 
 
 _MAX_PRELOAD_VALUE_SIZE = 255

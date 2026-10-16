@@ -453,6 +453,9 @@ EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY = "dynamic_data_arguments"
 CONTAINER_EXECUTION_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY = (
     "orchestration_error_message"
 )
+CONTAINER_EXECUTION_EXTRA_DATA_TERMINATION_LOGS_UPLOADED_KEY = (
+    "termination_logs_uploaded"
+)
 
 
 # Not needed. We can use the ExecutionToAncestorExecutionLink.ancestor_execution_id == PipelineRun.root_execution_id
