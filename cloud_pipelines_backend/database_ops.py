@@ -96,6 +96,7 @@ def migrate_db(
         if index.name in (
             bts.ExecutionNode._IX_EXECUTION_NODE_CACHE_KEY,
             "ix_execution_node_container_execution_id",
+            "ix_execution_node_parent_execution_id",
         ):
             index.create(db_engine, checkfirst=True)
 
