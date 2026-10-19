@@ -27,6 +27,9 @@ def _make_task_spec_dict(name: str = "task") -> dict:
     ).to_json_dict()
 
 
+_PLAINTEXT_SECRET = "plaintext-secret-value"
+
+
 def _initialize_db_and_get_session_factory():
     db_engine = database_ops.create_db_engine_and_migrate_db(database_uri="sqlite://")
     return lambda: orm.Session(bind=db_engine)
@@ -440,6 +443,157 @@ class TestGetContainerExecutionState:
                 self.service.get_container_execution_state(
                     session=session, id="does-not-exist"
                 )
+
+    def test_served_debug_info_has_no_command_line(self):
+        """The stored launcher data can hold a secret value on the command line.
+
+        Which part of a command line came from a secret cannot be told from the stored dict,
+        so the response blanks all of them, at every depth and for every launcher shape.
+        """
+        launcher_data = {
+            "kubernetes_job": {
+                "job_name": "task-abc",
+                "debug_job": {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {
+                                        "name": "main",
+                                        "image": "alpine",
+                                        "command": ["sh", "-c"],
+                                        "args": ["echo", _PLAINTEXT_SECRET],
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                },
+                "debug_pods": {
+                    "0": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "args": ["echo", _PLAINTEXT_SECRET],
+                                }
+                            ]
+                        }
+                    }
+                },
+            }
+        }
+        with self.session_factory() as session:
+            node = _make_execution_node(task_spec=_make_task_spec_dict())
+            node.container_execution = bts.ContainerExecution(
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+                launcher_data=launcher_data,
+            )
+            session.add(node)
+            session.flush()
+
+            result = self.service.get_container_execution_state(
+                session=session, id=node.id
+            )
+
+            assert result.debug_info is not None
+            assert _PLAINTEXT_SECRET not in str(result.debug_info)
+            job_container = result.debug_info["kubernetes_job"]["debug_job"]["spec"][
+                "template"
+            ]["spec"]["containers"][0]
+            assert job_container["command"] == [
+                "<REDACTED_ON_READ>",
+                "<REDACTED_ON_READ>",
+            ]
+            assert job_container["args"] == [
+                "<REDACTED_ON_READ>",
+                "<REDACTED_ON_READ>",
+            ]
+            # Everything that is not a command line is served unchanged.
+            assert job_container["image"] == "alpine"
+            assert result.debug_info["kubernetes_job"]["job_name"] == "task-abc"
+            # The per-Pod copies a Job carries are blanked too.
+            pod_container = result.debug_info["kubernetes_job"]["debug_pods"]["0"][
+                "spec"
+            ]["containers"][0]
+            assert pod_container["args"] == [
+                "<REDACTED_ON_READ>",
+                "<REDACTED_ON_READ>",
+            ]
+
+    def test_served_debug_info_covers_the_docker_inspect_shape(self):
+        """The Docker launcher stores a raw `docker inspect` dict, which capitalises the keys.
+
+        Its entrypoint and command come straight from the resolved command line, so a secret
+        passed by value lands in `Args`, `Config.Cmd` and `Config.Entrypoint`.
+        """
+        launcher_data = {
+            "docker": {
+                "id": "abc123",
+                "debug_container": {
+                    "Path": "python",
+                    "Args": ["-c", "print(1)", _PLAINTEXT_SECRET],
+                    "Config": {
+                        "Image": "python:3.12-slim",
+                        "Entrypoint": ["python", "-c"],
+                        "Cmd": ["print(1)", _PLAINTEXT_SECRET],
+                    },
+                },
+            }
+        }
+        with self.session_factory() as session:
+            node = _make_execution_node(task_spec=_make_task_spec_dict())
+            node.container_execution = bts.ContainerExecution(
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+                launcher_data=launcher_data,
+            )
+            session.add(node)
+            session.flush()
+
+            result = self.service.get_container_execution_state(
+                session=session, id=node.id
+            )
+
+            assert result.debug_info is not None
+            assert _PLAINTEXT_SECRET not in str(result.debug_info)
+            container = result.debug_info["docker"]["debug_container"]
+            assert container["Args"] == ["<REDACTED_ON_READ>"] * 3
+            assert container["Config"]["Cmd"] == ["<REDACTED_ON_READ>"] * 2
+            assert container["Config"]["Entrypoint"] == ["<REDACTED_ON_READ>"] * 2
+            # Not a command line, and not a list: served unchanged.
+            assert container["Path"] == "python"
+            assert container["Config"]["Image"] == "python:3.12-slim"
+
+    def test_serving_does_not_modify_the_stored_row(self):
+        """Redaction happens on a copy; a read request must not write to the JSON column."""
+        launcher_data = {
+            "kubernetes": {
+                "debug_pod": {
+                    "spec": {
+                        "containers": [
+                            {"name": "main", "args": ["echo", _PLAINTEXT_SECRET]}
+                        ]
+                    }
+                }
+            }
+        }
+        with self.session_factory() as session:
+            node = _make_execution_node(task_spec=_make_task_spec_dict())
+            container_execution = bts.ContainerExecution(
+                status=bts.ContainerExecutionStatus.SUCCEEDED,
+                launcher_data=launcher_data,
+            )
+            node.container_execution = container_execution
+            session.add(node)
+            session.flush()
+
+            self.service.get_container_execution_state(session=session, id=node.id)
+
+            stored_args = container_execution.launcher_data["kubernetes"]["debug_pod"][
+                "spec"
+            ]["containers"][0]["args"]
+            assert stored_args == ["echo", _PLAINTEXT_SECRET]
+            assert not session.dirty
 
 
 if __name__ == "__main__":

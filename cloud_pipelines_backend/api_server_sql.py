@@ -34,6 +34,44 @@ def _get_current_time() -> datetime.datetime:
     return datetime.datetime.now(tz=datetime.timezone.utc)
 
 
+_REDACTED_ON_READ: Final[str] = "<REDACTED_ON_READ>"
+# Lower-cased: Kubernetes uses `command`/`args`, `docker inspect` uses `Args`/`Cmd`/`Entrypoint`.
+_COMMAND_LINE_FIELD_NAMES: Final[frozenset[str]] = frozenset(
+    {"command", "args", "cmd", "entrypoint"}
+)
+
+
+def _redact_command_lines(value: Any) -> Any:
+    """Returns a copy of `value` with every command line list blanked element by element.
+
+    A container that consumes a secret as a value receives it on its command line, so the
+    launched object a launcher stores in `ContainerExecution.launcher_data` can hold that value
+    in plaintext. Launchers blank it on the way in, but a row written before they did, or by a
+    launcher that does not, still holds it - and at this point the stored dict is all there is,
+    with nothing saying which parts came from a secret. So every part goes.
+
+    The field names cover the launcher shapes that exist: Kubernetes keeps `command` and `args`
+    on a container, while the Docker launcher stores a raw `docker inspect` dict, which spells
+    the same thing `Args`, `Config.Cmd` and `Config.Entrypoint` - hence the case-insensitive
+    match on a wider set of names.
+
+    The input is never mutated: the ORM instance's JSON column must not be marked dirty by a
+    read request.
+    """
+    if isinstance(value, dict):
+        return {
+            key: (
+                [_REDACTED_ON_READ for _ in item]
+                if key.lower() in _COMMAND_LINE_FIELD_NAMES and isinstance(item, list)
+                else _redact_command_lines(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_command_lines(item) for item in value]
+    return value
+
+
 def _get_pipeline_name_from_task_spec(
     *,
     task_spec_dict: dict[str, Any],
@@ -845,7 +883,7 @@ class ExecutionNodesApiService_Sql:
             exit_code=container_execution.exit_code,
             started_at=container_execution.started_at,
             ended_at=container_execution.ended_at,
-            debug_info=container_execution.launcher_data,
+            debug_info=_redact_command_lines(container_execution.launcher_data),
             execution_nodes_linked_to_same_container_execution=linked_execution_nodes,
         )
 
