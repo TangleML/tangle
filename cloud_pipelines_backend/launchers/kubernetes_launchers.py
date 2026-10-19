@@ -73,8 +73,10 @@ SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
 # Indices of the command line parts that came from secret arguments, as JSON: `{"args": [2]}`.
 # Both `command` and `args` can hold them, and a field with none is omitted. The annotation
 # travels with the Pod, so a Pod re-read from the cluster is redacted like the launched one.
+# Unlike the task annotations above, this one is set on the Pod itself, so the key must be a
+# Kubernetes qualified name: a single `/` after the prefix, hence the dots.
 REDACTED_COMMAND_LINE_PARTS_ANNOTATION_KEY = (
-    "tangleml.com/launchers/kubernetes/redacted_command_line_parts"
+    "tangleml.com/launchers.kubernetes.redacted_command_line_parts"
 )
 # On Kubernetes, retries map to the Job's native `backoffLimitPerIndex`.
 RETRIES_MAX_RETRIES_ANNOTATION_KEY = (
@@ -320,7 +322,8 @@ class _KubernetesContainerLauncherBase:
                 # Updating the input_arguments with the downloaded value
                 input_argument.value = value
             if (
-                isinstance(input_argument.dynamic_data, dict)
+                value
+                and isinstance(input_argument.dynamic_data, dict)
                 and _SECRET_DYNAMIC_DATA_KEY in input_argument.dynamic_data
             ):
                 secret_values.add(value)
@@ -419,7 +422,9 @@ class _KubernetesContainerLauncherBase:
                 indices := [
                     index
                     for index, part in enumerate(field_parts or [])
-                    if part in secret_values
+                    # A part that *contains* a secret value is redacted whole, since
+                    # `ConcatPlaceholder` can build `--token=<secret>` as a single part.
+                    if any(secret_value in part for secret_value in secret_values)
                 ]
             )
         }

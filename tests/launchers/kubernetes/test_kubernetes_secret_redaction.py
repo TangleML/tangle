@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 from typing import Any, Final
 
 import pytest
@@ -22,6 +23,17 @@ _SECRET_VALUE_A: Final[str] = "plaintext-secret-value-a"
 _SECRET_VALUE_B: Final[str] = "plaintext-secret-value-b"
 _PLAIN_VALUE: Final[str] = "plain-argument-value"
 _REDACTED: Final[str] = "<REDACTED_SECRET_VALUE>"
+
+# A Kubernetes annotation key is an optional DNS subdomain prefix, a single `/`, and a name of
+# at most 63 characters. The API server rejects the whole object when a key does not match, so
+# an invalid key would fail every launch that consumes a secret.
+_ANNOTATION_NAME_PATTERN: Final[str] = r"[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?"
+_ANNOTATION_PREFIX_PATTERN: Final[str] = (
+    r"[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*"
+)
+_ANNOTATION_KEY_REGEX: Final[re.Pattern[str]] = re.compile(
+    rf"^(({_ANNOTATION_PREFIX_PATTERN})/)?({_ANNOTATION_NAME_PATTERN})$"
+)
 
 
 class _FakeVersionApi:
@@ -162,6 +174,28 @@ def _wrap_pod_in_job(pod: k8s_client_lib.V1Pod) -> k8s_client_lib.V1Job:
     )
 
 
+def _make_concatenated_secret_component_spec() -> structures.ComponentSpec:
+    """A component that builds `--token=<secret>` as a single command line part."""
+    return structures.ComponentSpec(
+        name="test-concat",
+        inputs=[structures.InputSpec(name="token")],
+        implementation=structures.ContainerImplementation(
+            container=structures.ContainerSpec(
+                image="alpine",
+                command=["echo"],
+                args=[
+                    structures.ConcatPlaceholder(
+                        concat=[
+                            "--token=",
+                            structures.InputValuePlaceholder(input_name="token"),
+                        ]
+                    ),
+                ],
+            )
+        ),
+    )
+
+
 def _redaction_annotation(pod: k8s_client_lib.V1Pod) -> dict[str, list[int]]:
     return json.loads(
         pod.metadata.annotations[
@@ -262,6 +296,73 @@ def test_serialized_job_redacts_the_pod_template(tmp_path: pathlib.Path) -> None
     containers = job_dict["spec"]["template"]["spec"]["containers"]
     assert containers[0]["args"] == [_PLAIN_VALUE, _REDACTED]
     assert _SECRET_VALUE not in str(job_dict)
+
+
+def test_every_annotation_key_on_the_pod_is_a_valid_kubernetes_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    pod = _prepare_multi_secret_pod(tmp_path)
+
+    invalid = [
+        key
+        for key in (pod.metadata.annotations or {})
+        if not _ANNOTATION_KEY_REGEX.match(key) or len(key.split("/")[-1]) > 63
+    ]
+    assert not invalid
+
+
+def test_a_concatenated_part_containing_a_secret_is_redacted_whole(
+    tmp_path: pathlib.Path,
+) -> None:
+    launcher = kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
+        api_client=k8s_client_lib.ApiClient(),
+    )
+    pod = launcher._pod_launcher._prepare_kubernetes_pod(
+        component_spec=_make_concatenated_secret_component_spec(),
+        input_arguments={
+            "token": _make_input_argument(
+                _SECRET_VALUE, dynamic_data={"secret": {"name": "my-secret"}}
+            ),
+        },
+        output_uris={},
+        log_uri=str(tmp_path / "log.txt"),
+    )
+
+    # The part is not equal to the secret value, so equality-based detection would miss it.
+    assert pod.spec.containers[0].args == [f"--token={_SECRET_VALUE}"]
+    assert _redaction_annotation(pod) == {"args": [0]}
+
+    pod_dict = kubernetes_launchers._serialize_kubernetes_object_to_compact_dict(pod)
+
+    assert pod_dict["spec"]["containers"][0]["args"] == [_REDACTED]
+    assert _SECRET_VALUE not in str(pod_dict)
+
+
+def test_an_empty_secret_value_redacts_nothing(tmp_path: pathlib.Path) -> None:
+    launcher = kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
+        api_client=k8s_client_lib.ApiClient(),
+    )
+    pod = launcher._pod_launcher._prepare_kubernetes_pod(
+        component_spec=_make_component_spec(),
+        input_arguments={
+            "plain": _make_input_argument(_PLAIN_VALUE),
+            "token": _make_input_argument(
+                "", dynamic_data={"secret": {"name": "empty-secret"}}
+            ),
+        },
+        output_uris={},
+        log_uri=str(tmp_path / "log.txt"),
+    )
+
+    # An empty value is a substring of every part; blanking the whole command line would be
+    # worse than storing it, and there is nothing to hide.
+    annotations = pod.metadata.annotations or {}
+    assert (
+        kubernetes_launchers.REDACTED_COMMAND_LINE_PARTS_ANNOTATION_KEY
+        not in annotations
+    )
+    pod_dict = kubernetes_launchers._serialize_kubernetes_object_to_compact_dict(pod)
+    assert pod_dict["spec"]["containers"][0]["args"] == [_PLAIN_VALUE, ""]
 
 
 def test_a_pod_without_secrets_is_not_annotated(tmp_path: pathlib.Path) -> None:
