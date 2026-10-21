@@ -93,13 +93,19 @@ def migrate_db(
     # Or we need to avoid calling the Index constructor.
 
     for index in bts.ExecutionNode.__table__.indexes:
-        if index.name == "ix_execution_node_parent_execution_id" and _is_column_indexed(
-            db_engine=db_engine,
-            table_name=bts.ExecutionNode.__tablename__,
-            column_name="parent_execution_id",
-        ):
-            # MySQL (InnoDB) already indexes this foreign key, under another name.
-            continue
+        if index.name == "ix_execution_node_parent_execution_id":
+            existing_index_name = _find_index_leading_with(
+                db_engine=db_engine,
+                table_name=bts.ExecutionNode.__tablename__,
+                column_name="parent_execution_id",
+            )
+            if existing_index_name is not None:
+                # MySQL (InnoDB) already indexes this foreign key, under another name.
+                _logger.info(
+                    f"Skipping {index.name}: execution_node.parent_execution_id"
+                    f" is already indexed by {existing_index_name}"
+                )
+                continue
         if index.name in (
             bts.ExecutionNode._IX_EXECUTION_NODE_CACHE_KEY,
             "ix_execution_node_container_execution_id",
@@ -130,15 +136,15 @@ def migrate_db(
     _logger.info("Exit migrate DB")
 
 
-def _is_column_indexed(
+def _find_index_leading_with(
     *,
     db_engine: sqlalchemy.Engine,
     table_name: str,
     column_name: str,
-) -> bool:
-    """Whether any index on the table, whatever its name, leads with the column."""
+) -> str | None:
+    """Name of an index on the table, whatever it's called, that leads with the column."""
     inspector = sqlalchemy.inspect(db_engine)
-    return any(
-        index["column_names"][:1] == [column_name]
-        for index in inspector.get_indexes(table_name)
-    )
+    for index in inspector.get_indexes(table_name):
+        if index["column_names"][:1] == [column_name]:
+            return index["name"]
+    return None
