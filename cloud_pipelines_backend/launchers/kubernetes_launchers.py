@@ -70,6 +70,14 @@ MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY = (
 SECURITY_CONTEXT_CAPABILITY_IPC_LOCK_ANNOTATION_KEY = (
     "tangleml.com/launchers/kubernetes/security_context.capability.IPC_LOCK"
 )
+# Indices of the command line parts that came from secret arguments, as JSON: `{"args": [2]}`.
+# Both `command` and `args` can hold them, and a field with none is omitted. The annotation
+# travels with the Pod, so a Pod re-read from the cluster is redacted like the launched one.
+# Unlike the task annotations above, this one is set on the Pod itself, so the key must be a
+# Kubernetes qualified name: a single `/` after the prefix, hence the dots.
+REDACTED_COMMAND_LINE_PARTS_ANNOTATION_KEY = (
+    "tangleml.com/launchers.kubernetes.redacted_command_line_parts"
+)
 # On Kubernetes, retries map to the Job's native `backoffLimitPerIndex`.
 RETRIES_MAX_RETRIES_ANNOTATION_KEY = (
     common_annotations.RETRIES_MAX_RETRIES_ANNOTATION_KEY
@@ -84,6 +92,10 @@ _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY = "system/multi_node/number_of_node
 _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY = "system/multi_node/node_index"
 _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY = "system/multi_node/node_0_address"
 _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_addresses"
+_SECRET_DYNAMIC_DATA_KEY = "secret"
+
+# Replaces the secret-derived command line parts in the serialized (stored, then served) objects.
+_REDACTED_COMMAND_LINE_PART = "<REDACTED_SECRET_VALUE>"
 
 # Environment variables for multi-node execution.
 _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
@@ -267,6 +279,9 @@ class _KubernetesContainerLauncherBase:
 
         container_inputs_root = pathlib.PurePosixPath("/tmp/inputs")
         container_outputs_root = pathlib.PurePosixPath("/tmp/outputs")
+        # Values that came from secret arguments, so that their place in the resolved
+        # command line can be recorded and redacted when the Pod gets serialized.
+        secret_values: set[str] = set()
 
         # Callbacks for the command-line resolving
         # Their main purpose is to return input/output path or value.
@@ -306,6 +321,12 @@ class _KubernetesContainerLauncherBase:
                     ) from ex
                 # Updating the input_arguments with the downloaded value
                 input_argument.value = value
+            if (
+                value
+                and isinstance(input_argument.dynamic_data, dict)
+                and _SECRET_DYNAMIC_DATA_KEY in input_argument.dynamic_data
+            ):
+                secret_values.add(value)
             return value
 
         def get_input_path(input_name: str) -> str:
@@ -390,6 +411,28 @@ class _KubernetesContainerLauncherBase:
             get_input_path=get_input_path,
             get_output_path=get_output_path,
         )
+
+        redacted_indices_per_field = {
+            field_name: indices
+            for field_name, field_parts in (
+                ("command", resolved_cmd.command),
+                ("args", resolved_cmd.args),
+            )
+            if (
+                indices := [
+                    index
+                    for index, part in enumerate(field_parts or [])
+                    # A part that *contains* a secret value is redacted whole, since
+                    # `ConcatPlaceholder` can build `--token=<secret>` as a single part.
+                    if any(secret_value in part for secret_value in secret_values)
+                ]
+            )
+        }
+        if redacted_indices_per_field:
+            pod_annotations = dict(pod_annotations or {})
+            pod_annotations[REDACTED_COMMAND_LINE_PARTS_ANNOTATION_KEY] = json.dumps(
+                redacted_indices_per_field
+            )
 
         container_env = [
             k8s_client_lib.V1EnvVar(name=name, value=value)
@@ -2142,7 +2185,31 @@ def _serialize_kubernetes_object_to_compact_dict(obj) -> dict[str, Any]:
     obj_metadata: dict | None = obj_dict.get("metadata")
     if obj_metadata:
         obj_metadata.pop("managedFields", None)
+    _redact_secret_command_line_parts(obj_dict)
     return obj_dict
+
+
+def _redact_secret_command_line_parts(obj_dict: dict[str, Any]) -> None:
+    """Replaces the secret-derived parts of the main container's command line in place.
+
+    Takes a serialized Pod or Job; the parts to replace are listed in the Pod annotation
+    that `_prepare_kubernetes_pod` sets, which the cluster returns with the object.
+    """
+    # For a Job, the annotation and the containers are on the Pod template.
+    pod_dict = (obj_dict.get("spec") or {}).get("template") or obj_dict
+    annotations = (pod_dict.get("metadata") or {}).get("annotations") or {}
+    redacted_parts_json = annotations.get(REDACTED_COMMAND_LINE_PARTS_ANNOTATION_KEY)
+    if not redacted_parts_json:
+        return
+    indices_per_field: dict[str, list[int]] = json.loads(redacted_parts_json)
+    for container in (pod_dict.get("spec") or {}).get("containers") or []:
+        if container.get("name") != _MAIN_CONTAINER_NAME:
+            continue
+        for field_name, indices in indices_per_field.items():
+            field_parts = container.get(field_name) or []
+            for index in indices:
+                if index < len(field_parts):
+                    field_parts[index] = _REDACTED_COMMAND_LINE_PART
 
 
 def windows_path_to_docker_path(path: str) -> str:
