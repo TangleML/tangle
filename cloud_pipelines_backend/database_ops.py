@@ -119,6 +119,11 @@ def migrate_db(
             break
 
     database_migrations.migrate_secret_value_column(db_engine=db_engine)
+    did_add_execution_node_updated_at_column = (
+        database_migrations.migrate_add_execution_node_updated_at_column(
+            db_engine=db_engine
+        )
+    )
 
     if do_skip_backfill:
         _logger.info("Skipping annotation backfills")
@@ -132,6 +137,11 @@ def migrate_db(
             database_migrations.run_all_annotation_backfills(
                 session=session,
             )
+            if did_add_execution_node_updated_at_column:
+                database_migrations.backfill_execution_node_updated_at(
+                    session=session,
+                    auto_commit=True,
+                )
 
     _logger.info("Exit migrate DB")
 

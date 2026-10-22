@@ -1,5 +1,6 @@
 """Tests for SQLAlchemy event listeners in orchestrator_sql and instrumentation.metrics."""
 
+import time
 import unittest.mock
 
 import pytest
@@ -67,3 +68,53 @@ class TestStatusHistoryListeners:
             "execution.status.from": bts.ContainerExecutionStatus.QUEUED,
             "execution.status.to": bts.ContainerExecutionStatus.RUNNING,
         }
+
+
+class TestExecutionNodeUpdatedAt:
+    """Verify execution_node.updated_at is self-maintaining via
+    insert_default/onupdate on the mapped_column -- no listener needed."""
+
+    def test_creation_sets_updated_at_without_explicit_value(
+        self, session: orm.Session
+    ) -> None:
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        session.commit()
+
+        assert node.updated_at is not None
+
+    def test_status_change_bumps_updated_at(self, session: orm.Session) -> None:
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        session.commit()
+        first_updated_at = node.updated_at
+        assert first_updated_at is not None
+
+        time.sleep(0.001)
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+
+        assert node.updated_at is not None
+        assert node.updated_at > first_updated_at
+
+    def test_extra_data_only_change_bumps_updated_at(
+        self, session: orm.Session
+    ) -> None:
+        """A plain extra_data mutation with no status touch also bumps
+        updated_at -- this is the case a status-scoped listener would miss.
+        `PipelineRunsApiService_Sql.terminate()` only ever sets
+        extra_data["desired_state"], never container_execution_status
+        directly, so onupdate (fires on any UPDATE to the row) is what
+        makes that gap get covered too."""
+        node = bts.ExecutionNode(task_spec={}, extra_data={})
+        session.add(node)
+        session.commit()
+        first_updated_at = node.updated_at
+        assert first_updated_at is not None
+
+        time.sleep(0.001)
+        node.extra_data["desired_state"] = "TERMINATED"
+        session.commit()
+
+        assert node.updated_at is not None
+        assert node.updated_at > first_updated_at
