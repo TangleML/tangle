@@ -3,8 +3,10 @@
 # Run from this directory: docker compose up -d
 #
 # Point the Tangle API at the collector so traces/metrics are exported:
-#   TANGLE_OTEL_EXPORTER_ENDPOINT=http://localhost:4317
-#   TANGLE_OTEL_EXPORTER_PROTOCOL=grpc
+#   TANGLE_OTEL_TRACE_EXPORTER_ENDPOINT=http://localhost:4317
+#   TANGLE_OTEL_TRACE_EXPORTER_PROTOCOL=grpc
+#   TANGLE_OTEL_METRIC_EXPORTER_ENDPOINT=http://localhost:4317
+#   TANGLE_OTEL_METRIC_EXPORTER_PROTOCOL=grpc
 #
 # UIs:
 #   Jaeger:    http://localhost:16686
