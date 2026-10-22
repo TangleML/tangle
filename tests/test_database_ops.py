@@ -1,5 +1,8 @@
 """Tests for database_ops: migrate_db and index creation."""
 
+import logging
+
+import pytest
 import sqlalchemy
 
 from cloud_pipelines_backend import backend_types_sql as bts
@@ -55,6 +58,30 @@ class TestMigrateDb:
             engine=bare_engine,
             table_name="execution_node",
         )
+
+    def test_skips_parent_execution_id_index_when_column_is_already_indexed(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        bare_engine = self._bare_engine()
+        # Stands in for the index InnoDB creates for the foreign key.
+        with bare_engine.connect() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "CREATE INDEX parent_execution_id"
+                    " ON execution_node (parent_execution_id)"
+                )
+            )
+            conn.commit()
+        with caplog.at_level(logging.INFO, logger=database_ops.__name__):
+            database_ops.migrate_db(db_engine=bare_engine, do_skip_backfill=False)
+        index_names = _get_index_names(
+            engine=bare_engine,
+            table_name="execution_node",
+        )
+        assert "parent_execution_id" in index_names
+        assert "ix_execution_node_parent_execution_id" not in index_names
+        assert "is already indexed by parent_execution_id" in caplog.text
 
     def test_creates_annotation_run_id_key_value_index(self) -> None:
         bare_engine = self._bare_engine()
