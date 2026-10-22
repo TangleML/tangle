@@ -432,6 +432,10 @@ class ExecutionNode(_TableBase):
     )
 
     _status_changed: bool = dataclasses.field(default=False, init=False, repr=False)
+    # Set when the status enters or leaves ended; cleared once ended_at is synced.
+    _run_end_check_pending: bool = dataclasses.field(
+        default=False, init=False, repr=False
+    )
 
 
 # The name of a special input that links to the the `TaskSpec.is_enabled` artifact.
@@ -518,6 +522,7 @@ class PipelineRunAnnotation(_TableBase):
     _IX_ANNOTATION_RUN_ID_KEY_VALUE: Final[str] = (
         "ix_pipeline_run_annotation_pipeline_run_id_key_value"
     )
+    _IX_ANNOTATION_KEY_VALUE: Final[str] = "ix_pipeline_run_annotation_key_value"
     pipeline_run_id: orm.Mapped[IdType] = orm.mapped_column(
         sql.ForeignKey(PipelineRun.id),
         primary_key=True,
@@ -534,6 +539,7 @@ class PipelineRunAnnotation(_TableBase):
             "key",
             "value",
         ),
+        sql.Index(_IX_ANNOTATION_KEY_VALUE, key, value),
     )
 
 
