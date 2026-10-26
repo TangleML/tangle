@@ -84,6 +84,33 @@ execution_status_count = orchestrator_meter.create_observable_gauge(
 
 _HISTORY_KEY = backend_types_sql.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 
+_RUNNING = backend_types_sql.ContainerExecutionStatus.RUNNING.value
+
+
+def _run_attempt(*, history: list[dict[str, str]]) -> str:
+    """Whether the execution is waiting to START or waiting to RESUME.
+
+    Both waits are recorded as PENDING->RUNNING, so without this one preempted task's
+    resumption is indistinguishable from a slow queue -- and p99 over a 5 minute window
+    is the single slowest sample in it.
+
+        QUEUED -> PENDING -> RUNNING                  "first"   never had a machine
+        ... RUNNING -> PENDING -> RUNNING             "repeat"  had one, lost it
+        QUEUED -> PENDING                             "none"    not a start at all
+
+    "first" is how long the orchestrator queued the work. "repeat" is how long a
+    tenant's cluster took to give the machine back, which is not our queue.
+
+    "none" rather than omitting the attribute, because an attribute that disappears
+    forms a second series that no filter on the first one covers.
+
+    "Attempt" counts times the execution held a machine, not times it was retried after
+    an error. Read off the history list the session already holds; no query.
+    """
+    if not history or history[-1]["status"] != _RUNNING:
+        return "none"
+    return "repeat" if any(e["status"] == _RUNNING for e in history[:-1]) else "first"
+
 
 @sql_event.listens_for(orm.Session, "before_commit")
 def _handle_before_commit(session: orm.Session) -> None:
@@ -104,6 +131,7 @@ def _handle_before_commit(session: orm.Session) -> None:
                     attributes={
                         "execution.status.from": prev["status"],
                         "execution.status.to": curr["status"],
+                        "execution.run_attempt": _run_attempt(history=history),
                     },
                 )
             except Exception:
