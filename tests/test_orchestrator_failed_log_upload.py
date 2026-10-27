@@ -116,15 +116,15 @@ def test_failed_execution_survives_log_upload_failure() -> None:
     )
 
     launcher = mock.MagicMock()
-    launcher.launch_container_task.side_effect = (
-        lambda *a, **kw: _pending_launched_container()
+    launcher.launch_container_task.side_effect = lambda *a, **kw: (
+        _pending_launched_container()
     )
-    launcher.deserialize_launched_container_from_dict.side_effect = (
-        lambda data: _pending_launched_container()
+    launcher.deserialize_launched_container_from_dict.side_effect = lambda data: (
+        _pending_launched_container()
     )
     failed_container = _failed_launched_container_that_loses_logs()
-    launcher.get_refreshed_launched_container_from_dict.side_effect = (
-        lambda data: failed_container
+    launcher.get_refreshed_launched_container_from_dict.side_effect = lambda data: (
+        failed_container
     )
 
     orchestrator = orchestrator_sql.OrchestratorService_Sql(

@@ -1108,9 +1108,11 @@ class OrchestratorService_Sql:
                 ):
                     output_artifact_data_info_map = {
                         output_name: _retry(
-                            lambda: self._storage_provider.make_uri(uri)
-                            .get_reader()
-                            .get_info()
+                            lambda: (
+                                self._storage_provider.make_uri(uri)
+                                .get_reader()
+                                .get_info()
+                            )
                         )
                         for output_name, uri in output_artifact_uris.items()
                     }

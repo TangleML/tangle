@@ -90,7 +90,6 @@ class ContainerStatus(str, enum.Enum):
 
 
 class LaunchedContainer(abc.ABC):
-
     # @classmethod
     # def get(cls: typing.Type[_TLaunchedContainer]) -> _TLaunchedContainer:
     #     raise NotImplementedError()

@@ -113,7 +113,6 @@ def main():
 
 
 if __name__ == "__main__":
-
     # This sets the root logger to write to stdout (your console).
     # Your script/app needs to call this somewhere at least once.
     # logging.basicConfig()

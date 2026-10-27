@@ -1432,7 +1432,6 @@ class _KubernetesJobLauncher(
 
 
 class LaunchedKubernetesJob(interfaces.LaunchedContainer):
-
     def __init__(
         self,
         job_name: str,
