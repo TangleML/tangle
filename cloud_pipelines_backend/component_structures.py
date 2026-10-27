@@ -127,8 +127,10 @@ class InputValuePlaceholder(_BaseModel):  # Non-standard attr names
         "input_name": "inputValue",
     }
     __pydantic_config__ = _default_pydantic_config | pydantic.ConfigDict(
-        alias_generator=lambda s: InputValuePlaceholder._serialized_names.get(s)
-        or pydantic.alias_generators.to_camel(s),
+        alias_generator=lambda s: (
+            InputValuePlaceholder._serialized_names.get(s)
+            or pydantic.alias_generators.to_camel(s)
+        ),
     )
 
     input_name: str
@@ -142,8 +144,10 @@ class InputPathPlaceholder(_BaseModel):  # Non-standard attr names
         "input_name": "inputPath",
     }
     __pydantic_config__ = _default_pydantic_config | pydantic.ConfigDict(
-        alias_generator=lambda s: InputPathPlaceholder._serialized_names.get(s)
-        or pydantic.alias_generators.to_camel(s),
+        alias_generator=lambda s: (
+            InputPathPlaceholder._serialized_names.get(s)
+            or pydantic.alias_generators.to_camel(s)
+        ),
     )
     input_name: str
 
@@ -156,8 +160,10 @@ class OutputPathPlaceholder(_BaseModel):  # Non-standard attr names
         "output_name": "outputPath",
     }
     __pydantic_config__ = _default_pydantic_config | pydantic.ConfigDict(
-        alias_generator=lambda s: OutputPathPlaceholder._serialized_names.get(s)
-        or pydantic.alias_generators.to_camel(s),
+        alias_generator=lambda s: (
+            OutputPathPlaceholder._serialized_names.get(s)
+            or pydantic.alias_generators.to_camel(s)
+        ),
     )
     output_name: str
 
@@ -199,8 +205,10 @@ class IfPlaceholderStructure(_BaseModel):  # Non-standard attr names
         "else_value": "else",
     }
     __pydantic_config__ = _default_pydantic_config | pydantic.ConfigDict(
-        alias_generator=lambda s: IfPlaceholderStructure._serialized_names.get(s)
-        or pydantic.alias_generators.to_camel(s),
+        alias_generator=lambda s: (
+            IfPlaceholderStructure._serialized_names.get(s)
+            or pydantic.alias_generators.to_camel(s)
+        ),
     )
 
     condition: IfConditionArgumentType
@@ -216,8 +224,10 @@ class IfPlaceholder(_BaseModel):  # Non-standard attr names
         "if_structure": "if",
     }
     __pydantic_config__ = _default_pydantic_config | pydantic.ConfigDict(
-        alias_generator=lambda s: IfPlaceholder._serialized_names.get(s)
-        or pydantic.alias_generators.to_camel(s),
+        alias_generator=lambda s: (
+            IfPlaceholder._serialized_names.get(s)
+            or pydantic.alias_generators.to_camel(s)
+        ),
     )
 
     if_structure: IfPlaceholderStructure
@@ -338,13 +348,11 @@ ArgumentType = Union[
 
 @dataclasses.dataclass
 class RetryStrategySpec(_BaseModel):
-
     max_retries: int
 
 
 @dataclasses.dataclass
 class CachingStrategySpec(_BaseModel):
-
     max_cache_staleness: Optional[str] = (
         None  # RFC3339 compliant duration: P30DT1H22M3S
     )
@@ -352,7 +360,6 @@ class CachingStrategySpec(_BaseModel):
 
 @dataclasses.dataclass
 class ExecutionOptionsSpec(_BaseModel):
-
     retry_strategy: Optional[RetryStrategySpec] = None
     caching_strategy: Optional[CachingStrategySpec] = None
 

@@ -599,7 +599,6 @@ class GetContainerExecutionLogResponse:
 
 
 class ExecutionNodesApiService_Sql:
-
     def get(self, session: orm.Session, id: bts.IdType) -> GetExecutionInfoResponse:
         execution_node = session.get(bts.ExecutionNode, id)
         if execution_node is None:
@@ -1131,7 +1130,6 @@ class GetArtifactSignedUrlResponse:
 
 
 class ArtifactNodesApiService_Sql:
-
     def get(self, session: orm.Session, id: bts.IdType) -> GetArtifactInfoResponse:
         artifact_node = session.get(bts.ArtifactNode, id)
         if artifact_node is None:
@@ -1220,7 +1218,6 @@ class ListSecretsResponse:
 
 
 class SecretsApiService:
-
     def create_secret(
         self,
         *,
@@ -1351,7 +1348,6 @@ class UserSettingsResponse:
 
 
 class UserSettingsApiService:
-
     def get_settings(
         self,
         *,

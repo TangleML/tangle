@@ -267,7 +267,7 @@ def main() -> None:
     res = task.resources
     print(f"  Submitted job_id = {handle.job_id}")
     print(f"  Job name         = {submission['name']}")
-    print(f"  num_nodes        = {task.num_nodes}  " f"(Tangle K8s cap is 16)")
+    print(f"  num_nodes        = {task.num_nodes}  (Tangle K8s cap is 16)")
     print(f"  resources        = {res.kwargs}")
     print(f"  pool kwarg       = {submission['kwargs'].get('pool')}")
     print(f"  file_mounts      = {task.file_mounts}")
