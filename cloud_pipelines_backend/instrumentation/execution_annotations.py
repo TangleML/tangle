@@ -192,6 +192,17 @@ class PendingReason(str, enum.Enum):
     rather than adding a label value, so the metric cannot grow a series behind us.
     """
 
+    # What:    the Job exists but has produced no pod at all.
+    # Fault:   admission refused it -- a namespace quota, an RBAC rule or a pod
+    #          security policy. Which one is NOT knowable here: Kubernetes records
+    #          the refusal as a FailedCreate Event, and launcher_data serialises the
+    #          Job and its pods, never Events. Read the Events to find out why.
+    # K8s:     an empty debug_pods. Every task starts this way for the first second
+    #          or two, so this value only means something once the wait is long --
+    #          see the overwrite note on pending_reason below.
+    # Example: a team whose namespace quota is already exhausted.
+    NO_POD_CREATED = "no_pod_created"
+
     # What:    nothing has placed this pod on a machine yet.
     # Fault:   the cluster's capacity, not the task's configuration.
     # K8s:     a Pending pod with no containerStatuses at all -- there is nothing to
@@ -296,21 +307,31 @@ PENDING_REASON_KEY = "last_pending_reason"
 def pending_reason(*, launcher_data: dict) -> PendingReason | None:
     """Why a task is not running yet, in our words rather than Kubernetes'.
 
-        a pod with no containerStatuses yet  → "waiting_for_node"      (a)
+        a Job with no pods at all            → "no_pod_created"       (a)
+        a pod with no containerStatuses yet  → "waiting_for_node"      (b)
         waiting.reason "ContainerCreating"   → "starting_container"
         waiting.reason "ImagePullBackOff"    → "image_unavailable"
         waiting.reason "CreateContainerConfigError"  → "bad_config"
-        waiting.reason "SomeNewK8sString"    → "other"                 (b)
-        a pod whose phase is not Pending     → None                    (c)
+        waiting.reason "SomeNewK8sString"    → "other"                 (c)
+        a pod whose phase is not Pending     → None                    (d)
+        a launcher that is not Kubernetes    → None
 
-        (a) scheduling has not placed it, so there is no container to report on
-        (b) a Kubernetes release adding a reason must not add a label value
-        (c) nothing is waiting, so there is nothing to attribute
+        (a) admission refused every pod, or the Job is one second old
+        (b) scheduling has not placed it, so there is no container to report on
+        (c) a Kubernetes release adding a reason must not add a label value
+        (d) nothing is waiting, so there is nothing to attribute
 
     Reads the serialised pod already persisted on ContainerExecution.launcher_data, so
     no Kubernetes call and no database read happen here.
+
+    "no_pod_created" is last-stamp-wins, not an observation. A Job is launched with an
+    empty pod map, so every task is briefly in this state; a healthy one is overwritten
+    within seconds by the first poll that sees a pod. It survives to be read only when
+    no pod ever appears, which is the case it is for.
     """
-    root = launcher_data.get("kubernetes_job") or launcher_data.get("kubernetes") or {}
+    root = launcher_data.get("kubernetes_job") or launcher_data.get("kubernetes")
+    if root is None:
+        return None
     pods = root.get("debug_pods")
     if pods is None:
         single = root.get("debug_pod")
@@ -327,4 +348,6 @@ def pending_reason(*, launcher_data: dict) -> PendingReason | None:
         if reason:
             return _PENDING_REASONS.get(reason, PendingReason.OTHER)
         return PendingReason.WAITING_FOR_NODE
+    if not pods:
+        return PendingReason.NO_POD_CREATED
     return None
