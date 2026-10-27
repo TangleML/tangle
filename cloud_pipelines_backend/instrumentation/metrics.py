@@ -483,6 +483,28 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
             )
 
 
+# Two hooks save the pending reason, because the only moment that survives __init__ is
+# too late for the metric to read, and the only moment the metric can read is too early
+# to survive __init__.
+#
+#   FIRST WRITE -- the row is created         EVERY POLL AFTER -- the row is updated
+#   ---------------------------------         -------------------------------------
+#   ContainerExecution(launcher_data=..)      execution.launcher_data = <new pod>
+#     |                                         |
+#     +- "set" stamps the reason                +- "set" stamps the reason
+#     +- __init__ sets extra_data=None          |    object is already built,
+#     |    the stamp is GONE            x       |    so nothing overwrites it   ok
+#     v                                         v
+#   flush                                     session before_commit
+#     +- before_insert stamps again     ok       +- the metric READS it         ok
+#     v                                         v
+#   the INSERT carries the reason             flush
+#                                               +- before_update would stamp
+#                                                  HERE, after the read     too late
+#
+# So neither hook can replace the other, and a single flush hook cannot do both.
+
+
 @sql_event.listens_for(backend_types_sql.ContainerExecution.launcher_data, "set")
 def _persist_pending_reason_on_extra_data(
     container_execution: "backend_types_sql.ContainerExecution",
@@ -492,7 +514,7 @@ def _persist_pending_reason_on_extra_data(
 ) -> None:
     """Save why a task is waiting onto its row, while it is still waiting.
 
-        poll, pod Pending, no containers   → extra_data = {"last_pending_reason": "waiting_for_node"}
+        poll, pod Pending, no containers    → extra_data = {"last_pending_reason": "waiting_for_node"}
         poll, pod Pending, ImagePullBackOff → extra_data = {"last_pending_reason": "image_unavailable"}
         poll, pod Running                   → left alone, the last reason stands   (a)
 
@@ -503,31 +525,57 @@ def _persist_pending_reason_on_extra_data(
     the only thing in the system that updates while the status does not. The serialised
     pod arrives as this event's own argument, so nothing is read from the database.
     """
-    # A "set" listener raises into the assignment that triggered it, which is the
-    # orchestrator storing a pod it just polled.  A label we failed to derive must
-    # cost that label, not the task: losing the write turns a running task into a
-    # SYSTEM_ERROR.
-    try:
-        if not value:
-            return
-        reason = execution_annotations.pending_reason(launcher_data=value)
-        if reason is None:
-            return
-        extra_data = container_execution.extra_data or {}
-        if extra_data.get(execution_annotations.PENDING_REASON_KEY) == reason.value:
-            return
-        container_execution.extra_data = {
-            **extra_data,
-            # .value, not the member: extra_data is a JSON column and an attribute is
-            # a string, so the enum stops at this boundary.
-            execution_annotations.PENDING_REASON_KEY: reason.value,
-        }
-    except Exception:
-        _logger.warning(
-            "Failed to stamp the pending reason for container execution "
-            f"{getattr(container_execution, 'id', None)!r}",
-            exc_info=True,
-        )
+    _stamp_pending_reason(container_execution=container_execution, launcher_data=value)
+
+
+@sql_event.listens_for(backend_types_sql.ContainerExecution, "before_insert")
+def _persist_pending_reason_on_first_write(
+    _mapper: object,
+    _connection: object,
+    container_execution: "backend_types_sql.ContainerExecution",
+) -> None:
+    """Save the reason that arrives with the row itself, before any poll has run.
+
+        ContainerExecution(launcher_data=...)  → extra_data written into the same INSERT
+
+    extra_data is declared after launcher_data, so __init__ overwrites the "set"
+    listener's stamp with its own default of None. This runs at flush instead, where no
+    declaration order can reach it, and the stamp rides the INSERT at no extra cost.
+    """
+    _stamp_pending_reason(
+        container_execution=container_execution,
+        launcher_data=container_execution.launcher_data,
+    )
+
+
+def _stamp_pending_reason(
+    *,
+    container_execution: "backend_types_sql.ContainerExecution",
+    launcher_data: dict | None,
+) -> None:
+    """Write the reason onto the row, leaving it alone when there is nothing to say.
+
+    launcher_data None, or no reason found → extra_data untouched
+    reason already the one stored          → extra_data untouched           (a)
+    a different reason                     → extra_data replaced
+
+    (a) the dict is rewritten rather than mutated, so an unchanged value would
+        still mark the attribute dirty and force an UPDATE
+    """
+    if not launcher_data:
+        return
+    reason = execution_annotations.pending_reason(launcher_data=launcher_data)
+    if reason is None:
+        return
+    extra_data = container_execution.extra_data or {}
+    if extra_data.get(execution_annotations.PENDING_REASON_KEY) == reason.value:
+        return
+    container_execution.extra_data = {
+        **extra_data,
+        # .value, not the member: extra_data is a JSON column and an attribute is a
+        # string, so the enum stops at this boundary.
+        execution_annotations.PENDING_REASON_KEY: reason.value,
+    }
 
 
 def _container_execution(
