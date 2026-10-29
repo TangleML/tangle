@@ -824,7 +824,7 @@ class TestPendingReasonOnTheInstruments:
         }
 
     def _wait_then_run(self, session: orm.Session, *, gap: datetime.timedelta):
-        """A task that waits on an image pull, then starts -- the case T5 exists for."""
+        """A task that waits on an image pull, then starts."""
         container_execution = bts.ContainerExecution(
             status=bts.ContainerExecutionStatus.PENDING
         )
@@ -863,6 +863,62 @@ class TestPendingReasonOnTheInstruments:
         attributes = add.call_args.kwargs["attributes"]
         assert attributes["execution.pending_reason"] == "image_unavailable"
         assert attributes["execution.status.to"] == "RUNNING"
+
+    def test_the_slow_counter_carries_where_the_task_ran(self, session: orm.Session):
+        """Without it, an alert about one namespace counts people in all of them."""
+        with unittest.mock.patch.object(
+            metrics.execution_slow_transitions, "add"
+        ) as add:
+            self._wait_then_run(session, gap=datetime.timedelta(hours=4))
+            session.commit()
+        assert add.call_args.kwargs["attributes"]["k8s.namespace.name"] == "none"
+
+
+class TestNamespaceOnTheSlowCounter:
+    """The namespace the histogram resolves is the one the counter is labelled with."""
+
+    PROVIDER = execution_annotations.CLOUD_PROVIDER_KEY
+
+    @pytest.fixture(autouse=True)
+    def _registered(self):
+        execution_annotations.register_targets(
+            targets={
+                "lt3": execution_annotations.Target(
+                    "google", "us-ce1-lt3", "kueue-jobs-staging"
+                )
+            }
+        )
+        yield
+        execution_annotations.register_targets(targets={})
+
+    def test_the_counter_and_the_histogram_agree(self, session: orm.Session) -> None:
+        node = bts.ExecutionNode(task_spec={"annotations": {self.PROVIDER: "lt3"}})
+        session.add(node)
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+
+        history = node.extra_data[bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY]
+        history[-1]["first_observed_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=4)
+        ).isoformat()
+        node.extra_data = {**node.extra_data}
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with (
+            unittest.mock.patch.object(
+                metrics.execution_status_transition_duration, "record"
+            ) as record,
+            unittest.mock.patch.object(
+                metrics.execution_slow_transitions, "add"
+            ) as add,
+        ):
+            session.commit()
+
+        assert record.call_args.kwargs["attributes"]["k8s.namespace.name"] == (
+            "kueue-jobs-staging"
+        )
+        assert add.call_args.kwargs["attributes"]["k8s.namespace.name"] == (
+            "kueue-jobs-staging"
+        )
 
 
 class TestPendingReasonWhenNoPodExists:
