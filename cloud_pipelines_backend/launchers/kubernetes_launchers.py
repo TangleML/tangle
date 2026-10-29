@@ -2138,6 +2138,9 @@ def _serialize_kubernetes_object_to_compact_dict(obj) -> dict[str, Any]:
     obj_dict = _kubernetes_serialize(obj)
     # Removing trash
     _remove_keys_with_none_values(obj_dict)
+    # A container that consumes a secret as a value receives that value on its command line,
+    # so a stored command line can hold a secret in plaintext.
+    _remove_command_lines(obj_dict)
     obj_metadata: dict | None = obj_dict.get("metadata")
     if obj_metadata:
         obj_metadata.pop("managedFields", None)
@@ -2188,6 +2191,18 @@ def _remove_keys_with_none_values(d: dict):
             del d[k]
         if isinstance(v, dict):
             _remove_keys_with_none_values(v)
+
+
+def _remove_command_lines(d: dict):
+    for k, v in list(d.items()):
+        if k in ("command", "args"):
+            del d[k]
+        elif isinstance(v, dict):
+            _remove_command_lines(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    _remove_command_lines(item)
 
 
 def _launcher_error_from_api_exception(
