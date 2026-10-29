@@ -107,6 +107,50 @@ def test_serialized_pod_has_no_command_line_anywhere() -> None:
     assert _SECRET_VALUE not in json.dumps(pod_dict)
 
 
+def test_launched_container_to_dict_has_no_command_line() -> None:
+    """The Pod launcher's stored payload: what the orchestrator writes to `launcher_data`."""
+    launched = kubernetes_launchers.LaunchedKubernetesContainer(
+        pod_name="test-pod",
+        namespace="test",
+        output_uris={},
+        log_uri="gs://bucket/log",
+        debug_pod=_make_pod(),
+    )
+
+    launcher_data = launched.to_dict()
+
+    stored_pod = launcher_data["kubernetes"]["debug_pod"]
+    assert "command" not in stored_pod["spec"]["containers"][0]
+    assert "args" not in stored_pod["spec"]["containers"][0]
+    assert _SECRET_VALUE not in json.dumps(launcher_data)
+
+
+def test_launched_job_to_dict_has_no_command_line_in_any_copy() -> None:
+    """The Job launcher stores the Pod template and one copy per Pod; all of them are cleaned."""
+    launched = kubernetes_launchers.LaunchedKubernetesJob(
+        job_name="test-job",
+        namespace="test",
+        output_uris={},
+        log_uri="gs://bucket/log",
+        debug_job=_make_job(),
+        debug_pods={"test-job-0-aaa": _make_pod(), "test-job-0-bbb": _make_pod()},
+    )
+
+    launcher_data = launched.to_dict()
+
+    stored = launcher_data["kubernetes_job"]
+    template_container = stored["debug_job"]["spec"]["template"]["spec"]["containers"][
+        0
+    ]
+    assert "command" not in template_container
+    assert "args" not in template_container
+    assert len(stored["debug_pods"]) == 2
+    for stored_pod in stored["debug_pods"].values():
+        assert "command" not in stored_pod["spec"]["containers"][0]
+        assert "args" not in stored_pod["spec"]["containers"][0]
+    assert _SECRET_VALUE not in json.dumps(launcher_data)
+
+
 def test_launched_pod_keeps_its_command_line() -> None:
     """The object sent to the cluster must be untouched: it is how the container is started."""
     pod = _make_pod()
