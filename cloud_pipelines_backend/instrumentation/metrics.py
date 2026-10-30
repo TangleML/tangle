@@ -324,7 +324,8 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
     try:
         with orm.Session(bind=session.get_bind()) as lookup_session:
             owners = _owners_of(
-                session=lookup_session, node_ids={node_id for node_id, _, _ in stashed}
+                session=lookup_session,
+                node_ids={node_id for node_id, _, _, _ in stashed},
             )
     except Exception:
         _logger.warning(
@@ -332,7 +333,7 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
             len(stashed),
             exc_info=True,
         )
-    for node_id, status_from, status_to in stashed:
+    for node_id, status_from, status_to, pending_reason in stashed:
         try:
             execution_slow_transitions.add(
                 1,
@@ -340,6 +341,7 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
                     "execution.status.from": status_from,
                     "execution.status.to": status_to,
                     "owner": owners.get(node_id, _UNSET),
+                    "execution.pending_reason": pending_reason,
                 },
             )
         except Exception:
@@ -347,6 +349,63 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
                 f"Failed to count slow transition for execution {node_id!r}",
                 exc_info=True,
             )
+
+
+@sql_event.listens_for(backend_types_sql.ContainerExecution.launcher_data, "set")
+def _persist_pending_reason_on_extra_data(
+    container_execution: "backend_types_sql.ContainerExecution",
+    value: dict | None,
+    _old_value: object,
+    _initiator: object,
+) -> None:
+    """Save why a task is waiting onto its row, while it is still waiting.
+
+        poll, pod Pending, no containers   → extra_data = {"last_pending_reason": "waiting_for_node"}
+        poll, pod Pending, ImagePullBackOff → extra_data = {"last_pending_reason": "image_unavailable"}
+        poll, pod Running                   → left alone, the last reason stands   (a)
+
+        (a) by the time a task stops waiting its pod is running and the reason is gone,
+            so the transition can only read what an earlier poll wrote
+
+    The orchestrator assigns launcher_data on every sweep that sees a change, which is
+    the only thing in the system that updates while the status does not. The serialised
+    pod arrives as this event's own argument, so nothing is read from the database.
+    """
+    if not value:
+        return
+    reason = execution_annotations.pending_reason(launcher_data=value)
+    if reason is None:
+        return
+    extra_data = container_execution.extra_data or {}
+    if extra_data.get(execution_annotations.PENDING_REASON_KEY) == reason.value:
+        return
+    container_execution.extra_data = {
+        **extra_data,
+        # .value, not the member: extra_data is a JSON column and an attribute is a
+        # string, so the enum stops at this boundary.
+        execution_annotations.PENDING_REASON_KEY: reason.value,
+    }
+
+
+def _pending_reason(*, execution: "backend_types_sql.ExecutionNode") -> str:
+    """Why this task was waiting, as stamped by the most recent poll.
+
+        the ContainerExecution is already in the session  → "image_unavailable"
+        it would have to be fetched                       → "none"   (a)
+        nothing ever stamped one                          → "none"
+
+        (a) this runs in before_commit, where a lazy load would put a SELECT inside the
+            flush in progress; an unlabelled point beats a re-entrant query
+
+    reads: ContainerExecution.extra_data["last_pending_reason"]
+    """
+    if "container_execution" in sql.inspect(execution).unloaded:
+        return _UNSET
+    container_execution = execution.container_execution
+    if container_execution is None:
+        return _UNSET
+    extra_data = container_execution.extra_data or {}
+    return extra_data.get(execution_annotations.PENDING_REASON_KEY) or _UNSET
 
 
 @sql_event.listens_for(orm.Session, "before_commit")
@@ -365,6 +424,7 @@ def _handle_before_commit(session: orm.Session) -> None:
             accelerator_type, accelerator_count = _accelerator(execution=obj)
             cluster = _cluster(execution=obj)
             namespace = _namespace(execution=obj)
+            pending_reason = _pending_reason(execution=obj)
             try:
                 execution_status_transition_duration.record(
                     (curr_time - prev_time).total_seconds(),
@@ -377,12 +437,13 @@ def _handle_before_commit(session: orm.Session) -> None:
                         "execution.accelerator_count": accelerator_count,
                         "execution.cluster": cluster,
                         "k8s.namespace.name": namespace,
+                        "execution.pending_reason": pending_reason,
                     },
                 )
                 waited = (curr_time - prev_time).total_seconds()
                 if prev["status"] != _RUNNING and waited >= _SLOW_TRANSITION_SECONDS:
                     session.info.setdefault(_SLOW_KEY, []).append(
-                        (obj.id, prev["status"], curr["status"])
+                        (obj.id, prev["status"], curr["status"], pending_reason)
                     )
             except Exception:
                 _logger.warning(

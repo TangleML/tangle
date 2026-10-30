@@ -6,6 +6,7 @@ never a relationship -- so these are safe to call inside ``before_commit``, wher
 load would put a SELECT in the commit path.
 """
 
+import enum
 import json
 import re
 from typing import NamedTuple
@@ -182,3 +183,148 @@ def accelerators(*, execution: "bts.ExecutionNode") -> tuple[str, int] | None:
         raise ValueError(f"Multiple accelerator types were specified: {requested=}")
     model, quantity = next(iter(requested.items()))
     return model, int(quantity)
+
+
+class PendingReason(str, enum.Enum):
+    """Why a task is not running yet, in our words rather than Kubernetes'.
+
+    A closed set. A Kubernetes release that invents a new waiting reason widens OTHER
+    rather than adding a label value, so the metric cannot grow a series behind us.
+    """
+
+    # What:    nothing has placed this pod on a machine yet.
+    # Fault:   the cluster's capacity, not the task's configuration.
+    # K8s:     a Pending pod with no containerStatuses at all -- there is nothing to
+    #          report on until something schedules it, so this one has no entry in
+    #          the mapping below.
+    # Example: a job asking for an accelerator (e.g. a B300 GPU) while every one
+    #          of them is already taken.
+    WAITING_FOR_NODE = "waiting_for_node"
+
+    # What:    the pod has a machine and the kubelet is bringing it up.
+    # Fault:   nobody's, until it lasts.
+    # Example: a very large image, still pulling ten minutes in.
+    STARTING_CONTAINER = "starting_container"
+
+    # What:    the image cannot be fetched.
+    # Fault:   the task's -- a tag that does not exist, or credentials the registry
+    #          rejected. Kubernetes does not separate a typo from a permissions
+    #          failure here, so neither can we.
+    # Example: a task pinned to an image tag that was never pushed.
+    IMAGE_UNAVAILABLE = "image_unavailable"
+
+    # What:    the pod spec names something missing or unreadable.
+    # Fault:   the task's own configuration or permissions, not the cluster's.
+    # Example: a renamed Secret that one pipeline still references.
+    BAD_CONFIG = "bad_config"
+
+    # What:    a waiting reason we have not mapped.
+    # Fault:   unknown, which is the point -- it stays out of the label set until
+    #          someone decides which bucket it belongs in.
+    # Example: a string a future Kubernetes release invents.
+    OTHER = "other"
+
+
+# Kubernetes' open vocabulary on the left, ours on the right. What each of ours means
+# is on the enum above; these are the strings the kubelet actually reports.
+#
+# The pod lifecycle they come from, top to bottom:
+#
+#   pod created
+#     |
+#     +-- nothing schedules it ................... (no containerStatuses)
+#     v
+#   scheduled to a node
+#     |
+#     +-- image reference malformed .............. InvalidImageName
+#     v
+#   init containers running .................... PodInitializing
+#     |
+#     v
+#   main container being created ............... ContainerCreating
+#     |
+#     +-- pull failed ............................ ErrImagePull
+#     |     +-- and kept failing ................. ImagePullBackOff
+#     +-- manifest unreadable .................... ImageInspectError
+#     +-- registry silent ........................ RegistryUnavailable
+#     +-- Secret or ConfigMap missing ............ CreateContainerConfigError
+#     +-- runtime refused the spec ............... CreateContainerError
+#     |
+#     v
+#   RUNNING
+#
+# The common path, not a state machine: ContainerCreating covers the image pull too,
+# so the kubelet may report either it or ErrImagePull for the same moment.
+_PENDING_REASONS = {
+    # The kubelet is bringing the pod up, in this order:
+    #   PodInitializing ──then──► ContainerCreating
+    #   init containers           the main container
+    #
+    # Init containers are still running, so the main container has not started.
+    "PodInitializing": PendingReason.STARTING_CONTAINER,
+    # The main container is being created: pulling layers, mounting volumes.
+    "ContainerCreating": PendingReason.STARTING_CONTAINER,
+    # The image did not arrive.
+    #   ErrImagePull ──retries──► ImagePullBackOff     one incident, two names
+    #
+    # The first pull attempt failed.
+    "ErrImagePull": PendingReason.IMAGE_UNAVAILABLE,
+    # The back-off loop the above decays into after repeated failures.
+    "ImagePullBackOff": PendingReason.IMAGE_UNAVAILABLE,
+    # The image was fetched but its manifest could not be read.
+    "ImageInspectError": PendingReason.IMAGE_UNAVAILABLE,
+    # The registry did not answer at all.
+    "RegistryUnavailable": PendingReason.IMAGE_UNAVAILABLE,
+    # The spec is wrong or not permitted, caught at two different moments:
+    #   InvalidImageName                                before any pull
+    #   CreateContainerConfigError, CreateContainerError at container creation
+    #
+    # The image reference is malformed, so nothing is ever pulled.
+    "InvalidImageName": PendingReason.BAD_CONFIG,
+    # A Secret, ConfigMap or token the spec names is missing or unreadable.
+    "CreateContainerConfigError": PendingReason.BAD_CONFIG,
+    # The runtime refused to create the container from this spec.
+    "CreateContainerError": PendingReason.BAD_CONFIG,
+}
+
+
+# Written onto ContainerExecution.extra_data while a task waits, read back when it stops
+# waiting -- by then the pod is running and the reason is gone from it.
+PENDING_REASON_KEY = "last_pending_reason"
+
+
+def pending_reason(*, launcher_data: dict) -> PendingReason | None:
+    """Why a task is not running yet, in our words rather than Kubernetes'.
+
+        a pod with no containerStatuses yet  → "waiting_for_node"      (a)
+        waiting.reason "ContainerCreating"   → "starting_container"
+        waiting.reason "ImagePullBackOff"    → "image_unavailable"
+        waiting.reason "CreateContainerConfigError"  → "bad_config"
+        waiting.reason "SomeNewK8sString"    → "other"                 (b)
+        a pod whose phase is not Pending     → None                    (c)
+
+        (a) scheduling has not placed it, so there is no container to report on
+        (b) a Kubernetes release adding a reason must not add a label value
+        (c) nothing is waiting, so there is nothing to attribute
+
+    Reads the serialised pod already persisted on ContainerExecution.launcher_data, so
+    no Kubernetes call and no database read happen here.
+    """
+    root = launcher_data.get("kubernetes_job") or launcher_data.get("kubernetes") or {}
+    pods = root.get("debug_pods")
+    if pods is None:
+        single = root.get("debug_pod")
+        pods = {"0": single} if single else {}
+    for pod in pods.values():
+        status = (pod or {}).get("status") or {}
+        if status.get("phase") != "Pending":
+            continue
+        container_statuses = status.get("containerStatuses")
+        if not container_statuses:
+            return PendingReason.WAITING_FOR_NODE
+        waiting = (container_statuses[0].get("state") or {}).get("waiting") or {}
+        reason = waiting.get("reason")
+        if reason:
+            return _PENDING_REASONS.get(reason, PendingReason.OTHER)
+        return PendingReason.WAITING_FOR_NODE
+    return None

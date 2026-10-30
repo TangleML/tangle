@@ -76,6 +76,7 @@ class TestStatusHistoryListeners:
             "execution.accelerator_count": "0",
             "execution.cluster": "none",
             "k8s.namespace.name": "none",
+            "execution.pending_reason": "none",
         }
 
 
@@ -659,3 +660,206 @@ class TestSlowTransitionCounter:
             for s in issued_before_the_owner_read
             if s.lstrip().upper().startswith("SELECT")
         ]
+
+
+class TestPendingReason:
+    """Why a task is waiting, stamped while it waits and read when it stops."""
+
+    @staticmethod
+    def _launcher_data(*, phase: str, reason: str | None, has_container: bool = True):
+        """The shape the Kubernetes launcher serialises onto launcher_data."""
+        status: dict = {"phase": phase}
+        if has_container:
+            state = {"waiting": {"reason": reason}} if reason else {}
+            status["containerStatuses"] = [{"state": state}]
+        return {"kubernetes_job": {"debug_pods": {"0": {"status": status}}}}
+
+    @pytest.mark.parametrize(
+        "reason, expected",
+        [
+            ("ContainerCreating", "starting_container"),
+            ("PodInitializing", "starting_container"),
+            ("ImagePullBackOff", "image_unavailable"),
+            ("ErrImagePull", "image_unavailable"),
+            ("CreateContainerConfigError", "bad_config"),
+            ("InvalidImageName", "bad_config"),
+        ],
+    )
+    def test_a_kubernetes_reason_becomes_one_of_ours(self, reason, expected):
+        data = self._launcher_data(phase="Pending", reason=reason)
+        assert execution_annotations.pending_reason(launcher_data=data) == expected
+
+    def test_an_unknown_kubernetes_reason_does_not_add_a_label_value(self):
+        data = self._launcher_data(phase="Pending", reason="SomeFutureK8sReason")
+        assert execution_annotations.pending_reason(launcher_data=data) == "other"
+
+    def test_a_pod_with_no_containers_yet_is_waiting_for_a_node(self):
+        data = self._launcher_data(phase="Pending", reason=None, has_container=False)
+        assert execution_annotations.pending_reason(launcher_data=data) == (
+            "waiting_for_node"
+        )
+
+    def test_a_running_pod_is_not_waiting_for_anything(self):
+        data = self._launcher_data(phase="Running", reason=None)
+        assert execution_annotations.pending_reason(launcher_data=data) is None
+
+    def test_a_launcher_that_is_not_kubernetes_yields_no_reason(self):
+        assert execution_annotations.pending_reason(launcher_data={"skypilot": {}}) is (
+            None
+        )
+
+    def test_a_poll_stamps_the_reason_onto_the_container_execution(
+        self, session: orm.Session
+    ):
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        assert container_execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "image_unavailable"
+        }
+
+    def test_what_lands_in_the_json_column_is_a_plain_string(
+        self, session: orm.Session
+    ):
+        """A str-valued enum passes == either way, so pin the stored type itself."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        # Before the commit: afterwards SQLite round-trips the JSON and hands back a
+        # plain string whatever was put in, which would hide the difference.
+        stored = container_execution.extra_data[
+            execution_annotations.PENDING_REASON_KEY
+        ]
+        assert type(stored) is str
+
+    def test_the_reason_survives_the_pod_starting_to_run(self, session: orm.Session):
+        """The flip is exactly when the pod no longer says why it was waiting."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        container_execution.launcher_data = self._launcher_data(
+            phase="Running", reason=None
+        )
+        session.commit()
+        assert container_execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "image_unavailable"
+        }
+
+    def test_a_node_reads_the_reason_off_its_container_execution(
+        self, session: orm.Session
+    ):
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        node = bts.ExecutionNode(task_spec={})
+        node.container_execution = container_execution
+        session.add(node)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="CreateContainerConfigError"
+        )
+        session.commit()
+        # The orchestrator holds both objects when it flips a status, which is the only
+        # time this reader runs; commit expires them, so reload as that caller would.
+        node.container_execution
+        assert metrics._pending_reason(execution=node) == "bad_config"
+
+    def test_a_reason_behind_a_lazy_load_is_skipped_rather_than_fetched(
+        self, session: orm.Session
+    ):
+        """A SELECT here would land inside the flush that before_commit runs in."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        node = bts.ExecutionNode(task_spec={})
+        node.container_execution = container_execution
+        session.add(node)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        session.expire(node)
+        assert metrics._pending_reason(execution=node) == "none"
+
+    def test_a_node_with_no_container_execution_is_unlabelled(
+        self, session: orm.Session
+    ):
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        session.commit()
+        assert metrics._pending_reason(execution=node) == "none"
+
+
+class TestPendingReasonOnTheInstruments:
+    """The reason rides both instruments, so an alert and its link agree."""
+
+    @staticmethod
+    def _waiting(reason: str) -> dict:
+        return {
+            "kubernetes_job": {
+                "debug_pods": {
+                    "0": {
+                        "status": {
+                            "phase": "Pending",
+                            "containerStatuses": [
+                                {"state": {"waiting": {"reason": reason}}}
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+
+    def _wait_then_run(self, session: orm.Session, *, gap: datetime.timedelta):
+        """A task that waits on an image pull, then starts -- the case T5 exists for."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        node = bts.ExecutionNode(task_spec={})
+        node.container_execution = container_execution
+        session.add(node)
+        node.container_execution_status = bts.ContainerExecutionStatus.PENDING
+        container_execution.launcher_data = self._waiting("ImagePullBackOff")
+        session.commit()
+        node.container_execution
+        history = node.extra_data[bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY]
+        history[-1]["first_observed_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - gap
+        ).isoformat()
+        node.extra_data = {**node.extra_data}
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        return node
+
+    def test_the_histogram_carries_why_the_task_was_waiting(self, session: orm.Session):
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as record:
+            self._wait_then_run(session, gap=datetime.timedelta(minutes=3))
+            session.commit()
+        attributes = record.call_args.kwargs["attributes"]
+        assert attributes["execution.pending_reason"] == "image_unavailable"
+
+    def test_the_slow_counter_carries_why_the_task_was_waiting(
+        self, session: orm.Session
+    ):
+        with unittest.mock.patch.object(
+            metrics.execution_slow_transitions, "add"
+        ) as add:
+            self._wait_then_run(session, gap=datetime.timedelta(hours=4))
+            session.commit()
+        attributes = add.call_args.kwargs["attributes"]
+        assert attributes["execution.pending_reason"] == "image_unavailable"
+        assert attributes["execution.status.to"] == "RUNNING"
