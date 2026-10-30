@@ -1748,6 +1748,16 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                     f"Pod {pod_name} no longer exists; its logs are unrecoverable."
                 )
                 return None
+            if _is_kubelet_unreachable_error(ex):
+                # The API server could not reach the kubelet of the Pod's node. The
+                # cluster-autoscaler removes a node soon after the last Pod on it
+                # completes, and the logs lived on that node, so they are gone. Retrying
+                # cannot recover them and only blocks the caller.
+                _logger.warning(
+                    f"Kubelet of Pod {pod_name} is unreachable; its logs are "
+                    f"unrecoverable. {_api_exception_body(ex)}"
+                )
+                return None
             raise
 
     def _get_all_attempt_pods(self) -> dict[str, list[k8s_client_lib.V1Pod]]:
@@ -2188,6 +2198,43 @@ def _remove_keys_with_none_values(d: dict):
             del d[k]
         if isinstance(v, dict):
             _remove_keys_with_none_values(v)
+
+
+def _api_exception_body(exception: kubernetes.client.exceptions.ApiException) -> str:
+    """The response body as text, whichever way the installed client stored it.
+
+    Older Kubernetes clients assign the raw `bytes`; newer ones decode to `str` in
+    `ApiException.__init__` and leave the body `None` if decoding fails.
+    """
+    body = exception.body
+    if isinstance(body, bytes):
+        return body.decode("utf-8", errors="replace")
+    return body or ""
+
+
+def _is_kubelet_unreachable_error(
+    exception: kubernetes.client.exceptions.ApiException,
+) -> bool:
+    """Whether the API server failed to dial the kubelet while proxying a log read.
+
+    Raised as `ServiceException`, a subclass of `ApiException`. An observed response
+    body, with cluster identifiers replaced:
+
+        {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure",
+         "message":"Get \\"https://<node-ip>:10250/containerLogs/<namespace>/<pod>/main?timestamps=true\\":
+                     dial tcp <node-ip>:10250: i/o timeout","code":500}
+
+    The wording comes from the API server's log proxy and is not a documented
+    contract, so treat a non-match as "some other error" rather than as proof the
+    kubelet was reachable. Callers that must bound their wall time regardless set
+    the log-upload retry budget on the launched container instead.
+    """
+    body = _api_exception_body(exception)
+    return (
+        exception.status == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        and "/containerLogs/" in body
+        and "dial tcp" in body
+    )
 
 
 def _launcher_error_from_api_exception(
