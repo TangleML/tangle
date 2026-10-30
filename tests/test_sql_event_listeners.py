@@ -863,3 +863,97 @@ class TestPendingReasonOnTheInstruments:
         attributes = add.call_args.kwargs["attributes"]
         assert attributes["execution.pending_reason"] == "image_unavailable"
         assert attributes["execution.status.to"] == "RUNNING"
+
+
+class TestPendingReasonWhenNoPodExists:
+    """A Job whose pods were refused at admission, and the first write of any task."""
+
+    @staticmethod
+    def _no_pods() -> dict:
+        """What the launcher serialises for a Job that has produced no pod."""
+        return {"kubernetes_job": {"debug_pods": {}}}
+
+    def test_a_job_with_no_pods_is_not_silent(self):
+        assert (
+            execution_annotations.pending_reason(launcher_data=self._no_pods())
+            == "no_pod_created"
+        )
+
+    def test_a_launcher_that_is_not_kubernetes_says_nothing(self):
+        # Without the explicit None check this would fall through to an empty pod map
+        # and label every local-process task as a refused Kubernetes pod.
+        for data in ({}, {"local_process": {"pid": 42}}):
+            assert execution_annotations.pending_reason(launcher_data=data) is None
+
+    def test_a_pod_that_exists_but_is_not_pending_is_still_none(self):
+        data = {
+            "kubernetes_job": {"debug_pods": {"0": {"status": {"phase": "Running"}}}}
+        }
+        assert execution_annotations.pending_reason(launcher_data=data) is None
+
+    def test_the_set_listener_alone_would_lose_the_constructor_reason(self):
+        # Pins why there are two listeners. ContainerExecution declares extra_data
+        # after launcher_data, so __init__ assigns the reason and then overwrites it
+        # with extra_data's own default of None. Nothing is flushed here, so only the
+        # attribute listener has run. Move extra_data above launcher_data and this
+        # fails -- which is the warning that the insert hook has become dead code.
+        execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._no_pods(),
+        )
+        assert execution.launcher_data is not None
+        assert execution.extra_data is None
+
+    def test_the_reason_supplied_to_the_constructor_is_persisted(
+        self, session: orm.Session
+    ):
+        # The orchestrator passes the first launcher_data as a constructor argument,
+        # which is not an attribute assignment and never reaches the "set" listener.
+        execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._no_pods(),
+        )
+        session.add(execution)
+        session.commit()
+        execution_id = execution.id
+        session.expunge_all()
+
+        reloaded = session.get(bts.ContainerExecution, execution_id)
+        assert reloaded is not None
+        assert reloaded.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "no_pod_created"
+        }
+
+    def test_a_later_poll_overwrites_the_reason_from_the_first_write(
+        self, session: orm.Session
+    ):
+        # Every task is launched with an empty pod map, so a healthy one must not stay
+        # labelled as refused once its pod shows up.
+        execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._no_pods(),
+        )
+        session.add(execution)
+        session.commit()
+        assert execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "no_pod_created"
+        }
+
+        execution.launcher_data = {
+            "kubernetes_job": {
+                "debug_pods": {
+                    "0": {
+                        "status": {
+                            "phase": "Pending",
+                            "containerStatuses": [
+                                {"state": {"waiting": {"reason": "ContainerCreating"}}}
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+        session.commit()
+        assert execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "starting_container"
+        }
