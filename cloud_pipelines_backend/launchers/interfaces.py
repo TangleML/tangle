@@ -90,6 +90,14 @@ class ContainerStatus(str, enum.Enum):
 
 
 class LaunchedContainer(abc.ABC):
+    # How hard the orchestrator should try to upload this container's log. Each
+    # platform differs in how long a log read can hang and whether a failure is
+    # ever recoverable, so the budget belongs to the container, not the caller.
+    # None means "use the orchestrator's default".
+    log_upload_max_retries: int | None = None
+    log_upload_wait_seconds: float | None = None
+    log_upload_max_total_seconds: float | None = None
+
     # @classmethod
     # def get(cls: typing.Type[_TLaunchedContainer]) -> _TLaunchedContainer:
     #     raise NotImplementedError()

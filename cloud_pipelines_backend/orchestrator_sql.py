@@ -931,7 +931,7 @@ class OrchestratorService_Sql:
                 # We should preserve the logs before terminating/deleting the container
                 if not is_termination_retry:
                     try:
-                        _retry(lambda: launched_container.upload_log())
+                        _upload_log_with_retries(launched_container)
                     except Exception:
                         _logger.exception("Error uploading logs before termination.")
                     container_execution.extra_data[
@@ -1037,7 +1037,7 @@ class OrchestratorService_Sql:
             # Don't fail the execution if log upload fails.
             # Logs are important, but not so important that we should fail a successfully completed container execution.
             try:
-                _retry(reloaded_launched_container.upload_log)
+                _upload_log_with_retries(reloaded_launched_container)
             except Exception as ex:
                 _logger.exception(
                     f"! Error during `LaunchedContainer.upload_log` call: {ex}."
@@ -1187,7 +1187,7 @@ class OrchestratorService_Sql:
             # execution. The launcher decides what a lost log means; the
             # orchestrator only records that the upload did not succeed.
             try:
-                _retry(reloaded_launched_container.upload_log)
+                _upload_log_with_retries(reloaded_launched_container)
             except Exception as ex:
                 _logger.exception(
                     f"! Error during `LaunchedContainer.upload_log` call: {ex}."
@@ -1342,18 +1342,52 @@ def _update_dict_recursive(d1: dict, d2: dict):
         d1[k] = v2
 
 
+_DEFAULT_MAX_RETRIES = 5
+_DEFAULT_WAIT_SECONDS = 1.0
+
+
 def _retry(
-    func: typing.Callable[[], _T], max_retries: int = 5, wait_seconds: float = 1.0
+    func: typing.Callable[[], _T],
+    max_retries: int = _DEFAULT_MAX_RETRIES,
+    wait_seconds: float = _DEFAULT_WAIT_SECONDS,
+    max_total_seconds: float | None = None,
 ) -> _T:
+    """Calls `func` until it succeeds, up to `max_retries` times.
+
+    `max_total_seconds` stops retrying once the next attempt would start past the
+    deadline, bounding the wall time a single failing call can hold the caller for.
+    The orchestrator loop is single-threaded, so that time delays every other
+    container execution waiting to be processed.
+    """
+    start_seconds = time.monotonic()
     for i in range(max_retries):
         try:
             return func()
         except Exception:
             _logger.exception(f"Exception calling {func}.")
-            time.sleep(wait_seconds)
             if i == max_retries - 1:
                 raise
+            if (
+                max_total_seconds is not None
+                and time.monotonic() - start_seconds + wait_seconds > max_total_seconds
+            ):
+                raise
+            time.sleep(wait_seconds)
     raise
+
+
+def _upload_log_with_retries(
+    launched_container: launcher_interfaces.LaunchedContainer,
+) -> None:
+    """Uploads the container's log, retrying within the launcher's own budget."""
+    max_retries = launched_container.log_upload_max_retries
+    wait_seconds = launched_container.log_upload_wait_seconds
+    _retry(
+        launched_container.upload_log,
+        max_retries=_DEFAULT_MAX_RETRIES if max_retries is None else max_retries,
+        wait_seconds=_DEFAULT_WAIT_SECONDS if wait_seconds is None else wait_seconds,
+        max_total_seconds=launched_container.log_upload_max_total_seconds,
+    )
 
 
 def record_system_error_exception(execution: bts.ExecutionNode, exception: Exception):
