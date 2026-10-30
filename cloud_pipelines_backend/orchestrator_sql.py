@@ -33,6 +33,8 @@ _logger = logging.getLogger(__name__)
 
 _T = typing.TypeVar("_T")
 
+_HEARTBEAT_INTERVAL_SECONDS = 60
+
 DYNAMIC_DATA_SECRET_KEY = "secret"
 DYNAMIC_DATA_SECRET_NAME_KEY = "name"
 
@@ -90,6 +92,9 @@ class OrchestratorService_Sql:
             _max_container_execution_refresh_error_retries
         )
         self._container_execution_refresh_error_counts: dict[Any, int] = {}
+        self._heartbeat_started_at = time.monotonic()
+        self._heartbeat_queued_execution_count = 0
+        self._heartbeat_running_container_execution_count = 0
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
@@ -136,6 +141,7 @@ class OrchestratorService_Sql:
                     > self._max_queue_batch_duration
                 ):
                     break
+        self._maybe_log_heartbeat()
 
     def internal_process_queued_executions_queue(self, session: orm.Session):
         _logger.debug("Selecting queued execution to process.)")
@@ -155,6 +161,7 @@ class OrchestratorService_Sql:
         query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
         if queued_execution:
             self._queued_executions_queue_idle = False
+            self._heartbeat_queued_execution_count += 1
             start_timestamp = time.monotonic_ns()
 
             with contextual_logging.execution_logging_context(queued_execution):
@@ -223,7 +230,7 @@ class OrchestratorService_Sql:
         query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
         if running_container_execution:
             self._running_executions_queue_idle = False
-            start_timestamp = time.monotonic_ns()
+            self._heartbeat_running_container_execution_count += 1
 
             execution_node_ids = list(
                 session.scalars(
@@ -241,9 +248,7 @@ class OrchestratorService_Sql:
                 queries_duration_ms = (
                     time.monotonic_ns() - query_start_timestamp
                 ) / 1_000_000
-                _logger.info(
-                    f"Before processing running container execution. Queries duration {queries_duration_ms}ms."
-                )
+                start_timestamp = time.monotonic_ns()
                 try:
                     with orchestrator_tracing.operation_span(
                         "orchestrator.process_running_execution",
@@ -331,9 +336,10 @@ class OrchestratorService_Sql:
                     )
                 finally:
                     duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
-                    _logger.info(
-                        f"After processing running container execution (duration: {duration_ms}ms)"
-                    )
+                    if queries_duration_ms > 1000 or duration_ms > 1000:
+                        _logger.info(
+                            f"Slow running container execution visit (queries: {queries_duration_ms}ms, processing: {duration_ms}ms)"
+                        )
             return True
         else:
             if not self._running_executions_queue_idle or query_duration_ms > 1000:
@@ -1003,7 +1009,6 @@ class OrchestratorService_Sql:
             reloaded_launched_container.status
         )
         if new_status == previous_status:
-            _logger.info(f"Container execution remains in {new_status} state.")
             return
         _logger.info(
             f"Container execution is now in state {new_status} (was {previous_status})."
@@ -1231,6 +1236,20 @@ class OrchestratorService_Sql:
                 _logger.exception(
                     f"Processing running container execution {container_execution.id}: Error doing launched container cleanup."
                 )
+
+    def _maybe_log_heartbeat(self):
+        """Logs, about once a minute, how many queued and running executions the sweeps processed since the last one."""
+        elapsed_seconds = time.monotonic() - self._heartbeat_started_at
+        if elapsed_seconds < _HEARTBEAT_INTERVAL_SECONDS:
+            return
+        _logger.info(
+            f"Orchestrator heartbeat: processed {self._heartbeat_queued_execution_count} queued executions and "
+            f"{self._heartbeat_running_container_execution_count} running container executions in the last "
+            f"{elapsed_seconds:.0f}s."
+        )
+        self._heartbeat_started_at = time.monotonic()
+        self._heartbeat_queued_execution_count = 0
+        self._heartbeat_running_container_execution_count = 0
 
 
 def _get_direct_downstream_executions(
