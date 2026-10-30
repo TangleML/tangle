@@ -796,7 +796,18 @@ class KubernetesWithGcsFuseContainerLauncher(GoogleKubernetesEngineLauncher):
     pass
 
 
+# Both Kubernetes launchers read logs through the API server's proxy to the node's
+# kubelet. A read that fails has almost always lost the log for good: the node is
+# gone or going, and the kubelet that held the log with it. So one attempt, and
+# never more than 10s of the orchestrator loop's time.
+_LOG_UPLOAD_MAX_RETRIES = 1
+_LOG_UPLOAD_MAX_TOTAL_SECONDS = 10.0
+
+
 class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
+    log_upload_max_retries = _LOG_UPLOAD_MAX_RETRIES
+    log_upload_max_total_seconds = _LOG_UPLOAD_MAX_TOTAL_SECONDS
+
     def __init__(
         self,
         pod_name: str,
@@ -1432,6 +1443,9 @@ class _KubernetesJobLauncher(
 
 
 class LaunchedKubernetesJob(interfaces.LaunchedContainer):
+    log_upload_max_retries = _LOG_UPLOAD_MAX_RETRIES
+    log_upload_max_total_seconds = _LOG_UPLOAD_MAX_TOTAL_SECONDS
+
     def __init__(
         self,
         job_name: str,
