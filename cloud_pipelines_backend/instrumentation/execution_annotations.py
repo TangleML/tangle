@@ -7,9 +7,11 @@ load would put a SELECT in the commit path.
 """
 
 import json
+import re
 from typing import NamedTuple
 
 from .. import backend_types_sql as bts
+from ..launchers import common_annotations
 from ..launchers import kubernetes_launchers
 
 # Aliased, not respelled: a launcher renaming a key cannot silently empty these readers.
@@ -20,21 +22,29 @@ RESOURCES_ACCELERATORS_KEY = kubernetes_launchers.RESOURCES_ACCELERATORS_ANNOTAT
 # Set at routing time rather than by a launcher, so no launcher module owns it.
 CLOUD_PROVIDER_KEY = "cloud-pipelines.net/orchestration/cloud_provider"
 
+# Read by the deployment's pod builder, which puts such a task in a namespace of its
+# own rather than the cluster's.
+GOOGLE_SERVICE_ACCOUNT_KEY = "cloud-pipelines.net/launchers/google/service_account"
+
 
 class Target(NamedTuple):
     """Where a task runs, once its annotation has been resolved.
 
-        Target("google", "lt3")                   a cluster the config names
-        Target("nebius", "h200")                  ditto
-        Target("davies", "davies",                a provider with no clusters of
+        Target("google", "us-ce1-lt3",            a cluster the config names,
+               "kueue-jobs-staging")              with the namespace it runs in
+        Target("nebius", "b300-cluster",
+               "tangle-jobs-production")
+        Target("davies", "davies", "none",        a provider with no clusters of
                cluster_from_annotation=<key>)     its own; each task names one
 
     ``cluster_from_annotation`` lets the deployment register which annotation key its
     tasks use for that, so a deployment-specific key never appears in this repository.
+    ``namespace`` is the cluster's own; a task carrying a service account overrides it.
     """
 
     provider: str
     cluster: str
+    namespace: str = "none"
     cluster_from_annotation: str | None = None
 
 
@@ -112,6 +122,39 @@ def target(*, execution: "bts.ExecutionNode") -> Target | None:
         return resolved
     named = _annotations(execution=execution).get(resolved.cluster_from_annotation)
     return resolved._replace(cluster=named or "none")
+
+
+def namespace(*, execution: "bts.ExecutionNode") -> str | None:
+    """The namespace a task's own service account puts it in, or None for its cluster's.
+
+        reads: cloud-pipelines.net/launchers/google/service_account
+               + cloud-pipelines.net/pipeline_runs/created_by
+
+        service_account="sidekick-oasis-runner@s5y-sidekick-52ee
+                         .iam.gserviceaccount.com", created_by set
+                                   → "sidekick-oasis-runner-at-s5y-sidekick-52ee"
+        service_account set, created_by absent  → None   (a)
+        neither                                 → None   (a)
+
+        (a) the pod lands in the cluster's namespace instead, which this module
+            cannot see; the caller falls back to Target.namespace
+
+    Both annotations are required because the deployment's pod builder only creates a
+    per-account namespace when it has both. Deriving it here duplicates that rule
+    rather than querying Kubernetes, which no reader in this module may do.
+    """
+    annotations = _annotations(execution=execution)
+    account = annotations.get(GOOGLE_SERVICE_ACCOUNT_KEY)
+    created_by = annotations.get(
+        common_annotations.PIPELINE_RUN_CREATED_BY_ANNOTATION_KEY
+    )
+    if not account or not created_by:
+        return None
+    return re.sub(
+        r"[^-a-z0-9]",
+        "-",
+        account.lower().removesuffix(".iam.gserviceaccount.com").replace("@", "-at-"),
+    ).strip("-")
 
 
 def accelerators(*, execution: "bts.ExecutionNode") -> tuple[str, int] | None:
