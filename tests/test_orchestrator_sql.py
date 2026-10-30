@@ -1,6 +1,7 @@
 """Tests for ``orchestrator_sql``."""
 
 import datetime
+import logging
 from typing import Callable
 from unittest import mock
 
@@ -921,3 +922,62 @@ class TestFailedTerminationIsRetried:
             sql.select(bts.ContainerExecution)
         )
         assert container_execution.status == bts.ContainerExecutionStatus.SYSTEM_ERROR
+
+
+def _heartbeat_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Orchestrator heartbeat:")
+    ]
+
+
+class TestHeartbeat:
+    def test_idle_sweeps_log_a_heartbeat_once_the_interval_passes(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger=orchestrator_sql.__name__)
+        orchestrator = _make_orchestrator(
+            session_factory=_create_session_factory(),
+            launched_container_mock=_make_launched_container_mock(),
+        )
+
+        orchestrator.process_each_queue_once()
+        assert _heartbeat_messages(caplog) == []
+
+        orchestrator._heartbeat_started_at -= 61
+        orchestrator.process_each_queue_once()
+        assert len(_heartbeat_messages(caplog)) == 1
+        assert (
+            "processed 0 queued executions and 0 running container executions"
+            in _heartbeat_messages(caplog)[0]
+        )
+
+    def test_heartbeat_counts_processed_executions_and_then_resets(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.INFO, logger=orchestrator_sql.__name__)
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        orchestrator = _make_running_orchestrator(
+            session_factory, _make_launched_container_mock()
+        )
+
+        assert orchestrator.internal_process_queued_executions_queue(
+            session=session_factory()
+        )
+        assert orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        orchestrator._heartbeat_started_at -= 61
+        orchestrator._maybe_log_heartbeat()
+        orchestrator._heartbeat_started_at -= 61
+        orchestrator._maybe_log_heartbeat()
+
+        first, second = _heartbeat_messages(caplog)
+        assert (
+            "processed 1 queued executions and 1 running container executions" in first
+        )
+        assert (
+            "processed 0 queued executions and 0 running container executions" in second
+        )
