@@ -25,7 +25,9 @@ Bad example:
 import datetime
 import enum
 import logging
+import os
 
+import sqlalchemy as sql
 from opentelemetry import metrics as otel_metrics
 from sqlalchemy import event as sql_event
 from sqlalchemy import orm
@@ -71,6 +73,15 @@ execution_status_transition_duration = orchestrator_meter.create_histogram(
     unit=MetricUnit.SECONDS,
 )
 
+execution_slow_transitions = orchestrator_meter.create_counter(
+    name="execution.status_transition.slow",
+    description=(
+        "Transitions that took longer than the slow threshold, by owner — the metric that"
+        " answers how many distinct submitters a latency alert is affecting"
+    ),
+    unit="{transition}",
+)
+
 execution_status_count = orchestrator_meter.create_observable_gauge(
     name="execution.status.count",
     callbacks=[],
@@ -90,6 +101,14 @@ _RUNNING = backend_types_sql.ContainerExecutionStatus.RUNNING.value
 # Every label an execution contributes has one of these when the task said nothing, so a
 # query that filters on a label never silently drops the executions that lack it.
 _UNSET = "none"
+
+# Transitions at or above this are counted by owner. A deployment sets it to whatever its
+# own latency alert fires on, so the counter and the alert describe the same population.
+_SLOW_TRANSITION_SECONDS = float(
+    os.environ.get("TANGLE_SLOW_TRANSITION_SECONDS", "6000")
+)
+
+_SLOW_KEY = "tangle.instrumentation.slow_transitions"
 
 
 def _run_attempt(*, history: list[dict[str, str]]) -> str:
@@ -228,6 +247,108 @@ def _accelerator(*, execution: backend_types_sql.ExecutionNode) -> tuple[str, st
     return model, str(count)
 
 
+def _owners_of(
+    *, session: orm.Session, node_ids: set[backend_types_sql.IdType]
+) -> dict[backend_types_sql.IdType, str]:
+    """Who submitted the run each of these executions belongs to.
+
+        reads: pipeline_run.created_by
+
+        a node under a run      → "flywheel-production@shopify-applications…"  (a)
+        the run's own root node → the same, by the other half of the union     (b)
+        a node with no run      → absent from the result                       (c)
+
+        (a) through the ancestor link, which is the only route an arbitrary node has
+        (b) a root execution has no ancestor link to itself
+        (c) the caller labels it "none" rather than dropping the point
+
+    One round trip for the whole batch, in the shape the orchestrator already uses to
+    answer this question. An arbitrary node has no foreign key to its run; only the
+    root execution does, so neither half of the union answers it alone.
+    """
+    link = backend_types_sql.ExecutionToAncestorExecutionLink
+    run = backend_types_sql.PipelineRun
+    as_descendant = (
+        sql.select(link.execution_id, run.created_by)
+        .join(link, link.ancestor_execution_id == run.root_execution_id)
+        .where(link.execution_id.in_(node_ids))
+    )
+    as_root = sql.select(run.root_execution_id, run.created_by).where(
+        run.root_execution_id.in_(node_ids)
+    )
+    rows = session.execute(sql.union(as_descendant, as_root)).all()
+    return {node_id: created_by for node_id, created_by in rows if created_by}
+
+
+@sql_event.listens_for(orm.Session, "after_commit")
+def _count_slow_transitions_by_owner(session: orm.Session) -> None:
+    """Count transitions that spent too long waiting, against whoever submitted them.
+
+        reads: pipeline_run.created_by
+
+        THE GATE   from is not RUNNING, and the gap is >= the threshold
+
+          QUEUED  → PENDING    2h   counted   waiting for a machine
+          PENDING → RUNNING    9h   counted   waiting for a machine
+          PENDING → FAILED     7h   counted   waited, then never ran
+          RUNNING → SUCCEEDED  4h   skipped   a job that ran for four hours
+          RUNNING → FAILED     7h   skipped   ran for seven, then failed
+          QUEUED  → PENDING    4s   skipped   under the threshold
+
+        WHAT IS STORED    one series per (from, to, owner), monotonic
+
+          …slow{from="QUEUED", to="PENDING", owner="pipeline-runner@…"}  37
+          …slow{from="QUEUED", to="PENDING", owner="batch-scorer@…"}      6
+          …slow{from="QUEUED", to="PENDING", owner="none"}                3   (a)
+
+        WHAT A HUMAN ASKS    the window lives here, in the query
+
+          ranked list     sum by (owner)(increase(…[1h]))
+                            pipeline-runner@…  18
+                            batch-scorer@…      6
+
+          how many        count(count by (owner)(increase(…[1h]) > 0))
+          people            3
+
+        (a) no run owns the node, or the lookup failed — counted anyway, because
+            this is what an alert fires on and a point missing one label beats
+            no point at all
+
+    The owner read happens after the commit, not during it: ``before_commit`` runs
+    inside the flush in progress, so a SELECT on that session re-enters it.
+    """
+    stashed = session.info.pop(_SLOW_KEY, None)
+    if not stashed:
+        return
+    owners: dict[backend_types_sql.IdType, str] = {}
+    try:
+        with orm.Session(bind=session.get_bind()) as lookup_session:
+            owners = _owners_of(
+                session=lookup_session, node_ids={node_id for node_id, _, _ in stashed}
+            )
+    except Exception:
+        _logger.warning(
+            "Failed to read the owners of %d slow transitions; counting them unlabelled",
+            len(stashed),
+            exc_info=True,
+        )
+    for node_id, status_from, status_to in stashed:
+        try:
+            execution_slow_transitions.add(
+                1,
+                attributes={
+                    "execution.status.from": status_from,
+                    "execution.status.to": status_to,
+                    "owner": owners.get(node_id, _UNSET),
+                },
+            )
+        except Exception:
+            _logger.warning(
+                f"Failed to count slow transition for execution {node_id!r}",
+                exc_info=True,
+            )
+
+
 @sql_event.listens_for(orm.Session, "before_commit")
 def _handle_before_commit(session: orm.Session) -> None:
     for obj in list(session.new) + list(session.dirty):
@@ -258,6 +379,11 @@ def _handle_before_commit(session: orm.Session) -> None:
                         "k8s.namespace.name": namespace,
                     },
                 )
+                waited = (curr_time - prev_time).total_seconds()
+                if prev["status"] != _RUNNING and waited >= _SLOW_TRANSITION_SECONDS:
+                    session.info.setdefault(_SLOW_KEY, []).append(
+                        (obj.id, prev["status"], curr["status"])
+                    )
             except Exception:
                 _logger.warning(
                     f"Failed to record status transition metric for execution {obj.id!r}",

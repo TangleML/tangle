@@ -1,8 +1,10 @@
 """Tests for SQLAlchemy event listeners in orchestrator_sql and instrumentation.metrics."""
 
+import datetime
 import unittest.mock
 
 import pytest
+from sqlalchemy import event as sql_event
 from sqlalchemy import orm
 
 from cloud_pipelines_backend import backend_types_sql as bts
@@ -460,3 +462,200 @@ class TestRunAttempt:
                     attempts.append(attrs["execution.run_attempt"])
 
         assert attempts == ["first", "repeat", "repeat"]
+
+
+class TestSlowTransitionCounter:
+    """The slow-path counter, and the rule that the commit path issues no query."""
+
+    SLOW = datetime.timedelta(seconds=metrics._SLOW_TRANSITION_SECONDS + 1)
+    FAST = datetime.timedelta(seconds=metrics._SLOW_TRANSITION_SECONDS - 1)
+
+    @staticmethod
+    def _transition(
+        session: orm.Session,
+        *,
+        gap: datetime.timedelta,
+        status_from: bts.ContainerExecutionStatus = (
+            bts.ContainerExecutionStatus.QUEUED
+        ),
+        status_to: bts.ContainerExecutionStatus = (
+            bts.ContainerExecutionStatus.RUNNING
+        ),
+    ) -> tuple[bts.ExecutionNode, list]:
+        """Move a node between two statuses with a chosen gap, returning the counter calls."""
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        node.container_execution_status = status_from
+        session.commit()
+
+        history = node.extra_data[metrics._HISTORY_KEY]
+        earlier = (
+            datetime.datetime.fromisoformat(history[-1]["first_observed_at"]) - gap
+        )
+        history[-1]["first_observed_at"] = earlier.isoformat()
+        orm.attributes.flag_modified(node, "extra_data")
+        session.commit()
+
+        node.container_execution_status = status_to
+        with unittest.mock.patch.object(
+            metrics.execution_slow_transitions, "add"
+        ) as mock_add:
+            session.commit()
+        return node, mock_add.call_args_list
+
+    def test_a_slow_transition_is_counted(self, session: orm.Session) -> None:
+        _, calls = self._transition(session, gap=self.SLOW)
+        assert len(calls) == 1
+        assert calls[0].kwargs["attributes"]["execution.status.from"] == "QUEUED"
+        assert calls[0].kwargs["attributes"]["execution.status.to"] == "RUNNING"
+
+    def test_a_fast_transition_is_not(self, session: orm.Session) -> None:
+        assert self._transition(session, gap=self.FAST)[1] == []
+
+    @pytest.mark.parametrize(
+        "status_to",
+        [
+            bts.ContainerExecutionStatus.SUCCEEDED,
+            bts.ContainerExecutionStatus.FAILED,
+        ],
+        ids=["succeeded", "failed"],
+    )
+    def test_a_long_run_is_not_a_long_wait(
+        self, session: orm.Session, status_to: bts.ContainerExecutionStatus
+    ) -> None:
+        """Once a task is RUNNING the clock measures work, not queueing."""
+        _, calls = self._transition(
+            session,
+            gap=self.SLOW,
+            status_from=bts.ContainerExecutionStatus.RUNNING,
+            status_to=status_to,
+        )
+        assert calls == []
+
+    def test_a_long_wait_that_never_ran_is_counted(self, session: orm.Session) -> None:
+        """Leaving PENDING for FAILED still means the submitter waited."""
+        _, calls = self._transition(
+            session,
+            gap=self.SLOW,
+            status_from=bts.ContainerExecutionStatus.PENDING,
+            status_to=bts.ContainerExecutionStatus.FAILED,
+        )
+        assert len(calls) == 1
+        assert calls[0].kwargs["attributes"]["execution.status.from"] == "PENDING"
+
+    def test_the_owner_is_the_runs_creator(self, session: orm.Session) -> None:
+        node = bts.ExecutionNode(task_spec={})
+        session.add(
+            bts.PipelineRun(root_execution=node, created_by="alice@example.com")
+        )
+        session.commit()
+
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+        history = node.extra_data[metrics._HISTORY_KEY]
+        history[-1]["first_observed_at"] = (
+            datetime.datetime.fromisoformat(history[-1]["first_observed_at"])
+            - self.SLOW
+        ).isoformat()
+        orm.attributes.flag_modified(node, "extra_data")
+        session.commit()
+
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with unittest.mock.patch.object(
+            metrics.execution_slow_transitions, "add"
+        ) as mock_add:
+            session.commit()
+        assert mock_add.call_args.kwargs["attributes"]["owner"] == "alice@example.com"
+
+    def test_a_node_under_a_run_resolves_through_the_ancestor_link(
+        self, session: orm.Session
+    ) -> None:
+        """An arbitrary node has no foreign key to its run; only the root does."""
+        root = bts.ExecutionNode(task_spec={})
+        child = bts.ExecutionNode(task_spec={})
+        session.add(bts.PipelineRun(root_execution=root, created_by="bob@example.com"))
+        session.add(
+            bts.ExecutionToAncestorExecutionLink(
+                ancestor_execution=root, execution=child
+            )
+        )
+        session.commit()
+
+        child.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+        history = child.extra_data[metrics._HISTORY_KEY]
+        history[-1]["first_observed_at"] = (
+            datetime.datetime.fromisoformat(history[-1]["first_observed_at"])
+            - self.SLOW
+        ).isoformat()
+        orm.attributes.flag_modified(child, "extra_data")
+        session.commit()
+
+        child.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with unittest.mock.patch.object(
+            metrics.execution_slow_transitions, "add"
+        ) as mock_add:
+            session.commit()
+        assert mock_add.call_args.kwargs["attributes"]["owner"] == "bob@example.com"
+
+    def test_a_node_with_no_run_is_labelled_not_dropped(
+        self, session: orm.Session
+    ) -> None:
+        _, calls = self._transition(session, gap=self.SLOW)
+        assert calls[0].kwargs["attributes"]["owner"] == "none"
+
+    def test_a_failed_owner_read_still_counts_the_point(
+        self, session: orm.Session
+    ) -> None:
+        """An alert fires on this counter, so a point missing a label beats no point."""
+        with unittest.mock.patch.object(
+            metrics, "_owners_of", side_effect=RuntimeError("database is gone")
+        ):
+            _, calls = self._transition(session, gap=self.SLOW)
+        assert len(calls) == 1
+        assert calls[0].kwargs["attributes"]["owner"] == "none"
+
+    def test_the_commit_path_issues_no_query(self, session: orm.Session) -> None:
+        """before_commit runs inside the flush; a SELECT there re-enters it."""
+        statements: list[str] = []
+
+        @sql_event.listens_for(session.get_bind(), "before_cursor_execute")
+        def _record(conn, cursor, statement, *args):  # noqa: ANN001, ANN202
+            statements.append(statement)
+
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+        history = node.extra_data[metrics._HISTORY_KEY]
+        history[-1]["first_observed_at"] = (
+            datetime.datetime.fromisoformat(history[-1]["first_observed_at"])
+            - self.SLOW
+        ).isoformat()
+        orm.attributes.flag_modified(node, "extra_data")
+        session.commit()
+
+        # Everything the commit path ran before the owner lookup, which is the first
+        # thing that happens once the transaction has closed.
+        issued_before_the_owner_read: list[str] = []
+
+        def _snapshot(**_kwargs: object) -> dict:
+            issued_before_the_owner_read.extend(statements)
+            return {}
+
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        statements.clear()
+        with unittest.mock.patch.object(
+            metrics, "_owners_of", side_effect=_snapshot
+        ) as mock_owners:
+            session.commit()
+
+        mock_owners.assert_called_once()
+        assert (
+            issued_before_the_owner_read
+        ), "the status change itself should be a write"
+        assert not [
+            s
+            for s in issued_before_the_owner_read
+            if s.lstrip().upper().startswith("SELECT")
+        ]
