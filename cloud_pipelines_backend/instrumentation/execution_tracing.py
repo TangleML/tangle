@@ -14,12 +14,11 @@ from opentelemetry import trace
 from opentelemetry.trace import StatusCode
 
 from .. import backend_types_sql as bts
-from ..launchers import kubernetes_launchers
+from . import execution_annotations
 
 _logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer("tangle.orchestrator")
 
-_CLOUD_PROVIDER_ANNOTATION_KEY = "cloud-pipelines.net/orchestration/cloud_provider"
 
 _HISTORY_KEY = bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 _TERMINAL_STATUSES = frozenset(s.value for s in bts.CONTAINER_STATUSES_ENDED)
@@ -116,11 +115,7 @@ def _cloud_provider_attrs(*, execution: bts.ExecutionNode) -> dict[str, object]:
     set this annotation at routing time; tangle launchers with a fixed cloud affinity
     can set it too.
     """
-    provider = (
-        (execution.task_spec or {})
-        .get("annotations", {})
-        .get(_CLOUD_PROVIDER_ANNOTATION_KEY)
-    )
+    provider = execution_annotations.cloud_provider(execution=execution)
     if provider is None:
         return {}
     return {"execution.cloud_provider": provider}
@@ -151,12 +146,12 @@ def _resource_attrs(*, execution: bts.ExecutionNode, status: str) -> dict[str, o
         return {}
     annotations: dict = (execution.task_spec or {}).get("annotations", {})
     attrs: dict[str, object] = {}
-    if cpu := annotations.get(kubernetes_launchers.RESOURCES_CPU_ANNOTATION_KEY):
+    if cpu := annotations.get(execution_annotations.RESOURCES_CPU_KEY):
         attrs["execution.resources.cpu"] = cpu
-    if memory := annotations.get(kubernetes_launchers.RESOURCES_MEMORY_ANNOTATION_KEY):
+    if memory := annotations.get(execution_annotations.RESOURCES_MEMORY_KEY):
         attrs["execution.resources.memory"] = memory
     if accelerators := annotations.get(
-        kubernetes_launchers.RESOURCES_ACCELERATORS_ANNOTATION_KEY
+        execution_annotations.RESOURCES_ACCELERATORS_KEY
     ):
         attrs["execution.resources.accelerators"] = accelerators
     return attrs
