@@ -2,6 +2,7 @@
 
 import datetime
 from typing import Callable
+from typing import Final
 from unittest import mock
 
 import pytest
@@ -921,3 +922,239 @@ class TestFailedTerminationIsRetried:
             sql.select(bts.ContainerExecution)
         )
         assert container_execution.status == bts.ContainerExecutionStatus.SYSTEM_ERROR
+
+
+# --------------------------------------------------------------------------- #
+# The container-execution cache key must separate the owners of a secret.
+# --------------------------------------------------------------------------- #
+
+_SECRET_NAME: Final[str] = "tok"
+_OWNER: Final[str] = "secret_owner"
+_OTHER_USER: Final[str] = "other_user"
+_OWNER_VALUE: Final[str] = "owner-value-authenticates-nothing"
+_OTHER_VALUE: Final[str] = "other-value-authenticates-nothing"
+
+
+def _secret_consuming_pipeline() -> structures.TaskSpec:
+    """One task that consumes the secret named `_SECRET_NAME` as a value."""
+    return _make_graph_task_spec(
+        tasks={
+            "task": structures.TaskSpec(
+                component_ref=structures.ComponentReference(
+                    spec=_make_container_component(inputs=[_SECRET_NAME])
+                ),
+                arguments={
+                    _SECRET_NAME: structures.DynamicDataArgument(
+                        dynamic_data={"secret": {"name": _SECRET_NAME}}
+                    )
+                },
+            ),
+        },
+    )
+
+
+def _create_secret(
+    *,
+    session: orm.Session,
+    user_id: str,
+    secret_value: str,
+) -> None:
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    session.add(
+        bts.Secret(
+            user_id=user_id,
+            secret_name=_SECRET_NAME,
+            secret_value=secret_value,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.commit()
+
+
+def _run_as(
+    *,
+    session_factory: Callable[[], orm.Session],
+    created_by: str,
+    launched_container_mock: mock.MagicMock,
+    root_task: structures.TaskSpec | None = None,
+) -> bts.PipelineRun:
+    """Submit the pipeline as `created_by` and drain the queued-execution queue once."""
+    _create_pipeline_run(
+        session_factory, root_task or _secret_consuming_pipeline(), created_by
+    )
+    _make_orchestrator(
+        session_factory=session_factory,
+        launched_container_mock=launched_container_mock,
+    ).internal_process_queued_executions_queue(session=session_factory())
+    run = session_factory().scalar(
+        sql.select(bts.PipelineRun).where(bts.PipelineRun.created_by == created_by)
+    )
+    assert run is not None, f"No pipeline run found for created_by={created_by!r}"
+    return run
+
+
+def _launched_secret_values(launched_container_mock: mock.MagicMock) -> list[str]:
+    """The secret value each launch call actually received."""
+    return [
+        call.kwargs["input_arguments"][_SECRET_NAME].value
+        for call in launched_container_mock.call_args_list
+    ]
+
+
+def _system_error_message(node: bts.ExecutionNode) -> str:
+    return (node.extra_data or {}).get(
+        bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY, ""
+    )
+
+
+class TestCacheKeySeparatesSecretOwners:
+    """A secret reference in the cache key is not unique without its owner.
+
+    `Secret`'s primary key is (user_id, secret_name), so the reference
+    `{"tok": {"secret": {"name": "tok"}}}` means a different value for every user. A key
+    built from the reference alone matches across users, and the hit is taken before the
+    run's owner is loaded and long before the ownership check::
+
+        key = hash(component spec, input hashes, secret reference, SECRET OWNER)
+        hit? --yes--> reuse the cached execution, return
+            |no
+        owner = pipeline_run.created_by
+        secret = session.get(Secret, (owner, name)) or raise "does not have secret"
+
+    Three of these tests fail without the owner in the key: two by serving one user's
+    execution to another, and one by reusing a result computed with the wrong value. The
+    fourth pins what must keep working -- sharing between users when no secret is involved.
+    """
+
+    def test_a_non_owner_is_refused_even_though_an_identical_execution_exists(
+        self,
+    ) -> None:
+        session_factory = _create_session_factory()
+        _create_secret(
+            session=session_factory(), user_id=_OWNER, secret_value=_OWNER_VALUE
+        )
+        launched_container_mock = _make_launched_container_mock()
+
+        owner_run = _run_as(
+            session_factory=session_factory,
+            created_by=_OWNER,
+            launched_container_mock=launched_container_mock,
+        )
+        launched_container_mock.assert_called_once()
+        assert _launched_secret_values(launched_container_mock) == [_OWNER_VALUE]
+
+        other_run = _run_as(
+            session_factory=session_factory,
+            created_by=_OTHER_USER,
+            launched_container_mock=launched_container_mock,
+        )
+
+        session = session_factory()
+        owner_node = _get_run_execution_node(session, owner_run)
+        other_node = _get_run_execution_node(session, other_run)
+        assert (
+            launched_container_mock.call_count == 1
+        ), "the refused run must not have launched a container of its own"
+        assert (
+            other_node.container_execution_status
+            == bts.ContainerExecutionStatus.SYSTEM_ERROR
+        ), "a user who does not own the secret must be refused, cache entry or not"
+        assert f"does not have secret {_SECRET_NAME}" in _system_error_message(
+            other_node
+        )
+        assert (
+            other_node.container_execution_id != owner_node.container_execution_id
+        ), "the owner's container execution must not be reachable from the other run"
+
+    def test_a_non_owner_is_refused_when_there_is_nothing_to_reuse(self) -> None:
+        """The control: the same submission with an empty cache was always refused."""
+        session_factory = _create_session_factory()
+        _create_secret(
+            session=session_factory(), user_id=_OWNER, secret_value=_OWNER_VALUE
+        )
+        launched_container_mock = _make_launched_container_mock()
+
+        other_run = _run_as(
+            session_factory=session_factory,
+            created_by=_OTHER_USER,
+            launched_container_mock=launched_container_mock,
+        )
+
+        launched_container_mock.assert_not_called()
+        node = _get_run_execution_node(session_factory(), other_run)
+        assert (
+            node.container_execution_status == bts.ContainerExecutionStatus.SYSTEM_ERROR
+        )
+        assert f"does not have secret {_SECRET_NAME}" in _system_error_message(node)
+        assert _OTHER_USER in _system_error_message(node)
+
+    def test_two_owners_of_the_same_name_each_get_their_own_execution(self) -> None:
+        """Both users own `tok`, with different values, so neither may reuse the other.
+
+        Without the owner in the key the second run reuses the first, and its results are
+        computed with the first user's value.
+        """
+        session_factory = _create_session_factory()
+        _create_secret(
+            session=session_factory(), user_id=_OWNER, secret_value=_OWNER_VALUE
+        )
+        _create_secret(
+            session=session_factory(), user_id=_OTHER_USER, secret_value=_OTHER_VALUE
+        )
+        launched_container_mock = _make_launched_container_mock()
+
+        owner_run = _run_as(
+            session_factory=session_factory,
+            created_by=_OWNER,
+            launched_container_mock=launched_container_mock,
+        )
+        other_run = _run_as(
+            session_factory=session_factory,
+            created_by=_OTHER_USER,
+            launched_container_mock=launched_container_mock,
+        )
+
+        session = session_factory()
+        owner_node = _get_run_execution_node(session, owner_run)
+        other_node = _get_run_execution_node(session, other_run)
+        assert _launched_secret_values(launched_container_mock) == [
+            _OWNER_VALUE,
+            _OTHER_VALUE,
+        ], "each run must launch with its own owner's value"
+        assert (
+            other_node.container_execution_cache_key
+            != owner_node.container_execution_cache_key
+        )
+        assert other_node.container_execution_id != owner_node.container_execution_id
+
+    def test_a_task_without_a_secret_still_shares_one_execution_across_users(
+        self,
+    ) -> None:
+        """What must keep working: ordinary caching is unchanged for everyone else."""
+        session_factory = _create_session_factory()
+        launched_container_mock = _make_launched_container_mock()
+
+        first_run = _run_as(
+            session_factory=session_factory,
+            created_by=_OWNER,
+            launched_container_mock=launched_container_mock,
+            root_task=_single_task_pipeline(),
+        )
+        second_run = _run_as(
+            session_factory=session_factory,
+            created_by=_OTHER_USER,
+            launched_container_mock=launched_container_mock,
+            root_task=_single_task_pipeline(),
+        )
+
+        session = session_factory()
+        first_node = _get_run_execution_node(session, first_run)
+        second_node = _get_run_execution_node(session, second_run)
+        assert (
+            launched_container_mock.call_count == 1
+        ), "the second run must still reuse the first"
+        assert second_node.container_execution_id == first_node.container_execution_id
+        assert (second_node.extra_data or {}).get(
+            "reused_from_execution_node_id"
+        ) == first_node.id

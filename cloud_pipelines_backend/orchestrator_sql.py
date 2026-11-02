@@ -449,10 +449,34 @@ class OrchestratorService_Sql:
             execution.extra_data or {}
         ).get(bts.EXECUTION_NODE_EXTRA_DATA_DYNAMIC_DATA_ARGUMENTS_KEY, {})
 
+        # A secret argument names the secret but not its owner, and `Secret`'s primary key is
+        # (user_id, secret_name), so the same name means a different value for every user. The
+        # owner has to be part of the key, or one user's execution is reused for another's --
+        # both exposing the first user's execution and computing the second user's results
+        # with the wrong value.
+        secret_owner: str | None = None
+        if any(
+            isinstance(dynamic_data_argument, dict)
+            and DYNAMIC_DATA_SECRET_KEY in dynamic_data_argument
+            for dynamic_data_argument in dynamic_data_arguments.values()
+        ):
+            secret_owner = session.scalar(
+                sql.select(bts.PipelineRun.created_by)
+                .join(
+                    bts.ExecutionToAncestorExecutionLink,
+                    bts.ExecutionToAncestorExecutionLink.ancestor_execution_id
+                    == bts.PipelineRun.root_execution_id,
+                )
+                .where(
+                    bts.ExecutionToAncestorExecutionLink.execution_id == execution.id
+                )
+            )
+
         cache_key = _calculate_container_execution_cache_key(
             container_spec=container_spec,
             input_artifact_data=input_artifact_data,
             dynamic_data_arguments=dynamic_data_arguments,
+            secret_owner=secret_owner,
         )
 
         # Trying to reuse an older execution from cache.
@@ -1296,6 +1320,7 @@ def _calculate_container_execution_cache_key(
     container_spec: structures.ContainerSpec,
     input_artifact_data: dict[str, bts.ArtifactData],
     dynamic_data_arguments: dict[str, dict[str, Any]] | None = None,
+    secret_owner: str | None = None,
 ):
     # Using ContainerSpec instead of the whole ComponentSpec.
     input_hashes = {
@@ -1308,6 +1333,11 @@ def _calculate_container_execution_cache_key(
     }
     if dynamic_data_arguments:
         cache_key_struct["dynamic_data_arguments"] = dynamic_data_arguments
+    # Only set when an argument references a secret, so executions without secrets keep
+    # sharing cache entries across users. The owner's ID, never the secret's value: the key is
+    # stored on every execution node, indexed, and exported as a trace attribute.
+    if secret_owner is not None:
+        cache_key_struct["secret_owner"] = secret_owner
     # Need to sort keys to ensure consistency
     cache_key_str = json.dumps(cache_key_struct, separators=(",", ":"), sort_keys=True)
     # We could use a different hash function, but there is no reason to.
