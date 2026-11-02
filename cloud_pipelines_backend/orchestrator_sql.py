@@ -223,7 +223,6 @@ class OrchestratorService_Sql:
         query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
         if running_container_execution:
             self._running_executions_queue_idle = False
-            start_timestamp = time.monotonic_ns()
 
             execution_node_ids = list(
                 session.scalars(
@@ -241,6 +240,7 @@ class OrchestratorService_Sql:
                 queries_duration_ms = (
                     time.monotonic_ns() - query_start_timestamp
                 ) / 1_000_000
+                start_timestamp = time.monotonic_ns()
                 _logger.info(
                     f"Before processing running container execution. Queries duration {queries_duration_ms}ms."
                 )
@@ -333,6 +333,10 @@ class OrchestratorService_Sql:
                     duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
                     _logger.info(
                         f"After processing running container execution (duration: {duration_ms}ms)"
+                    )
+                    app_metrics.record_refresh_duration(
+                        queries_duration_ms=queries_duration_ms,
+                        processing_duration_ms=duration_ms,
                     )
             return True
         else:
@@ -1225,6 +1229,10 @@ class OrchestratorService_Sql:
             launcher_interfaces.ContainerStatus.SUCCEEDED,
             launcher_interfaces.ContainerStatus.FAILED,
         ):
+            app_metrics.record_completion_lag(
+                ended_at=reloaded_launched_container.ended_at,
+                status=container_execution.status,
+            )
             try:
                 launched_container.cleanup()
             except Exception:

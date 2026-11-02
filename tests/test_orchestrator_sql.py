@@ -921,3 +921,77 @@ class TestFailedTerminationIsRetried:
             sql.select(bts.ContainerExecution)
         )
         assert container_execution.status == bts.ContainerExecutionStatus.SYSTEM_ERROR
+
+
+class TestRefreshMetrics:
+    _ENDED_AT = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+
+    def _refresh_once(
+        self,
+        *,
+        refreshed_status: launcher_interfaces.ContainerStatus | None = None,
+        outputs_exist: bool = True,
+    ):
+        """Launches a one-task run with one output, refreshes it once, and returns the mocked metrics module."""
+        session_factory = _create_session_factory()
+        _create_pipeline_run(
+            session_factory,
+            _make_graph_task_spec(
+                tasks={
+                    "task": structures.TaskSpec(
+                        component_ref=structures.ComponentReference(
+                            spec=_make_container_component(outputs=["out"])
+                        )
+                    )
+                }
+            ),
+        )
+        launched_container_mock = _make_launched_container_mock()
+        _process_queued_executions(session_factory, launched_container_mock)
+        orchestrator = _make_running_orchestrator(
+            session_factory, launched_container_mock
+        )
+        orchestrator._storage_provider.make_uri.return_value.get_reader.return_value.exists.return_value = (
+            outputs_exist
+        )
+        if refreshed_status:
+            orchestrator._launcher.get_refreshed_launched_container_from_dict.return_value = mock.MagicMock(
+                status=refreshed_status,
+                exit_code=0,
+                started_at=None,
+                ended_at=self._ENDED_AT,
+                launcher_error_message=None,
+                to_dict=lambda: {"foo": "bar"},
+            )
+        with mock.patch.object(orchestrator_sql, "app_metrics") as app_metrics:
+            orchestrator.internal_process_running_executions_queue(
+                session=session_factory()
+            )
+        return app_metrics
+
+    def test_every_refresh_records_its_duration(self) -> None:
+        app_metrics = self._refresh_once()
+
+        app_metrics.record_refresh_duration.assert_called_once()
+        app_metrics.record_completion_lag.assert_not_called()
+
+    def test_a_failed_container_records_its_completion_lag(self) -> None:
+        app_metrics = self._refresh_once(
+            refreshed_status=launcher_interfaces.ContainerStatus.FAILED
+        )
+
+        app_metrics.record_completion_lag.assert_called_once_with(
+            ended_at=self._ENDED_AT, status=bts.ContainerExecutionStatus.FAILED
+        )
+
+    def test_a_succeeded_container_missing_outputs_records_the_committed_failed_status(
+        self,
+    ) -> None:
+        app_metrics = self._refresh_once(
+            refreshed_status=launcher_interfaces.ContainerStatus.SUCCEEDED,
+            outputs_exist=False,
+        )
+
+        app_metrics.record_completion_lag.assert_called_once_with(
+            ended_at=self._ENDED_AT, status=bts.ContainerExecutionStatus.FAILED
+        )
