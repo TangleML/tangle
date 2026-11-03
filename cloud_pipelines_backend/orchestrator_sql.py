@@ -1,9 +1,14 @@
+import concurrent.futures
+import contextlib
 import copy
+import dataclasses
+import functools
 import json
 import datetime
 import logging
 import itertools
 import os
+import threading
 import time
 import traceback
 import typing
@@ -35,6 +40,10 @@ _T = typing.TypeVar("_T")
 
 DYNAMIC_DATA_SECRET_KEY = "secret"
 DYNAMIC_DATA_SECRET_NAME_KEY = "name"
+
+_FRONT_OF_RUNNING_QUEUE_LAST_PROCESSED_AT = datetime.datetime(
+    1970, 1, 1, tzinfo=datetime.timezone.utc
+)
 
 
 class OrchestratorError(RuntimeError):
@@ -72,6 +81,7 @@ class OrchestratorService_Sql:
         *,
         # Internal/experimental:
         _max_container_execution_refresh_error_retries: int = 3,
+        _completion_prefetch_max_workers: int = 0,
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
         queued_execution_interceptor: QueuedExecutionInterceptor | None = None,
@@ -94,6 +104,20 @@ class OrchestratorService_Sql:
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
         self._queued_execution_interceptor = queued_execution_interceptor
+        self._completion_prefetch_executor = None
+        if _completion_prefetch_max_workers:
+            self._completion_prefetch_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_completion_prefetch_max_workers,
+                thread_name_prefix="completion-prefetch",
+            )
+        self._completion_prefetches: dict[
+            str, concurrent.futures.Future[_CompletionPrefetch]
+        ] = {}
+        self._ended_launched_containers: dict[
+            str, launcher_interfaces.LaunchedContainer
+        ] = {}
+        self._finished_completion_prefetch_ids: set[str] = set()
+        self._finished_completion_prefetch_ids_lock = threading.Lock()
 
     def run_loop(self):
         while True:
@@ -200,6 +224,7 @@ class OrchestratorService_Sql:
 
     def internal_process_running_executions_queue(self, session: orm.Session):
         _logger.debug("Selecting running container execution to process.)")
+        self._move_finished_completion_prefetches_to_front(session=session)
 
         # Select only the ID to avoid loading large JSON columns into the sort buffer.
         query_start_timestamp = time.monotonic_ns()
@@ -299,6 +324,9 @@ class OrchestratorService_Sql:
 
                     self._container_execution_refresh_error_counts.pop(
                         running_container_execution.id, None
+                    )
+                    self._forget_completion_prefetch(
+                        container_execution_id=running_container_execution.id
                     )
                     running_container_execution.status = (
                         bts.ContainerExecutionStatus.SYSTEM_ERROR
@@ -969,6 +997,9 @@ class OrchestratorService_Sql:
                 # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
                 container_execution.status = bts.ContainerExecutionStatus.CANCELLED
                 terminated = True
+                self._forget_completion_prefetch(
+                    container_execution_id=container_execution.id
+                )
 
                 # Marking the execution nodes as cancelled only after the launched container is successfully terminated
                 for execution_node in votes_to_terminate:
@@ -991,10 +1022,25 @@ class OrchestratorService_Sql:
             if terminated:
                 return
 
-        # Asking the launcher to refresh the container state.
-        reloaded_launched_container: launcher_interfaces.LaunchedContainer = (
-            self._launcher.get_refreshed_launched_container_from_dict(launcher_data)
+        reloaded_launched_container: launcher_interfaces.LaunchedContainer | None = (
+            self._ended_launched_containers.get(container_execution.id)
         )
+        if reloaded_launched_container is None:
+            # Asking the launcher to refresh the container state.
+            reloaded_launched_container = (
+                self._launcher.get_refreshed_launched_container_from_dict(launcher_data)
+            )
+        prefetch = _CompletionPrefetch()
+        if (
+            self._completion_prefetch_executor is not None
+            and reloaded_launched_container.status in _ENDED_CONTAINER_STATUSES
+        ):
+            prefetch = self._take_completion_prefetch(
+                container_execution=container_execution,
+                launched_container=reloaded_launched_container,
+            )
+            if prefetch is None:
+                return
         current_time = _get_current_time()
         # Saving the updated launcher data
         reloaded_launcher_data = reloaded_launched_container.to_dict()
@@ -1040,12 +1086,13 @@ class OrchestratorService_Sql:
 
             # Don't fail the execution if log upload fails.
             # Logs are important, but not so important that we should fail a successfully completed container execution.
-            try:
-                _retry(reloaded_launched_container.upload_log)
-            except Exception as ex:
-                _logger.exception(
-                    f"! Error during `LaunchedContainer.upload_log` call: {ex}."
-                )
+            if not prefetch.log_uploaded:
+                try:
+                    _retry(reloaded_launched_container.upload_log)
+                except Exception as ex:
+                    _logger.exception(
+                        f"! Error during `LaunchedContainer.upload_log` call: {ex}."
+                    )
 
             _MAX_PRELOAD_VALUE_SIZE = 255
 
@@ -1083,8 +1130,14 @@ class OrchestratorService_Sql:
             missing_output_names = [
                 output_name
                 for output_name, uri in output_artifact_uris.items()
-                if not _retry(
-                    lambda: self._storage_provider.make_uri(uri).get_reader().exists()
+                if not _prefetched_or_call(
+                    prefetch.output_exists,
+                    uri,
+                    lambda: _retry(
+                        lambda: self._storage_provider.make_uri(uri)
+                        .get_reader()
+                        .exists()
+                    ),
                 )
             ]
 
@@ -1111,12 +1164,16 @@ class OrchestratorService_Sql:
                     "orchestrator.get_output_artifact_info"
                 ):
                     output_artifact_data_info_map = {
-                        output_name: _retry(
-                            lambda: (
-                                self._storage_provider.make_uri(uri)
-                                .get_reader()
-                                .get_info()
-                            )
+                        output_name: _prefetched_or_call(
+                            prefetch.output_data_infos,
+                            uri,
+                            lambda: _retry(
+                                lambda: (
+                                    self._storage_provider.make_uri(uri)
+                                    .get_reader()
+                                    .get_info()
+                                )
+                            ),
                         )
                         for output_name, uri in output_artifact_uris.items()
                     }
@@ -1132,13 +1189,17 @@ class OrchestratorService_Sql:
                         ][0],
                         uri=output_artifact_uris[output_name],
                         # Preloading artifact value is it's small enough (e.g. <=255 bytes)
-                        value=_retry(
-                            lambda: _maybe_get_small_artifact_value(
-                                uri_reader=self._storage_provider.make_uri(
-                                    output_artifact_uris[output_name]
-                                ).get_reader(),
-                                data_info=data_info,
-                            )
+                        value=_prefetched_or_call(
+                            prefetch.output_values,
+                            output_artifact_uris[output_name],
+                            lambda: _retry(
+                                lambda: _maybe_get_small_artifact_value(
+                                    uri_reader=self._storage_provider.make_uri(
+                                        output_artifact_uris[output_name]
+                                    ).get_reader(),
+                                    data_info=data_info,
+                                )
+                            ),
                         ),
                         created_at=current_time,
                     )
@@ -1190,12 +1251,13 @@ class OrchestratorService_Sql:
             # Logs are best-effort; losing them is never a reason to fail an
             # execution. The launcher decides what a lost log means; the
             # orchestrator only records that the upload did not succeed.
-            try:
-                _retry(reloaded_launched_container.upload_log)
-            except Exception as ex:
-                _logger.exception(
-                    f"! Error during `LaunchedContainer.upload_log` call: {ex}."
-                )
+            if not prefetch.log_uploaded:
+                try:
+                    _retry(reloaded_launched_container.upload_log)
+                except Exception as ex:
+                    _logger.exception(
+                        f"! Error during `LaunchedContainer.upload_log` call: {ex}."
+                    )
             # Skip downstream executions
             for execution_node in execution_nodes:
                 execution_node.container_execution_status = (
@@ -1239,6 +1301,161 @@ class OrchestratorService_Sql:
                 _logger.exception(
                     f"Processing running container execution {container_execution.id}: Error doing launched container cleanup."
                 )
+
+    def shutdown_completion_prefetches(self, *, timeout_seconds: float) -> bool:
+        """Cancels the completion prefetches that have not started and waits up to `timeout_seconds` for the running ones; returns whether they all finished."""
+        if self._completion_prefetch_executor is None:
+            return True
+        self._completion_prefetch_executor.shutdown(wait=False, cancel_futures=True)
+        _, not_done = concurrent.futures.wait(
+            self._completion_prefetches.values(), timeout=timeout_seconds
+        )
+        return not not_done
+
+    def _take_completion_prefetch(
+        self,
+        *,
+        container_execution: bts.ContainerExecution,
+        launched_container: launcher_interfaces.LaunchedContainer,
+    ) -> "_CompletionPrefetch | None":
+        """Returns and forgets the finished prefetch for this container execution, or starts one and returns None."""
+        future = self._completion_prefetches.get(container_execution.id)
+        if future is None:
+            output_uris = []
+            if (
+                launched_container.status
+                == launcher_interfaces.ContainerStatus.SUCCEEDED
+            ):
+                output_uris = [
+                    output_artifact_info_dict["uri"]
+                    for output_artifact_info_dict in (
+                        container_execution.output_artifact_data_map or {}
+                    ).values()
+                ]
+            future = self._completion_prefetch_executor.submit(
+                _prefetch_completion,
+                launched_container=launched_container,
+                storage_provider=self._storage_provider,
+                output_uris=output_uris,
+            )
+            future.add_done_callback(
+                functools.partial(
+                    self._record_finished_completion_prefetch, container_execution.id
+                )
+            )
+            self._completion_prefetches[container_execution.id] = future
+            self._ended_launched_containers[container_execution.id] = launched_container
+            return None
+        if not future.done():
+            return None
+        del self._completion_prefetches[container_execution.id]
+        self._ended_launched_containers.pop(container_execution.id, None)
+        try:
+            return future.result()
+        except Exception:
+            _logger.exception("Completion prefetch failed; processing without it.")
+            return _CompletionPrefetch()
+
+    def _forget_completion_prefetch(self, *, container_execution_id: str) -> None:
+        """Forgets the prefetch of a container execution that left the running queue, cancelling it if it has not started."""
+        self._ended_launched_containers.pop(container_execution_id, None)
+        future = self._completion_prefetches.pop(container_execution_id, None)
+        if future is not None:
+            future.cancel()
+
+    def _record_finished_completion_prefetch(
+        self,
+        container_execution_id: str,
+        future: "concurrent.futures.Future[_CompletionPrefetch]",
+    ) -> None:
+        """Records that the container execution's prefetch is done, for the loop thread to move it to the front of the running queue."""
+        if future.cancelled():
+            return
+        with self._finished_completion_prefetch_ids_lock:
+            self._finished_completion_prefetch_ids.add(container_execution_id)
+
+    def _move_finished_completion_prefetches_to_front(
+        self, *, session: orm.Session
+    ) -> None:
+        """Moves every pending or running container execution whose prefetch is done to the front of the running queue, so the next visit commits it."""
+        with self._finished_completion_prefetch_ids_lock:
+            container_execution_ids = list(self._finished_completion_prefetch_ids)
+            self._finished_completion_prefetch_ids.clear()
+        if not container_execution_ids:
+            return
+        session.execute(
+            sql.update(bts.ContainerExecution)
+            .where(
+                bts.ContainerExecution.id.in_(container_execution_ids),
+                bts.ContainerExecution.status.in_(
+                    (
+                        bts.ContainerExecutionStatus.PENDING,
+                        bts.ContainerExecutionStatus.RUNNING,
+                    )
+                ),
+            )
+            .values(last_processed_at=_FRONT_OF_RUNNING_QUEUE_LAST_PROCESSED_AT)
+        )
+        session.commit()
+
+
+_ENDED_CONTAINER_STATUSES = (
+    launcher_interfaces.ContainerStatus.SUCCEEDED,
+    launcher_interfaces.ContainerStatus.FAILED,
+)
+
+
+@dataclasses.dataclass
+class _CompletionPrefetch:
+    """The finished-container calls a prefetch completed; each call missing here is made inline instead."""
+
+    log_uploaded: bool = False
+    output_exists: dict[str, bool] = dataclasses.field(default_factory=dict)
+    output_data_infos: dict[str, storage_provider_interfaces.DataInfo] = (
+        dataclasses.field(default_factory=dict)
+    )
+    output_values: dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+def _prefetch_completion(
+    *,
+    launched_container: launcher_interfaces.LaunchedContainer,
+    storage_provider: storage_provider_interfaces.StorageProvider,
+    output_uris: list[str],
+) -> _CompletionPrefetch:
+    """Makes the log upload and output reads that committing a finished container needs, recording each one that succeeds."""
+    prefetch = _CompletionPrefetch()
+    with contextlib.suppress(Exception):
+        _retry(launched_container.upload_log)
+        prefetch.log_uploaded = True
+
+    readers = {uri: storage_provider.make_uri(uri).get_reader() for uri in output_uris}
+    with contextlib.suppress(Exception):
+        for uri, reader in readers.items():
+            if _retry(reader.exists):
+                prefetch.output_exists[uri] = True
+    if not all(prefetch.output_exists.get(uri) for uri in output_uris):
+        return prefetch
+
+    with contextlib.suppress(Exception):
+        for uri, reader in readers.items():
+            prefetch.output_data_infos[uri] = _retry(reader.get_info)
+    for uri, data_info in prefetch.output_data_infos.items():
+        value = _maybe_get_small_artifact_value(
+            uri_reader=readers[uri], data_info=data_info
+        )
+        if value is not None:
+            prefetch.output_values[uri] = value
+    return prefetch
+
+
+def _prefetched_or_call(
+    prefetched: dict[str, _T], uri: str, call: typing.Callable[[], _T]
+) -> _T:
+    """Returns the prefetched result for `uri`, or makes the call when the prefetch has none."""
+    if uri in prefetched:
+        return prefetched[uri]
+    return call()
 
 
 def _get_direct_downstream_executions(
