@@ -217,6 +217,10 @@ class _KubernetesContainerLauncherBase:
         )
         self._pod_postprocessor = pod_postprocessor
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
+        self._container_execution_change_listeners: tuple[
+            interfaces.ContainerExecutionChangeListener, ...
+        ] = ()
+        self._container_execution_change_listeners_lock = threading.Lock()
 
         try:
             k8s_client_lib.VersionApi(self._api_client).get_code(
@@ -246,6 +250,7 @@ class _KubernetesContainerLauncherBase:
                 # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
                 # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
                 label_selector=None,
+                on_change=self._notify_container_execution_changed,
             )
             self._pod_informer.start()
         except Exception:
@@ -648,6 +653,10 @@ class _KubernetesContainerLauncherBase:
             service_account_name=pod_service_account,
         )
 
+        pod_annotations = (pod_annotations or {}) | _container_execution_id_annotation(
+            annotations
+        )
+
         pod = k8s_client_lib.V1Pod(
             api_version="v1",
             kind="Pod",
@@ -673,6 +682,32 @@ class _KubernetesContainerLauncherBase:
         if isinstance(self._namespace, str):
             return self._namespace
         return self._namespace(annotations=annotations)
+
+    def subscribe_to_container_execution_changes(
+        self, *, listener: interfaces.ContainerExecutionChangeListener
+    ) -> None:
+        """Calls `listener` whenever a pod or job this launcher launched changes."""
+        with self._container_execution_change_listeners_lock:
+            self._container_execution_change_listeners = (
+                *self._container_execution_change_listeners,
+                listener,
+            )
+
+    def _notify_container_execution_changed(
+        self, obj: k8s_client_lib.V1Pod | k8s_client_lib.V1Job
+    ) -> None:
+        """Tells every listener that the container execution behind `obj` changed, so one failing listener can't stop the rest."""
+        container_execution_id = _get_container_execution_id(obj)
+        if not container_execution_id:
+            return
+        change = interfaces.ContainerExecutionChange(
+            container_execution_id=container_execution_id
+        )
+        for listener in self._container_execution_change_listeners:
+            try:
+                listener(change)
+            except Exception:
+                _logger.exception("Container execution change listener failed.")
 
 
 class _KubernetesPodLauncher(
@@ -1346,6 +1381,7 @@ class _KubernetesJobLauncher(
                 # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
                 # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
                 label_selector=None,
+                on_change=self._notify_container_execution_changed,
             )
             self._job_informer.start()
         except Exception:
@@ -1532,7 +1568,8 @@ class _KubernetesJobLauncher(
                 name=explicit_job_name,
                 namespace=namespace,
                 # annotations=self._pod_annotations,
-                annotations=_DEFAULT_KUBERNETES_ANNOTATIONS,
+                annotations=_DEFAULT_KUBERNETES_ANNOTATIONS
+                | _container_execution_id_annotation(annotations),
                 # ! Kubernetes gotcha: If Job labels are empty, Kubernetes copies the labels from the Job's Pod template (but not annotations).
                 # https://github.com/kubernetes/kubernetes/blob/b1dc9d16763d2546b8464a09307471f3411ab391/pkg/apis/batch/v1/defaults.go#L49-L52
                 # So, changing code from no labels to some default labels stops that special behavior, causing pod template labels to not being propagated to Job itself.
@@ -2329,6 +2366,13 @@ class _KubernetesPodOrJobLauncher(
         )
         return launched_container.get_refreshed()
 
+    def subscribe_to_container_execution_changes(
+        self, *, listener: interfaces.ContainerExecutionChangeListener
+    ) -> None:
+        """Subscribes `listener` to the changes of both the pod and the job launcher."""
+        self._pod_launcher.subscribe_to_container_execution_changes(listener=listener)
+        self._job_launcher.subscribe_to_container_execution_changes(listener=listener)
+
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
     ) -> "LaunchedKubernetesContainer | LaunchedKubernetesJob":
@@ -2399,6 +2443,37 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
+
+
+def _container_execution_id_annotation(
+    annotations: dict[str, Any] | None,
+) -> dict[str, str]:
+    """The container execution id annotation from a task's annotations, to stamp on its pod or job; empty when absent."""
+    container_execution_id = (annotations or {}).get(
+        common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
+    )
+    if not container_execution_id:
+        return {}
+    return {
+        common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY: container_execution_id
+    }
+
+
+def _get_container_execution_id(
+    obj: k8s_client_lib.V1Pod | k8s_client_lib.V1Job,
+) -> str | None:
+    """Reads the container execution id annotation off a pod or a job, falling back to a job's pod template."""
+    metadatas = [obj.metadata]
+    if isinstance(obj, k8s_client_lib.V1Job) and obj.spec and obj.spec.template:
+        metadatas.append(obj.spec.template.metadata)
+    for metadata in metadatas:
+        if metadata and metadata.annotations:
+            container_execution_id = metadata.annotations.get(
+                common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
+            )
+            if container_execution_id:
+                return container_execution_id
+    return None
 
 
 def _get_job_pod_completion_index(pod: k8s_client_lib.V1Pod) -> str | None:
@@ -2561,12 +2636,16 @@ class MultiNamespaceInformer:
         label_selector=None,
         field_selector=None,
         key_func=None,
+        on_change: (
+            typing.Callable[[k8s_client_lib.V1Pod | k8s_client_lib.V1Job], None] | None
+        ) = None,
     ):
         self._list_func = list_func
         self._resync_period = resync_period
         self._label_selector = label_selector
         self._field_selector = field_selector
         self._key_func = key_func
+        self._on_change = on_change
         self._informers: dict[str, k8s_informer_lib.SharedInformer] = {}
         self._lock = threading.Lock()
         self._is_active = False
@@ -2592,6 +2671,13 @@ class MultiNamespaceInformer:
         )
         # Prefill the cache
         informer._initial_list()
+        if self._on_change:
+            for event_type in (
+                k8s_informer_lib.ADDED,
+                k8s_informer_lib.MODIFIED,
+                k8s_informer_lib.DELETED,
+            ):
+                informer.add_event_handler(event_type, self._on_change)
         self._informers[namespace] = informer
         if self._is_active:
             informer.start()

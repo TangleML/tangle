@@ -60,6 +60,16 @@ class InputArgument:
     dynamic_data: str | dict[str, Any] | None = None
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ContainerExecutionChange:
+    """A launcher saw the container of a container execution it launched change."""
+
+    container_execution_id: str
+
+
+ContainerExecutionChangeListener = typing.Callable[[ContainerExecutionChange], None]
+
+
 class ContainerTaskLauncher(typing.Generic[_TLaunchedContainer], abc.ABC):
     @abc.abstractmethod
     def launch_container_task(
@@ -82,6 +92,12 @@ class ContainerTaskLauncher(typing.Generic[_TLaunchedContainer], abc.ABC):
         self, launched_container_dict: dict[str, Any]
     ) -> _TLaunchedContainer:
         raise NotImplementedError()
+
+    def subscribe_to_container_execution_changes(
+        self, *, listener: ContainerExecutionChangeListener
+    ) -> None:
+        """Calls `listener` whenever a container this launcher launched changes; does nothing when the launcher cannot tell."""
+        del listener
 
 
 class ContainerStatus(str, enum.Enum):
