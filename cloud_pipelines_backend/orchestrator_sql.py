@@ -36,6 +36,10 @@ _T = typing.TypeVar("_T")
 DYNAMIC_DATA_SECRET_KEY = "secret"
 DYNAMIC_DATA_SECRET_NAME_KEY = "name"
 
+_FRONT_OF_RUNNING_QUEUE_LAST_PROCESSED_AT = datetime.datetime(
+    1970, 1, 1, tzinfo=datetime.timezone.utc
+)
+
 
 class OrchestratorError(RuntimeError):
     pass
@@ -199,6 +203,7 @@ class OrchestratorService_Sql:
             return False
 
     def internal_process_running_executions_queue(self, session: orm.Session):
+        self._move_changed_container_executions_to_front(session=session)
         _logger.debug("Selecting running container execution to process.)")
 
         # Select only the ID to avoid loading large JSON columns into the sort buffer.
@@ -346,6 +351,26 @@ class OrchestratorService_Sql:
                 )
                 self._running_executions_queue_idle = True
             return False
+
+    def _move_changed_container_executions_to_front(self, session: orm.Session) -> None:
+        """Moves every pending or running container execution whose container the launcher saw change to the front of the running queue."""
+        container_execution_ids = self._launcher.pop_changed_container_execution_ids()
+        if not container_execution_ids:
+            return
+        session.execute(
+            sql.update(bts.ContainerExecution)
+            .where(
+                bts.ContainerExecution.id.in_(container_execution_ids),
+                bts.ContainerExecution.status.in_(
+                    (
+                        bts.ContainerExecutionStatus.PENDING,
+                        bts.ContainerExecutionStatus.RUNNING,
+                    )
+                ),
+            )
+            .values(last_processed_at=_FRONT_OF_RUNNING_QUEUE_LAST_PROCESSED_AT)
+        )
+        session.commit()
 
     def internal_process_one_queued_execution(
         self, session: orm.Session, execution: bts.ExecutionNode

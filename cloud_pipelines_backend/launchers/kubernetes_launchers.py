@@ -79,6 +79,8 @@ RETRIES_MAX_RETRIES_ANNOTATION_KEY = (
 # Multi-node constants
 _MULTI_NODE_MAX_NUMBER_OF_NODES = 16
 
+_MAX_CHANGED_CONTAINER_EXECUTION_IDS = 10_000
+
 # dynamicData argument keys
 _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY = "system/multi_node/number_of_nodes"
 _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY = "system/multi_node/node_index"
@@ -203,6 +205,8 @@ class _KubernetesContainerLauncherBase:
         )
         self._pod_postprocessor = pod_postprocessor
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
+        self._changed_container_execution_ids: set[str] = set()
+        self._changed_container_execution_ids_lock = threading.Lock()
 
         try:
             k8s_client_lib.VersionApi(self._api_client).get_code(
@@ -231,6 +235,7 @@ class _KubernetesContainerLauncherBase:
                 # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
                 # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
                 label_selector=None,
+                on_change=self._mark_container_execution_changed,
             )
             self._pod_informer.start()
         except Exception:
@@ -488,6 +493,14 @@ class _KubernetesContainerLauncherBase:
             service_account_name=pod_service_account,
         )
 
+        container_execution_id = (annotations or {}).get(
+            common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
+        )
+        if container_execution_id:
+            pod_annotations = (pod_annotations or {}) | {
+                common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY: container_execution_id
+            }
+
         pod = k8s_client_lib.V1Pod(
             api_version="v1",
             kind="Pod",
@@ -512,6 +525,27 @@ class _KubernetesContainerLauncherBase:
         """
         del annotations
         return self._namespace
+
+    def pop_changed_container_execution_ids(self) -> list[str]:
+        """Returns and forgets the ids of the container executions whose pods or jobs changed since the last call.
+
+        At most `_MAX_CHANGED_CONTAINER_EXECUTION_IDS` ids are kept between calls, so a launcher nobody asks stays bounded.
+        """
+        with self._changed_container_execution_ids_lock:
+            container_execution_ids = list(self._changed_container_execution_ids)
+            self._changed_container_execution_ids = set()
+        return container_execution_ids
+
+    def _mark_container_execution_changed(self, obj: Any) -> None:
+        """Records the container execution that launched `obj`, a pod or a job, as changed."""
+        container_execution_id = _get_container_execution_id(obj)
+        if container_execution_id:
+            with self._changed_container_execution_ids_lock:
+                if (
+                    len(self._changed_container_execution_ids)
+                    < _MAX_CHANGED_CONTAINER_EXECUTION_IDS
+                ):
+                    self._changed_container_execution_ids.add(container_execution_id)
 
 
 class _KubernetesPodLauncher(
@@ -1106,6 +1140,7 @@ class _KubernetesJobLauncher(
                 # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
                 # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
                 label_selector=None,
+                on_change=self._mark_container_execution_changed,
             )
             self._job_informer.start()
         except Exception:
@@ -2047,6 +2082,13 @@ class _KubernetesPodOrJobLauncher(
         )
         return launched_container.get_refreshed()
 
+    def pop_changed_container_execution_ids(self) -> list[str]:
+        """Returns and forgets the ids of the container executions whose pods or jobs changed since the last call."""
+        return (
+            self._pod_launcher.pop_changed_container_execution_ids()
+            + self._job_launcher.pop_changed_container_execution_ids()
+        )
+
     def deserialize_launched_container_from_dict(
         self, launched_container_dict: dict
     ) -> "LaunchedKubernetesContainer | LaunchedKubernetesJob":
@@ -2117,6 +2159,22 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
+
+
+def _get_container_execution_id(obj: Any) -> str | None:
+    """Reads the container execution id annotation off a pod, or off a job's pod template."""
+    pod_template = getattr(getattr(obj, "spec", None), "template", None)
+    for metadata in (
+        getattr(obj, "metadata", None),
+        getattr(pod_template, "metadata", None),
+    ):
+        annotations = getattr(metadata, "annotations", None) or {}
+        container_execution_id = annotations.get(
+            common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
+        )
+        if container_execution_id:
+            return container_execution_id
+    return None
 
 
 def _get_job_pod_completion_index(pod: k8s_client_lib.V1Pod) -> str | None:
@@ -2219,12 +2277,14 @@ class MultiNamespaceInformer:
         label_selector=None,
         field_selector=None,
         key_func=None,
+        on_change: typing.Callable[[Any], None] | None = None,
     ):
         self._list_func = list_func
         self._resync_period = resync_period
         self._label_selector = label_selector
         self._field_selector = field_selector
         self._key_func = key_func
+        self._on_change = on_change
         self._informers: dict[str, k8s_informer_lib.SharedInformer] = {}
         self._lock = threading.Lock()
         self._is_active = False
@@ -2250,6 +2310,13 @@ class MultiNamespaceInformer:
         )
         # Prefill the cache
         informer._initial_list()
+        if self._on_change:
+            for event_type in (
+                k8s_informer_lib.ADDED,
+                k8s_informer_lib.MODIFIED,
+                k8s_informer_lib.DELETED,
+            ):
+                informer.add_event_handler(event_type, self._on_change)
         self._informers[namespace] = informer
         if self._is_active:
             informer.start()

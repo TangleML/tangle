@@ -80,6 +80,10 @@ class ContainerTaskLauncher(typing.Generic[_TLaunchedContainer], abc.ABC):
     ) -> _TLaunchedContainer:
         raise NotImplementedError()
 
+    def pop_changed_container_execution_ids(self) -> list[str]:
+        """Returns and forgets the ids of the container executions whose containers changed since the last call; empty when the launcher cannot tell."""
+        return []
+
 
 class ContainerStatus(str, enum.Enum):
     PENDING = "PENDING"
