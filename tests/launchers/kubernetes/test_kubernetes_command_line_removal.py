@@ -44,8 +44,10 @@ def _make_job() -> k8s_client_lib.V1Job:
 
 
 def test_serialized_pod_has_no_command_line() -> None:
-    pod_dict = kubernetes_launchers._serialize_kubernetes_object_to_compact_dict(
-        _make_pod()
+    pod_dict = (
+        kubernetes_launchers._serialize_kubernetes_object_to_compact_dict_and_censor_it(
+            obj=_make_pod()
+        )
     )
 
     container = pod_dict["spec"]["containers"][0]
@@ -56,8 +58,10 @@ def test_serialized_pod_has_no_command_line() -> None:
 
 
 def test_serialized_job_has_no_command_line_on_its_pod_template() -> None:
-    job_dict = kubernetes_launchers._serialize_kubernetes_object_to_compact_dict(
-        _make_job()
+    job_dict = (
+        kubernetes_launchers._serialize_kubernetes_object_to_compact_dict_and_censor_it(
+            obj=_make_job()
+        )
     )
 
     container = job_dict["spec"]["template"]["spec"]["containers"][0]
@@ -98,7 +102,11 @@ def test_serialized_pod_has_no_command_line_anywhere() -> None:
         ),
     )
 
-    pod_dict = kubernetes_launchers._serialize_kubernetes_object_to_compact_dict(pod)
+    pod_dict = (
+        kubernetes_launchers._serialize_kubernetes_object_to_compact_dict_and_censor_it(
+            obj=pod
+        )
+    )
 
     assert "command" not in pod_dict["spec"]["initContainers"][0]
     sidecar = pod_dict["spec"]["containers"][1]
@@ -155,6 +163,8 @@ def test_launched_pod_keeps_its_command_line() -> None:
     """The object sent to the cluster must be untouched: it is how the container is started."""
     pod = _make_pod()
 
-    kubernetes_launchers._serialize_kubernetes_object_to_compact_dict(pod)
+    kubernetes_launchers._serialize_kubernetes_object_to_compact_dict_and_censor_it(
+        obj=pod
+    )
 
     assert pod.spec.containers[0].args == ["--token", _SECRET_VALUE]
