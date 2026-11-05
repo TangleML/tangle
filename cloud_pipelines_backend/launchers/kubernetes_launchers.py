@@ -1806,7 +1806,7 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
                 # cannot recover them and only blocks the caller.
                 _logger.warning(
                     f"Kubelet of Pod {pod_name} is unreachable; its logs are "
-                    f"unrecoverable. {_api_exception_body(ex)}"
+                    f"unrecoverable. {_extract_api_exception_body(ex)}"
                 )
                 return None
             raise
@@ -2277,7 +2277,9 @@ def _remove_command_lines(d: dict):
                     _remove_command_lines(item)
 
 
-def _api_exception_body(exception: kubernetes.client.exceptions.ApiException) -> str:
+def _extract_api_exception_body(
+    exception: kubernetes.client.exceptions.ApiException,
+) -> str:
     """The response body as text, whichever way the installed client stored it.
 
     Older Kubernetes clients assign the raw `bytes`; newer ones decode to `str` in
@@ -2306,7 +2308,7 @@ def _is_kubelet_unreachable_error(
     kubelet was reachable. Callers that must bound their wall time regardless set
     the log-upload retry budget on the launched container instead.
     """
-    body = _api_exception_body(exception)
+    body = _extract_api_exception_body(exception)
     return (
         exception.status == http.HTTPStatus.INTERNAL_SERVER_ERROR
         and "/containerLogs/" in body
