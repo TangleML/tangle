@@ -1,6 +1,7 @@
 """Readers for the annotations that say where a task runs."""
 
 import json
+import re
 
 import pytest
 
@@ -126,3 +127,201 @@ class TestAccelerators:
             execution = _execution(**{ea.RESOURCES_ACCELERATORS_KEY: raw})
             with pytest.raises(ValueError):
                 ea.accelerators(execution=execution)
+
+
+class TestAsLabel:
+    """Two spellings of one machine have to be one series, and a paste must not be one."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("b300", "b300"),
+            ("B300 cluster", "b300-cluster"),
+            ("NVIDIA-B300-SXM6-PC", "nvidia-b300-sxm6-pc"),
+            ("  b300  ", "b300"),
+            ("b300__cluster", "b300-cluster"),
+            ("--b300--", "b300"),
+            ("", "none"),
+            ("   ", "none"),
+            ("---", "none"),
+            ("!!!", "none"),
+            ("x" * 80, "x" * 40),
+            ("a" * 39 + "-b", "a" * 39),
+        ],
+        ids=[
+            "already-fine",
+            "spaces-and-case",
+            "an-accelerator-model",
+            "padded",
+            "underscores-collapse",
+            "dashes-trimmed",
+            "empty",
+            "whitespace-only",
+            "dashes-only",
+            "punctuation-only",
+            "overlong",
+            "truncation-does-not-leave-a-dash",
+        ],
+    )
+    def test_a_client_value_becomes_label_shaped(
+        self, value: str, expected: str
+    ) -> None:
+        assert ea.as_label(value=value) == expected
+
+    def test_every_result_is_label_shaped(self) -> None:
+        """Whatever goes in, what comes out matches the shape a label may take."""
+        inputs = [
+            "b300",
+            "B300 cluster",
+            "x" * 200,
+            "!!!",
+            "ünïcodé-b300",
+            "a/b:c=d",
+            "\n\ttabbed\n",
+        ]
+        for value in inputs:
+            result = ea.as_label(value=value)
+            assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", result), (value, result)
+            assert len(result) <= 40
+
+
+class TestClusterNamesAreBounded:
+    """Davies takes its cluster from the task, so the value is a client's to choose."""
+
+    KEY = "ml.shopify.io/davies/cluster"
+
+    def _target(self, named: object, *, known: frozenset[str] | None) -> object:
+        ea.register_targets(
+            targets={
+                "davies": ea.Target(
+                    provider="davies",
+                    cluster="davies",
+                    cluster_from_annotation=self.KEY,
+                    known_clusters=known,
+                )
+            }
+        )
+        annotations = {ea.CLOUD_PROVIDER_KEY: "davies"}
+        if named is not None:
+            annotations[self.KEY] = named
+        execution = bts.ExecutionNode(task_spec={"annotations": annotations})
+        try:
+            return ea.target(execution=execution).cluster
+        finally:
+            ea.register_targets(targets={})
+
+    @pytest.mark.parametrize(
+        "named,expected",
+        [
+            ("b300", "b300"),
+            ("B300 Cluster", "b300-cluster"),
+            ("h200", "other"),
+            ("b3OO", "other"),
+            ("", "none"),
+            ("   ", "none"),
+            (None, "none"),
+            (["b300"], "none"),
+            ({"a": 1}, "none"),
+        ],
+        ids=[
+            "a-name-it-knows",
+            "the-same-name-spelled-loudly",
+            "a-name-it-does-not-know",
+            "a-typo",
+            "empty",
+            "whitespace",
+            "absent",
+            "a-list",
+            "an-object",
+        ],
+    )
+    def test_an_unexpected_name_does_not_open_a_series(
+        self, named: object, expected: str
+    ) -> None:
+        assert (
+            self._target(named, known=frozenset({"b300", "b300-cluster"})) == expected
+        )
+
+    def test_without_a_list_a_name_is_taken_as_written(self) -> None:
+        """A deployment that keeps no list still gets the reshaping, not the allowlist."""
+        assert self._target("H200 Cluster", known=None) == "h200-cluster"
+
+
+class TestWhereATaskActuallyRan:
+    """The annotation says where a task was aimed; routing can move it afterwards.
+
+    A percentage redirect sends a share of runs to a successor cluster without
+    rewriting the annotation, so a label built from the annotation alone names the
+    wrong cluster, provider and namespace for exactly the tasks a migration moved.
+    """
+
+    FIELD = "tangle_launcher_key"
+
+    def _register(self, *, field: str | None) -> None:
+        ea.register_targets(
+            targets={
+                "lt3": ea.Target(provider="google", cluster="lt3", namespace="old"),
+                "eo9": ea.Target(provider="google", cluster="eo9", namespace="new"),
+            },
+            launcher_key_field=field,
+        )
+
+    def teardown_method(self) -> None:
+        ea.register_targets(targets={})
+
+    def test_the_handle_beats_the_annotation(self) -> None:
+        self._register(field=self.FIELD)
+        execution = _execution(**{ea.CLOUD_PROVIDER_KEY: "lt3"})
+        resolved = ea.target(execution=execution, launcher_data={self.FIELD: "eo9"})
+        assert (resolved.cluster, resolved.namespace) == ("eo9", "new")
+
+    def test_without_a_handle_the_annotation_still_answers(self) -> None:
+        """Before the launch there is no handle, and the aim is all there is."""
+        self._register(field=self.FIELD)
+        execution = _execution(**{ea.CLOUD_PROVIDER_KEY: "lt3"})
+        assert ea.target(execution=execution).cluster == "lt3"
+
+    @pytest.mark.parametrize(
+        "launcher_data",
+        [
+            None,
+            {},
+            {"tangle_launcher_key": ""},
+            {"tangle_launcher_key": None},
+            {"tangle_launcher_key": ["eo9"]},
+            {"other_field": "eo9"},
+            "not a dict",
+            ["not a dict"],
+        ],
+        ids=[
+            "absent",
+            "empty",
+            "empty-string",
+            "null",
+            "a-list",
+            "a-different-field",
+            "a-string",
+            "a-list-not-a-dict",
+        ],
+    )
+    def test_a_handle_that_does_not_say_falls_back(self, launcher_data: object) -> None:
+        self._register(field=self.FIELD)
+        execution = _execution(**{ea.CLOUD_PROVIDER_KEY: "lt3"})
+        assert ea.target(execution=execution, launcher_data=launcher_data).cluster == (
+            "lt3"
+        )
+
+    def test_a_deployment_recording_no_field_ignores_the_handle(self) -> None:
+        """Registering no field name means the handle is not consulted at all."""
+        self._register(field=None)
+        execution = _execution(**{ea.CLOUD_PROVIDER_KEY: "lt3"})
+        resolved = ea.target(execution=execution, launcher_data={self.FIELD: "eo9"})
+        assert resolved.cluster == "lt3"
+
+    def test_a_handle_naming_a_target_nobody_registers_reads_as_unrouted(self) -> None:
+        self._register(field=self.FIELD)
+        execution = _execution(**{ea.CLOUD_PROVIDER_KEY: "lt3"})
+        assert (
+            ea.target(execution=execution, launcher_data={self.FIELD: "retired"})
+            is None
+        )

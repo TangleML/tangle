@@ -46,14 +46,55 @@ class Target(NamedTuple):
     cluster: str
     namespace: str = "none"
     cluster_from_annotation: str | None = None
+    # The clusters the deployment expects its tasks to name, already label-shaped.
+    # None means it keeps no list, so any name a task gives is taken as written.
+    known_clusters: frozenset[str] | None = None
 
 
 # Filled once at startup from the launcher config, which names either spelling of every
 # target. Reading that config validates a file, so it must not happen per status change.
 _TARGETS: dict[str, Target] = {}
 
+# The field a deployment's launcher stamps its own target into on the persisted
+# handle. Registered rather than spelled here, like cluster_from_annotation: the
+# handle's shape belongs to the deployment. None means it records no such field, and
+# the annotation is all there is to go on.
+_LAUNCHER_KEY_FIELD: str | None = None
 
-def register_targets(*, targets: dict[str, Target]) -> None:
+# A label value a client wrote is reshaped before it becomes a series. Forty is well
+# past every name in use and short enough that a pasted stack trace cannot become a
+# label; anything not a lowercase ASCII alphanumeric collapses to a single dash.
+_LABEL_MAX_LENGTH = 40
+_NOT_LABEL_SAFE = re.compile(r"[^a-z0-9]+")
+
+
+def as_label(*, value: str) -> str:
+    """Reshape a value written by a client into one safe to be a metric label.
+
+        "B300 cluster"          → "b300-cluster"
+        "NVIDIA-B300-SXM6-PC"   → "nvidia-b300-sxm6-pc"
+        "b300"                  → "b300"              already fine
+        "  "  or  "---"         → "none"              nothing left to name  (a)
+        a 200-character paste   → its first 40        (b)
+
+        (a) "none" rather than "": an empty label value is dropped by some
+            backends, and a dropped label reads as a different series
+        (b) a cap bounds the width of one series, not how many there are; a
+            caller that needs the count bounded checks the value as well
+
+    This bounds the shape of a label, which is the half that does not need to know
+    what the deployment runs. Two spellings of one name becoming one series is the
+    point: "B300 Cluster" and "b300-cluster" are the same machine.
+    """
+    slug = _NOT_LABEL_SAFE.sub("-", value.strip().lower()).strip("-")
+    if not slug:
+        return "none"
+    return slug[:_LABEL_MAX_LENGTH].rstrip("-") or "none"
+
+
+def register_targets(
+    *, targets: dict[str, Target], launcher_key_field: str | None = None
+) -> None:
     """Install the alias-and-key → Target map. Called once, at startup.
 
         {"lt3":     Target("google", "lt3"),
@@ -63,9 +104,15 @@ def register_targets(*, targets: dict[str, Target]) -> None:
 
     Replaces the map rather than adding to it, so a reload cannot leave behind a
     target the config no longer names.
+
+    ``launcher_key_field`` names the field the deployment's handles record their own
+    target in, keyed the same way as this map. Giving it is what lets a label say
+    where a task ran rather than where it was aimed.
     """
+    global _LAUNCHER_KEY_FIELD
     _TARGETS.clear()
     _TARGETS.update(targets)
+    _LAUNCHER_KEY_FIELD = launcher_key_field
 
 
 def _annotations(*, execution: "bts.ExecutionNode") -> dict[str, str]:
@@ -100,8 +147,30 @@ def cloud_provider(*, execution: "bts.ExecutionNode") -> str | None:
     return selected if isinstance(selected, str) else None
 
 
-def target(*, execution: "bts.ExecutionNode") -> Target | None:
-    """The provider and cluster a task selected, however its annotation spelled it.
+def launched_launcher_key(*, launcher_data: object) -> str | None:
+    """The target a persisted handle says it ran on, or None if it does not say.
+
+        {"tangle_launcher_key": "eo9", ...}  → "eo9"
+        a handle predating the field         → None
+        a handle from another deployment     → None   (a)
+        not a dict                           → None
+
+        (a) the field name is registered by the deployment, so a handle written by
+            one that records nothing reads as None rather than wrongly
+
+    This is the only thing that knows where a task actually ran. The annotation says
+    where it was aimed, and routing can move it afterwards without rewriting it.
+    """
+    if _LAUNCHER_KEY_FIELD is None or not isinstance(launcher_data, dict):
+        return None
+    key = launcher_data.get(_LAUNCHER_KEY_FIELD)
+    return key if isinstance(key, str) and key else None
+
+
+def target(
+    *, execution: "bts.ExecutionNode", launcher_data: object = None
+) -> Target | None:
+    """The provider and cluster a task ran on, or was aimed at before it launched.
 
         reads: cloud-pipelines.net/orchestration/cloud_provider
                + the cluster key registered by a provider that declares none (a)
@@ -120,14 +189,29 @@ def target(*, execution: "bts.ExecutionNode") -> Target | None:
     None means "this deployment does not route that", not "unlabelled": callers turn
     it into "none" so a filter cannot drop the executions that lack it.
     """
-    selected = cloud_provider(execution=execution)
+    # Where it ran beats where it was aimed. Routing can move a task to a successor
+    # cluster after the annotation is written -- a percentage redirect does exactly
+    # that -- and only the handle records the outcome. Before the launch there is no
+    # handle, so the annotation is still the answer.
+    selected = launched_launcher_key(launcher_data=launcher_data) or cloud_provider(
+        execution=execution
+    )
     if selected is None:
         return None
     resolved = _TARGETS.get(selected)
     if resolved is None or resolved.cluster_from_annotation is None:
         return resolved
     named = _annotations(execution=execution).get(resolved.cluster_from_annotation)
-    return resolved._replace(cluster=named or "none")
+    if not isinstance(named, str) or not named.strip():
+        return resolved._replace(cluster="none")
+    reshaped = as_label(value=named)
+    if resolved.known_clusters is not None and reshaped not in resolved.known_clusters:
+        # The task is launched before the provider rejects the name, and the
+        # transition into SYSTEM_ERROR is recorded in between -- so a typo would
+        # otherwise open a series of its own on a histogram that already has nine
+        # labels. "other" stays visible without being unbounded.
+        return resolved._replace(cluster="other")
+    return resolved._replace(cluster=reshaped)
 
 
 def namespace(*, execution: "bts.ExecutionNode") -> str | None:
@@ -173,8 +257,8 @@ def accelerators(*, execution: "bts.ExecutionNode") -> tuple[str, int] | None:
 
         reads: cloud-pipelines.net/launchers/generic/resources.accelerators
 
-        '{"NVIDIA-B300-SXM6-PC": "8"}'  → ("NVIDIA-B300-SXM6-PC", 8)
-        '{"NVIDIA-B300-SXM6-PC":"8"}'   → ("NVIDIA-B300-SXM6-PC", 8)   (a)
+        '{"NVIDIA-B300-SXM6-PC": "8"}'  → ("nvidia-b300-sxm6-pc", 8)
+        '{"NVIDIA-B300-SXM6-PC":"8"}'   → ("nvidia-b300-sxm6-pc", 8)   (a)
         absent  or  '{}'                → None
         '{"A": "1", "B": "1"}'          → ValueError, two models
         'not json'                      → ValueError
@@ -187,6 +271,11 @@ def accelerators(*, execution: "bts.ExecutionNode") -> tuple[str, int] | None:
             orchestrator's commit
 
     Parsing is what makes the two spacings one series instead of two.
+
+    The model is reshaped, not checked against a list. Hardware arrives faster than
+    this file changes, so an unknown accelerator has to stay visible under its own
+    name -- bounding the shape keeps one series narrow, and a model nobody recognises
+    is exactly the thing a reader needs to see.
     """
     raw = _annotations(execution=execution).get(RESOURCES_ACCELERATORS_KEY)
     if not raw:
@@ -205,4 +294,4 @@ def accelerators(*, execution: "bts.ExecutionNode") -> tuple[str, int] | None:
         raise ValueError(
             f"The accelerator count is not a number: {quantity=}"
         ) from None
-    return model, count
+    return as_label(value=model), count
