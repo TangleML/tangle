@@ -26,10 +26,11 @@ import contextvars
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional
 
+from . import execution_annotations
+
 if TYPE_CHECKING:
     from .. import backend_types_sql as bts
 
-_CLOUD_PROVIDER_ANNOTATION_KEY = "cloud-pipelines.net/orchestration/cloud_provider"
 
 # Single context variable to store all metadata as a dictionary
 _context_metadata: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
@@ -141,9 +142,7 @@ def execution_logging_context(execution: "bts.ExecutionNode"):
     on the task spec.
     """
     ctx: dict[str, str] = {"execution_id": execution.id}
-    cloud_provider = ((execution.task_spec or {}).get("annotations") or {}).get(
-        _CLOUD_PROVIDER_ANNOTATION_KEY
-    )
+    cloud_provider = execution_annotations.cloud_provider(execution=execution)
     if cloud_provider is not None:
         ctx["cloud_provider"] = cloud_provider
     return logging_context(**ctx)
