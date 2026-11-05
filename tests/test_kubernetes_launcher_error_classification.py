@@ -28,7 +28,7 @@ class _FakeResponse:
 
     Both header shapes are provided because the client changed how it reads them:
     older versions call `getheaders()`, newer ones read `.headers`. Older versions
-    also assign the body without decoding, which is why `_api_exception_body` has to
+    also assign the body without decoding, which is why `_extract_api_exception_body` has to
     cope with `bytes` as well as `str`.
     """
 
