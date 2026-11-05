@@ -4,6 +4,7 @@ import datetime
 import unittest.mock
 
 import pytest
+import sqlalchemy as sql
 from sqlalchemy import event as sql_event
 from sqlalchemy import orm
 
@@ -835,6 +836,63 @@ class TestSlowTransitionCounter:
         ]
 
 
+class TestPendingReasonOnTheOrchestratorsPath:
+    """The orchestrator reaches a node in a way the in-session tests do not.
+
+    It calls session.rollback() and then walks
+    container_execution.execution_nodes, which leaves the node's many-to-one
+    container_execution in the identity map but still listed as unloaded.
+    Building the objects in-session hides that, so this reproduces the real path.
+    """
+
+    @staticmethod
+    def _stamped_pair(session: orm.Session) -> tuple:
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            extra_data={execution_annotations.PENDING_REASON_KEY: "image_unavailable"},
+        )
+        node = bts.ExecutionNode(task_spec={"annotations": {}})
+        node.container_execution = container_execution
+        session.add_all([container_execution, node])
+        node.container_execution_status = bts.ContainerExecutionStatus.PENDING
+        session.commit()
+        return container_execution, node
+
+    def test_the_reason_survives_the_rollback_the_orchestrator_does(
+        self, session: orm.Session
+    ) -> None:
+        container_execution, node = self._stamped_pair(session)
+        session.rollback()
+        # The orchestrator's own route back to the node.
+        node = container_execution.execution_nodes[0]
+        assert "container_execution" in sql.inspect(node).unloaded, (
+            "precondition: the relationship must look unloaded, or this test is "
+            "exercising the in-session path instead of the orchestrator's"
+        )
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as mock_record:
+            session.commit()
+        attributes = mock_record.call_args.kwargs["attributes"]
+        assert attributes["execution.pending_reason"] == "image_unavailable"
+
+    def test_reading_it_issues_no_query(self, session: orm.Session) -> None:
+        """before_commit must not put a SELECT inside the flush in progress."""
+        container_execution, node = self._stamped_pair(session)
+        session.rollback()
+        node = container_execution.execution_nodes[0]
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        statements: list[str] = []
+        sql_event.listen(
+            session.get_bind(),
+            "before_cursor_execute",
+            lambda conn, cur, stmt, *a: statements.append(stmt),
+        )
+        session.commit()
+        assert not [s for s in statements if "SELECT" in s.upper()], statements
+
+
 class TestPendingReason:
     """Why a task is waiting, stamped while it waits and read when it stops."""
 
@@ -970,7 +1028,7 @@ class TestPendingReason:
         # The orchestrator holds both objects when it flips a status, which is the only
         # time this reader runs; commit expires them, so reload as that caller would.
         node.container_execution
-        assert metrics._pending_reason(execution=node) == "bad_config"
+        assert metrics._pending_reason(session=session, execution=node) == "bad_config"
 
     def test_a_reason_behind_a_lazy_load_is_skipped_rather_than_fetched(
         self, session: orm.Session
@@ -987,7 +1045,7 @@ class TestPendingReason:
         )
         session.commit()
         session.expire(node)
-        assert metrics._pending_reason(execution=node) == "none"
+        assert metrics._pending_reason(session=session, execution=node) == "none"
 
     def test_a_node_with_no_container_execution_is_unlabelled(
         self, session: orm.Session
@@ -995,7 +1053,7 @@ class TestPendingReason:
         node = bts.ExecutionNode(task_spec={})
         session.add(node)
         session.commit()
-        assert metrics._pending_reason(execution=node) == "none"
+        assert metrics._pending_reason(session=session, execution=node) == "none"
 
 
 class TestPendingReasonOnTheInstruments:
