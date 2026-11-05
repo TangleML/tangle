@@ -81,6 +81,115 @@ class TestStatusHistoryListeners:
         }
 
 
+class TestLabelsFollowWhereTheTaskRan:
+    """Routing can move a task after its annotation is written; the labels must follow.
+
+    A percentage redirect sends a share of runs to a successor cluster and does not
+    rewrite the annotation, so provider, cluster and namespace built from the
+    annotation alone named the old cluster for exactly the tasks a migration moved --
+    the ones a migration most needs to watch.
+    """
+
+    FIELD = "tangle_launcher_key"
+
+    @pytest.fixture(autouse=True)
+    def _registered(self):
+        execution_annotations.register_targets(
+            targets={
+                "lt3": execution_annotations.Target(
+                    provider="google", cluster="lt3", namespace="jobs-staging"
+                ),
+                "eo9": execution_annotations.Target(
+                    provider="nebius", cluster="eo9", namespace="jobs-production"
+                ),
+            },
+            launcher_key_field=self.FIELD,
+        )
+        yield
+        execution_annotations.register_targets(targets={})
+
+    @staticmethod
+    def _record(
+        session: orm.Session,
+        *,
+        aimed_at: str,
+        launcher_data: dict | None,
+        keep_loaded: bool = True,
+    ) -> dict[str, str]:
+        # The orchestrator turns this off before it polls, which is why the handle is
+        # still loaded when the status change commits.
+        session.expire_on_commit = not keep_loaded
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.QUEUED,
+            launcher_data=launcher_data,
+        )
+        node = bts.ExecutionNode(
+            task_spec={
+                "annotations": {execution_annotations.CLOUD_PROVIDER_KEY: aimed_at}
+            }
+        )
+        node.container_execution = container_execution
+        session.add_all([container_execution, node])
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as mock_record:
+            session.commit()
+        return mock_record.call_args.kwargs["attributes"]
+
+    def test_a_redirected_task_is_labelled_with_the_cluster_it_ran_on(
+        self, session: orm.Session
+    ) -> None:
+        attributes = self._record(
+            session, aimed_at="lt3", launcher_data={self.FIELD: "eo9"}
+        )
+        assert (
+            attributes["execution.cloud_provider"],
+            attributes["execution.cluster"],
+            attributes["k8s.namespace.name"],
+        ) == ("nebius", "eo9", "jobs-production")
+
+    def test_a_task_that_went_where_it_was_aimed_is_unchanged(
+        self, session: orm.Session
+    ) -> None:
+        attributes = self._record(
+            session, aimed_at="lt3", launcher_data={self.FIELD: "lt3"}
+        )
+        assert attributes["execution.cluster"] == "lt3"
+
+    @pytest.mark.parametrize(
+        "launcher_data",
+        [None, {}, {"tangle_launcher_key": ""}, {"some_other_field": "eo9"}],
+        ids=["no-handle", "empty-handle", "blank-key", "a-field-we-do-not-read"],
+    )
+    def test_without_a_recorded_target_the_annotation_still_answers(
+        self, session: orm.Session, launcher_data: dict | None
+    ) -> None:
+        """Before the launch there is no handle, and the aim is all there is."""
+        attributes = self._record(session, aimed_at="lt3", launcher_data=launcher_data)
+        assert attributes["execution.cluster"] == "lt3"
+
+    def test_an_expired_handle_is_not_read_back_from_the_database(
+        self, session: orm.Session
+    ) -> None:
+        """The known limit: no label is worth a SELECT inside the flush in progress.
+
+        A session that expires on commit loses the handle, and reading it back would
+        be the re-entrant query this listener exists to avoid. The label falls back to
+        where the task was aimed -- wrong for a redirected task, and cheap.
+        """
+        attributes = self._record(
+            session,
+            aimed_at="lt3",
+            launcher_data={self.FIELD: "eo9"},
+            keep_loaded=False,
+        )
+        assert attributes["execution.cluster"] == "lt3"
+
+
 class TestCloudProviderLabel:
     """The platform label is resolved through the registered map, never labelled raw."""
 
