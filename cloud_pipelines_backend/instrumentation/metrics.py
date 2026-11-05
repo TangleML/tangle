@@ -143,6 +143,7 @@ container_execution_completion_lag_duration = orchestrator_meter.create_histogra
 _HISTORY_KEY = backend_types_sql.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 
 _RUNNING = backend_types_sql.ContainerExecutionStatus.RUNNING.value
+_PENDING = backend_types_sql.ContainerExecutionStatus.PENDING.value
 
 # The waits this counter is allowed to blame somebody for.  QUEUED is waiting to be
 # launched and PENDING is a pod that exists but is not running -- both ours to
@@ -684,6 +685,19 @@ def _handle_before_commit(session: orm.Session) -> None:
                 cluster = _cluster(execution=obj, launcher_data=launcher_data)
                 namespace = _namespace(execution=obj, launcher_data=launcher_data)
                 pending_reason = _pending_reason(session=session, execution=obj)
+                if (
+                    curr["status"] == _PENDING
+                    and pending_reason
+                    == execution_annotations.PendingReason.NO_POD_CREATED.value
+                ):
+                    # A Job is created with an empty pod map, so the first stamp on
+                    # every task says no_pod_created.  Arriving in PENDING is that
+                    # moment, which makes the value an artefact of the launch rather
+                    # than an admission refusal -- and this is the series that
+                    # measures queue time, so it must not read as a failure.  The
+                    # value still labels transitions out of PENDING, where no pod
+                    # ever appearing is what it is for.
+                    pending_reason = _UNSET
                 execution_status_transition_duration.record(
                     (curr_time - prev_time).total_seconds(),
                     attributes={

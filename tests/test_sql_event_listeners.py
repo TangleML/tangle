@@ -1229,6 +1229,68 @@ class TestPendingReasonOnTheInstruments:
         assert attributes["execution.status.to"] == "RUNNING"
 
 
+class TestNoPodCreatedOnlyLabelsAWaitThatEnded:
+    """Every Job is launched with an empty pod map, so the first stamp is always this.
+
+    Arriving in PENDING is that moment, so labelling the queue-time series with it
+    would pin QUEUED->PENDING to a value that reads as an admission refusal. Leaving
+    PENDING with the stamp intact is the case the value exists for.
+    """
+
+    @staticmethod
+    def _transition(
+        session: orm.Session,
+        *,
+        status_from: bts.ContainerExecutionStatus,
+        status_to: bts.ContainerExecutionStatus,
+    ) -> dict:
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            extra_data={
+                execution_annotations.PENDING_REASON_KEY: "no_pod_created",
+            },
+        )
+        node = bts.ExecutionNode(task_spec={"annotations": {}})
+        node.container_execution = container_execution
+        session.add_all([container_execution, node])
+        node.container_execution_status = status_from
+        session.commit()
+        node.container_execution_status = status_to
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as mock_record:
+            session.commit()
+        return mock_record.call_args.kwargs["attributes"]
+
+    def test_arriving_in_pending_is_not_labelled_a_failure(
+        self, session: orm.Session
+    ) -> None:
+        attributes = self._transition(
+            session,
+            status_from=bts.ContainerExecutionStatus.QUEUED,
+            status_to=bts.ContainerExecutionStatus.PENDING,
+        )
+        assert attributes["execution.pending_reason"] == "none"
+
+    @pytest.mark.parametrize(
+        "status_to",
+        [
+            bts.ContainerExecutionStatus.FAILED,
+            bts.ContainerExecutionStatus.SYSTEM_ERROR,
+        ],
+        ids=["failed", "system-error"],
+    )
+    def test_leaving_pending_still_carries_it(
+        self, session: orm.Session, status_to: bts.ContainerExecutionStatus
+    ) -> None:
+        attributes = self._transition(
+            session,
+            status_from=bts.ContainerExecutionStatus.PENDING,
+            status_to=status_to,
+        )
+        assert attributes["execution.pending_reason"] == "no_pod_created"
+
+
 class TestPendingReasonWhenNoPodExists:
     """A Job whose pods were refused at admission, and the first write of any task."""
 
