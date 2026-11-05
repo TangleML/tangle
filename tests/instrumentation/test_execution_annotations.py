@@ -68,6 +68,11 @@ class TestTarget:
         execution = _execution(**{ea.CLOUD_PROVIDER_KEY: "byo"})
         assert ea.target(execution=execution).cluster == "none"
 
+    def test_unhashable_provider_reads_none_rather_than_raising(self) -> None:
+        execution = _execution(**{ea.CLOUD_PROVIDER_KEY: ["byo"]})
+        assert ea.cloud_provider(execution=execution) is None
+        assert ea.target(execution=execution) is None
+
 
 class TestAccelerators:
     def test_absent_annotation_reads_none(self) -> None:
@@ -103,3 +108,21 @@ class TestAccelerators:
         execution = _execution(**{ea.RESOURCES_ACCELERATORS_KEY: "{not json"})
         with pytest.raises(ValueError):
             ea.accelerators(execution=execution)
+
+    def test_annotation_sent_as_an_object_is_a_value_error(self) -> None:
+        execution = _execution(**{ea.RESOURCES_ACCELERATORS_KEY: {"nvidia-l4": "8"}})
+        with pytest.raises(ValueError, match="not a string"):
+            ea.accelerators(execution=execution)
+
+    @pytest.mark.parametrize("raw", ['{"nvidia-l4": null}', '{"nvidia-l4": ["8"]}'])
+    def test_unusable_count_is_a_value_error(self, raw: str) -> None:
+        execution = _execution(**{ea.RESOURCES_ACCELERATORS_KEY: raw})
+        with pytest.raises(ValueError, match="not a number"):
+            ea.accelerators(execution=execution)
+
+    def test_no_input_raises_type_error(self) -> None:
+        """A caller catching ValueError is enough; nothing here escapes as TypeError."""
+        for raw in [{"nvidia-l4": "8"}, '{"nvidia-l4": null}', '{"nvidia-l4": ["8"]}']:
+            execution = _execution(**{ea.RESOURCES_ACCELERATORS_KEY: raw})
+            with pytest.raises(ValueError):
+                ea.accelerators(execution=execution)

@@ -77,11 +77,17 @@ def cloud_provider(*, execution: "bts.ExecutionNode") -> str | None:
         cloud_provider="lt3"       → "lt3"
         cloud_provider="gke-lt3"   → "gke-lt3"    an alias is NOT resolved here
         no annotation              → None
+        cloud_provider=["lt3"]     → None         not a string (a)
+
+        (a) annotations are Dict[str, Any], so a client can send any JSON value.
+            Returning None here is what keeps ``target``'s dict lookup from
+            raising on an unhashable key.
 
     Kept for readers that want what the task asked for rather than where it landed.
     Use ``target`` to resolve an alias to a provider and a cluster.
     """
-    return _annotations(execution=execution).get(CLOUD_PROVIDER_KEY)
+    selected = _annotations(execution=execution).get(CLOUD_PROVIDER_KEY)
+    return selected if isinstance(selected, str) else None
 
 
 def target(*, execution: "bts.ExecutionNode") -> Target | None:
@@ -124,18 +130,31 @@ def accelerators(*, execution: "bts.ExecutionNode") -> tuple[str, int] | None:
         absent  or  '{}'                → None
         '{"A": "1", "B": "1"}'          → ValueError, two models
         'not json'                      → ValueError
+        {"nvidia-l4": "8"}              → ValueError, a dict not a string (b)
+        '{"nvidia-l4": null}'           → ValueError, no count (b)
 
         (a) one space from the row above -- one request, two spellings
+        (b) ValueError, not TypeError: every exit this function can take is one
+            the caller already handles, so a client's JSON cannot reach the
+            orchestrator's commit
 
     Parsing is what makes the two spacings one series instead of two.
     """
     raw = _annotations(execution=execution).get(RESOURCES_ACCELERATORS_KEY)
     if not raw:
         return None
+    if not isinstance(raw, str):
+        raise ValueError(f"The accelerators annotation is not a string: {raw=}")
     requested = json.loads(raw)  # ValueError on malformed input
     if not isinstance(requested, dict) or not requested:
         return None
     if len(requested) > 1:
         raise ValueError(f"Multiple accelerator types were specified: {requested=}")
     model, quantity = next(iter(requested.items()))
-    return model, int(quantity)
+    try:
+        count = int(quantity)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"The accelerator count is not a number: {quantity=}"
+        ) from None
+    return model, count
