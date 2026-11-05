@@ -881,6 +881,28 @@ class TestPendingReason:
             None
         )
 
+    def test_a_reader_that_raises_costs_the_label_not_the_write(
+        self, session: orm.Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The assignment this listener fires on stores a pod the orchestrator polled."""
+        monkeypatch.setattr(
+            execution_annotations,
+            "pending_reason",
+            lambda **_: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        assert container_execution.id is not None
+        assert not (container_execution.extra_data or {}).get(
+            execution_annotations.PENDING_REASON_KEY
+        )
+
     def test_a_poll_stamps_the_reason_onto_the_container_execution(
         self, session: orm.Session
     ):
