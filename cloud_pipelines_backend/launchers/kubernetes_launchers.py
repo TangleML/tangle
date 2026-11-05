@@ -9,8 +9,9 @@ import logging
 import os
 import pathlib
 import threading
+import time
 import typing
-from typing import Any, Optional
+from typing import Any, Final, Optional
 
 import kubernetes.client.exceptions
 from kubernetes import client as k8s_client_lib
@@ -796,6 +797,43 @@ class KubernetesWithGcsFuseContainerLauncher(GoogleKubernetesEngineLauncher):
     pass
 
 
+# A failed log read means the node is gone, so retrying only blocks the caller.
+_LOG_READ_MAX_RETRIES: Final[int] = 1
+_LOG_READ_WAIT_SECONDS: Final[float] = 1.0
+_LOG_READ_MAX_TOTAL_SECONDS: Final[float | None] = 10.0
+
+
+def _read_log_within_budget(
+    read_log: typing.Callable[[], _T],
+    *,
+    max_retries: int = _LOG_READ_MAX_RETRIES,
+    wait_seconds: float = _LOG_READ_WAIT_SECONDS,
+    max_total_seconds: float | None = _LOG_READ_MAX_TOTAL_SECONDS,
+) -> _T:
+    """Calls `read_log`, retrying within a budget. Raises if the budget runs out.
+
+    A retry never starts once the deadline has passed. The final attempt can
+    still overrun it by one request timeout, which `request_timeout` bounds.
+    """
+    start_seconds = time.monotonic()
+    for attempt in range(max_retries - 1):
+        try:
+            return read_log()
+        except Exception:
+            _logger.exception(
+                f"Exception reading a container log on attempt {attempt + 1} of "
+                f"{max_retries}. Retrying."
+            )
+            if (
+                max_total_seconds is not None
+                and time.monotonic() - start_seconds + wait_seconds > max_total_seconds
+            ):
+                raise
+            time.sleep(wait_seconds)
+    # The last attempt is not retried, so its exception is the caller's.
+    return read_log()
+
+
 class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
     def __init__(
         self,
@@ -931,7 +969,9 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         return launcher_error_message
 
     def to_dict(self) -> dict[str, Any]:
-        pod_dict = _serialize_kubernetes_object_to_compact_dict(self._debug_pod)
+        pod_dict = _serialize_kubernetes_object_to_compact_dict_and_censor_it(
+            obj=self._debug_pod
+        )
         result = dict(
             kubernetes=dict(
                 # launched_container_class_name=self.__class__.__name__,
@@ -1009,8 +1049,14 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
             response.release_conn()
 
     def upload_log(self):
+        try:
+            log = _read_log_within_budget(self.get_log)
+        except Exception:
+            # Not raising: the caller retries `upload_log`, so raising costs it
+            # this budget five times over. Writing nothing keeps an earlier log.
+            _logger.exception(f"Giving up on the log of Pod {self._pod_name}.")
+            return
         launcher = self._get_launcher()
-        log = self.get_log()
         uri_writer = launcher._storage_provider.make_uri(self._log_uri).get_writer()
         uri_writer.upload_from_text(log)
 
@@ -1576,12 +1622,16 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     SERIALIZATION_ROOT_KEY = "kubernetes_job"
 
     def to_dict(self) -> dict[str, Any]:
-        job_dict = _serialize_kubernetes_object_to_compact_dict(self._debug_job)
+        job_dict = _serialize_kubernetes_object_to_compact_dict_and_censor_it(
+            obj=self._debug_job
+        )
         pod_dicts = None
         if self._debug_pods is not None:
             pod_dicts = {
                 pod_name: (
-                    _serialize_kubernetes_object_to_compact_dict(pod) if pod else None
+                    _serialize_kubernetes_object_to_compact_dict_and_censor_it(obj=pod)
+                    if pod
+                    else None
                 )
                 for pod_name, pod in self._debug_pods.items()
             }
@@ -1868,7 +1918,12 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
         return merged_log
 
     def upload_log(self):
-        all_logs = self._get_all_logs()
+        try:
+            all_logs = _read_log_within_budget(self._get_all_logs)
+        except Exception:
+            # See the note on `LaunchedKubernetesContainer.upload_log`.
+            _logger.exception(f"Giving up on the logs of Job {self._job_name}.")
+            return
         merged_log = self._merge_logs(all_logs)
 
         # Uploading the merged log
@@ -2154,6 +2209,15 @@ def _serialize_kubernetes_object_to_compact_dict(obj) -> dict[str, Any]:
     return obj_dict
 
 
+def _serialize_kubernetes_object_to_compact_dict_and_censor_it(
+    *, obj: k8s_client_lib.V1Job | k8s_client_lib.V1Pod
+) -> dict[str, Any]:
+    """Serializes a Kubernetes object without the command lines, which can hold a secret that the container consumes as a value."""
+    obj_dict = _serialize_kubernetes_object_to_compact_dict(obj)
+    _remove_command_lines(obj_dict)
+    return obj_dict
+
+
 def windows_path_to_docker_path(path: str) -> str:
     if os.name != "nt":
         return path
@@ -2198,6 +2262,18 @@ def _remove_keys_with_none_values(d: dict):
             del d[k]
         if isinstance(v, dict):
             _remove_keys_with_none_values(v)
+
+
+def _remove_command_lines(d: dict):
+    for k, v in list(d.items()):
+        if k in ("command", "args"):
+            del d[k]
+        elif isinstance(v, dict):
+            _remove_command_lines(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    _remove_command_lines(item)
 
 
 def _extract_api_exception_body(

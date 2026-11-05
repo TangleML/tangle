@@ -77,6 +77,51 @@ execution_status_count = orchestrator_meter.create_observable_gauge(
     unit=MetricUnit.EXECUTIONS,
 )
 
+container_execution_refresh_duration = orchestrator_meter.create_histogram(
+    name="container_execution.refresh.duration",
+    description=(
+        "Duration of one orchestrator refresh of a pending or running container"
+        " execution, split into its queries and its processing"
+    ),
+    unit=MetricUnit.SECONDS,
+    explicit_bucket_boundaries_advisory=[
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
+        30.0,
+    ],
+)
+
+container_execution_completion_lag_duration = orchestrator_meter.create_histogram(
+    name="container_execution.completion_lag.duration",
+    description=(
+        "Time from a container ending, as reported by its launcher, to the"
+        " orchestrator committing its container execution's SUCCEEDED or FAILED status"
+    ),
+    unit=MetricUnit.SECONDS,
+    explicit_bucket_boundaries_advisory=[
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        30.0,
+        60.0,
+        120.0,
+        300.0,
+        600.0,
+        1800.0,
+    ],
+)
+
 
 # ---------------------------------------------------------------------------
 # SQLAlchemy event listeners
@@ -113,3 +158,36 @@ def _handle_before_commit(session: orm.Session) -> None:
                 )
         obj._status_changed = False
         execution_tracing.emit_execution_trace(execution=obj)
+
+
+def record_refresh_duration(
+    *, queries_duration_ms: float, processing_duration_ms: float
+) -> None:
+    """Records one running container execution refresh's queries and processing durations."""
+    for phase, duration_ms in (
+        ("queries", queries_duration_ms),
+        ("processing", processing_duration_ms),
+    ):
+        container_execution_refresh_duration.record(
+            duration_ms / 1000,
+            attributes={"container_execution.refresh.phase": phase},
+        )
+
+
+def record_completion_lag(
+    *,
+    ended_at: datetime.datetime | None,
+    status: backend_types_sql.ContainerExecutionStatus,
+) -> None:
+    """Records how long after its container ended a container execution's SUCCEEDED or FAILED status was committed."""
+    if ended_at is None:
+        return
+    if ended_at.tzinfo is None:
+        ended_at = ended_at.replace(tzinfo=datetime.timezone.utc)
+    lag_seconds = (
+        datetime.datetime.now(tz=datetime.timezone.utc) - ended_at
+    ).total_seconds()
+    container_execution_completion_lag_duration.record(
+        max(lag_seconds, 0.0),
+        attributes={"container_execution.status": status.value},
+    )
