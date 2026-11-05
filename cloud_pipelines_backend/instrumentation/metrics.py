@@ -159,11 +159,46 @@ _WAITS_WE_OWN = frozenset(
 # query that filters on a label never silently drops the executions that lack it.
 _UNSET = "none"
 
-# Transitions at or above this are counted by owner. A deployment sets it to whatever its
-# own latency alert fires on, so the counter and the alert describe the same population.
-_SLOW_TRANSITION_SECONDS = float(
-    os.environ.get("TANGLE_SLOW_TRANSITION_SECONDS", "6000")
-)
+_SLOW_TRANSITION_DEFAULT_SECONDS = 6000.0
+
+
+def _slow_transition_seconds() -> float:
+    """How long a wait has to be before the counter blames somebody for it.
+
+        unset                  → 6000.0
+        "900"                  → 900.0
+        "9oo"  or  ""          → 6000.0, with a warning
+        "0"  or  "-1"          → 6000.0, with a warning   (a)
+
+        (a) a threshold of zero counts every transition, which turns a counter
+            meant for outliers into one series per submitter per transition
+
+    A deployment sets this to whatever its own latency alert fires on, so the counter
+    and the alert describe the same population. It is read at import, which runs
+    while the API and the orchestrator are starting: a typo that raised here would
+    stop both of them booting, so every bad value falls back and says so.
+    """
+    raw = os.environ.get("TANGLE_SLOW_TRANSITION_SECONDS")
+    if raw is None:
+        return _SLOW_TRANSITION_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        _logger.warning(
+            f"TANGLE_SLOW_TRANSITION_SECONDS is not a number ({raw!r}); "
+            f"using {_SLOW_TRANSITION_DEFAULT_SECONDS}"
+        )
+        return _SLOW_TRANSITION_DEFAULT_SECONDS
+    if seconds <= 0:
+        _logger.warning(
+            f"TANGLE_SLOW_TRANSITION_SECONDS must be positive ({raw!r}); "
+            f"using {_SLOW_TRANSITION_DEFAULT_SECONDS}"
+        )
+        return _SLOW_TRANSITION_DEFAULT_SECONDS
+    return seconds
+
+
+_SLOW_TRANSITION_SECONDS = _slow_transition_seconds()
 
 _SLOW_KEY = "tangle.instrumentation.slow_transitions"
 
@@ -342,20 +377,42 @@ def _owners_of(
     return {node_id: created_by for node_id, created_by in rows if created_by}
 
 
+@sql_event.listens_for(orm.Session, "after_soft_rollback")
+def _drop_slow_transitions_on_rollback(
+    session: orm.Session, _previous_transaction: object
+) -> None:
+    """Throw away waits measured for a commit that never happened.
+
+        commit succeeds  → after_commit counts the stash and clears it
+        commit fails     → this clears it                               (a)
+
+        (a) session.info outlives the transaction, so a stash left behind would be
+            counted by whichever later commit on the same session happened to
+            succeed -- against that commit's owner, for a transition that was
+            rolled back
+
+    The orchestrator rolls back and carries on using the same session, which is what
+    makes this reachable rather than theoretical.
+    """
+    session.info.pop(_SLOW_KEY, None)
+
+
 @sql_event.listens_for(orm.Session, "after_commit")
 def _count_slow_transitions_by_owner(session: orm.Session) -> None:
     """Count transitions that spent too long waiting, against whoever submitted them.
 
         reads: pipeline_run.created_by
 
-        THE GATE   from is not RUNNING, and the gap is >= the threshold
+        THE GATE   from is QUEUED or PENDING, and the gap is >= the threshold
 
-          QUEUED  → PENDING    2h   counted   waiting for a machine
-          PENDING → RUNNING    9h   counted   waiting for a machine
-          PENDING → FAILED     7h   counted   waited, then never ran
-          RUNNING → SUCCEEDED  4h   skipped   a job that ran for four hours
-          RUNNING → FAILED     7h   skipped   ran for seven, then failed
-          QUEUED  → PENDING    4s   skipped   under the threshold
+          QUEUED  → PENDING                2h   counted   waiting for a machine
+          PENDING → RUNNING                9h   counted   waiting for a machine
+          PENDING → FAILED                 7h   counted   waited, then never ran
+          RUNNING → SUCCEEDED              4h   skipped   ran for four hours
+          RUNNING → FAILED                 7h   skipped   ran, then failed
+          WAITING_FOR_UPSTREAM → QUEUED    9h   skipped   its parent was slow
+          UNINITIALIZED → QUEUED           9h   skipped   parked on purpose
+          QUEUED  → PENDING                4s   skipped   under the threshold
 
         WHAT IS STORED    one series per (from, to, owner), monotonic
 
