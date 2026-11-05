@@ -1051,20 +1051,22 @@ class TestPendingReason:
     def test_a_reader_that_raises_costs_the_label_not_the_write(
         self, session: orm.Session, monkeypatch: pytest.MonkeyPatch
     ):
-        """The assignment this listener fires on stores a pod the orchestrator polled."""
+        """Both listeners write a task that is already running in the cluster."""
         monkeypatch.setattr(
             execution_annotations,
             "pending_reason",
             lambda **_: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         container_execution = bts.ContainerExecution(
-            status=bts.ContainerExecutionStatus.PENDING
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._launcher_data(phase="Pending", reason="Unschedulable"),
         )
         session.add(container_execution)
+        session.commit()  # before_insert ran and swallowed it
         container_execution.launcher_data = self._launcher_data(
             phase="Pending", reason="ImagePullBackOff"
         )
-        session.commit()
+        session.commit()  # the set listener ran and swallowed it too
         assert container_execution.id is not None
         assert not (container_execution.extra_data or {}).get(
             execution_annotations.PENDING_REASON_KEY
