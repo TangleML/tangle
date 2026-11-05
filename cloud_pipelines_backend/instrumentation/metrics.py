@@ -561,21 +561,34 @@ def _stamp_pending_reason(
 
     (a) the dict is rewritten rather than mutated, so an unchanged value would
         still mark the attribute dirty and force an UPDATE
+
+    Both callers raise into something that must not fail for want of a label: the
+    "set" listener into the orchestrator storing a pod it just polled, and
+    "before_insert" into the flush that records a Job already running in the
+    cluster. Guarding here covers both, because neither reaches the write any
+    other way.
     """
-    if not launcher_data:
-        return
-    reason = execution_annotations.pending_reason(launcher_data=launcher_data)
-    if reason is None:
-        return
-    extra_data = container_execution.extra_data or {}
-    if extra_data.get(execution_annotations.PENDING_REASON_KEY) == reason.value:
-        return
-    container_execution.extra_data = {
-        **extra_data,
-        # .value, not the member: extra_data is a JSON column and an attribute is a
-        # string, so the enum stops at this boundary.
-        execution_annotations.PENDING_REASON_KEY: reason.value,
-    }
+    try:
+        if not launcher_data:
+            return
+        reason = execution_annotations.pending_reason(launcher_data=launcher_data)
+        if reason is None:
+            return
+        extra_data = container_execution.extra_data or {}
+        if extra_data.get(execution_annotations.PENDING_REASON_KEY) == reason.value:
+            return
+        container_execution.extra_data = {
+            **extra_data,
+            # .value, not the member: extra_data is a JSON column and an attribute is
+            # a string, so the enum stops at this boundary.
+            execution_annotations.PENDING_REASON_KEY: reason.value,
+        }
+    except Exception:
+        _logger.warning(
+            "Failed to stamp the pending reason for container execution "
+            f"{getattr(container_execution, 'id', None)!r}",
+            exc_info=True,
+        )
 
 
 def _container_execution(
