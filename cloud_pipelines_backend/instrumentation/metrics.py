@@ -31,6 +31,7 @@ import sqlalchemy as sql
 from opentelemetry import metrics as otel_metrics
 from sqlalchemy import event as sql_event
 from sqlalchemy import orm
+from sqlalchemy.orm import util as orm_util
 
 from .. import backend_types_sql
 from . import execution_annotations
@@ -517,21 +518,38 @@ def _persist_pending_reason_on_extra_data(
         )
 
 
-def _pending_reason(*, execution: "backend_types_sql.ExecutionNode") -> str:
+def _pending_reason(
+    *, session: orm.Session, execution: "backend_types_sql.ExecutionNode"
+) -> str:
     """Why this task was waiting, as stamped by the most recent poll.
 
-        the ContainerExecution is already in the session  → "image_unavailable"
-        it would have to be fetched                       → "none"   (a)
-        nothing ever stamped one                          → "none"
+        the ContainerExecution is in the session   → "image_unavailable"
+        the task has none                          → "none"
+        it is not in the session                   → "none"   (a)
+        nothing ever stamped one                   → "none"
 
-        (a) this runs in before_commit, where a lazy load would put a SELECT inside the
-            flush in progress; an unlabelled point beats a re-entrant query
+        (a) this runs in before_commit, where a lazy load would put a SELECT inside
+            the flush in progress; an unlabelled point beats a re-entrant query
+
+    The identity map is asked by key rather than the relationship by attribute. The
+    orchestrator reaches a node through container_execution.execution_nodes after a
+    rollback, which leaves the many-to-one loaded in the session but still listed as
+    unloaded on the node -- reading the attribute there either emits a SELECT or,
+    guarded against that, reports every task as unlabelled.
 
     reads: ContainerExecution.extra_data["last_pending_reason"]
     """
-    if "container_execution" in sql.inspect(execution).unloaded:
+    if "container_execution_id" in sql.inspect(execution).unloaded:
+        # The column, not the relationship: reading an expired attribute emits the
+        # SELECT this listener must never cause.
         return _UNSET
-    container_execution = execution.container_execution
+    if execution.container_execution_id is None:
+        return _UNSET
+    container_execution = session.identity_map.get(
+        orm_util.identity_key(
+            backend_types_sql.ContainerExecution, execution.container_execution_id
+        )
+    )
     if container_execution is None:
         return _UNSET
     extra_data = container_execution.extra_data or {}
@@ -559,7 +577,7 @@ def _handle_before_commit(session: orm.Session) -> None:
                 accelerator_type, accelerator_count = _accelerator(execution=obj)
                 cluster = _cluster(execution=obj)
                 namespace = _namespace(execution=obj)
-                pending_reason = _pending_reason(execution=obj)
+                pending_reason = _pending_reason(session=session, execution=obj)
                 execution_status_transition_duration.record(
                     (curr_time - prev_time).total_seconds(),
                     attributes={
