@@ -74,6 +74,9 @@ class OrchestratorService_Sql:
         _max_container_execution_refresh_error_retries: int = 3,
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
+        _running_execution_refresh_interval: datetime.timedelta = datetime.timedelta(
+            seconds=30
+        ),
         queued_execution_interceptor: QueuedExecutionInterceptor | None = None,
     ):
         self._session_factory = session_factory
@@ -93,49 +96,74 @@ class OrchestratorService_Sql:
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
+        self._running_execution_refresh_interval = _running_execution_refresh_interval
+        self._running_executions_queue_overdue = False
         self._queued_execution_interceptor = queued_execution_interceptor
 
     def run_loop(self):
         while True:
+            sweep_again_now = False
             try:
-                self.process_each_queue_once()
-                time.sleep(self._sleep_seconds_between_queue_sweeps)
+                sweep_again_now = self.process_each_queue_once()
             except Exception as exc:
                 _logger.exception("Error while calling `process_each_queue_once`")
                 bugsnag_instrumentation.notify(exception=exc)
+            if not sweep_again_now:
+                time.sleep(self._sleep_seconds_between_queue_sweeps)
 
-    def process_each_queue_once(self):
-        queue_handlers = [
-            self.internal_process_queued_executions_queue,
-            self.internal_process_running_executions_queue,
-        ]
-        for queue_handler in queue_handlers:
-            # Optimization: Process same queue multiple times so that multiple fast operations can be batched together.
-            # Before: Queued (fast), Running (slow), Queued (fast), Running (slow), Queued (fast), Running (slow)
-            # After:  Queued (fast), Queued (fast), Queued (fast), Running (slow)
-            # After:  Queued (fast), Queued (slow), Running (slow)
-            # Process same queue multiple times
-            # * For up to X milliseconds (e.g. 200ms)
-            # * Up to Y times (reduces blast radius of time-related bugs)
-            # * If the queue is not empty
-            # Using monotonic timer to avoid bugs when time changes
-            start_time_seconds = time.monotonic()
-            for _ in range(self._max_queue_batch_size):
-                try:
-                    with self._session_factory() as session:
-                        queue_had_items = queue_handler(session=session)
-                        if not queue_had_items:
-                            break
-                except Exception as exc:
-                    _logger.exception(f"Error while executing {queue_handler=}")
-                    bugsnag_instrumentation.notify(exception=exc)
-                if (
-                    datetime.timedelta(
-                        milliseconds=(time.monotonic() - start_time_seconds) * 1000
-                    )
-                    > self._max_queue_batch_duration
-                ):
-                    break
+    def process_each_queue_once(self) -> bool:
+        """Processes each queue once; returns whether the next sweep should start without waiting."""
+        self._running_executions_queue_overdue = False
+        queued_queue_has_items = self._process_queue_batch(
+            self.internal_process_queued_executions_queue
+        )
+        running_queue_has_items = self._process_queue_batch(
+            self.internal_process_running_executions_queue
+        )
+        return queued_queue_has_items or (
+            running_queue_has_items and self._running_executions_queue_overdue
+        )
+
+    def _process_queue_batch(
+        self, queue_handler: typing.Callable[..., typing.Any]
+    ) -> bool:
+        """Runs a queue handler in a batch; returns whether any call in the batch found an item."""
+        # Optimization: Process same queue multiple times so that multiple fast operations can be batched together.
+        # Before: Queued (fast), Running (slow), Queued (fast), Running (slow), Queued (fast), Running (slow)
+        # After:  Queued (fast), Queued (fast), Queued (fast), Running (slow)
+        # After:  Queued (fast), Queued (slow), Running (slow)
+        # Process same queue multiple times
+        # * For up to X milliseconds (e.g. 200ms)
+        # * Up to Y times (reduces blast radius of time-related bugs)
+        # * If the queue is not empty
+        # Using monotonic timer to avoid bugs when time changes
+        start_time_seconds = time.monotonic()
+        queue_has_items = False
+        for _ in range(self._max_queue_batch_size):
+            try:
+                with self._session_factory() as session:
+                    if not queue_handler(session=session):
+                        break
+                    queue_has_items = True
+            except Exception as exc:
+                _logger.exception(f"Error while executing {queue_handler=}")
+                bugsnag_instrumentation.notify(exception=exc)
+            if (
+                datetime.timedelta(
+                    milliseconds=(time.monotonic() - start_time_seconds) * 1000
+                )
+                > self._max_queue_batch_duration
+            ):
+                break
+        return queue_has_items
+
+    def _is_overdue(self, *, last_processed_at: datetime.datetime | None) -> bool:
+        """Whether a container execution last refreshed at `last_processed_at` is due for another refresh."""
+        return (
+            last_processed_at is None
+            or last_processed_at
+            < _get_current_time() - self._running_execution_refresh_interval
+        )
 
     def internal_process_queued_executions_queue(self, session: orm.Session):
         _logger.debug("Selecting queued execution to process.)")
@@ -223,6 +251,9 @@ class OrchestratorService_Sql:
         query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
         if running_container_execution:
             self._running_executions_queue_idle = False
+            self._running_executions_queue_overdue = self._is_overdue(
+                last_processed_at=running_container_execution.last_processed_at
+            )
 
             execution_node_ids = list(
                 session.scalars(
