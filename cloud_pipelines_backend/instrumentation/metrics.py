@@ -143,6 +143,18 @@ _HISTORY_KEY = backend_types_sql.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 
 _RUNNING = backend_types_sql.ContainerExecutionStatus.RUNNING.value
 
+# The waits this counter is allowed to blame somebody for.  QUEUED is waiting to be
+# launched and PENDING is a pod that exists but is not running -- both ours to
+# explain.  WAITING_FOR_UPSTREAM is a task waiting for its own parent, which is the
+# DAG working as written, and UNINITIALIZED is parked on purpose; counting either
+# charges a submitter for ordinary orchestration.
+_WAITS_WE_OWN = frozenset(
+    {
+        backend_types_sql.ContainerExecutionStatus.QUEUED.value,
+        backend_types_sql.ContainerExecutionStatus.PENDING.value,
+    }
+)
+
 # Every label an execution contributes has one of these when the task said nothing, so a
 # query that filters on a label never silently drops the executions that lack it.
 _UNSET = "none"
@@ -434,7 +446,10 @@ def _handle_before_commit(session: orm.Session) -> None:
                     },
                 )
                 waited = (curr_time - prev_time).total_seconds()
-                if prev["status"] != _RUNNING and waited >= _SLOW_TRANSITION_SECONDS:
+                if (
+                    prev["status"] in _WAITS_WE_OWN
+                    and waited >= _SLOW_TRANSITION_SECONDS
+                ):
                     session.info.setdefault(_SLOW_KEY, []).append(
                         (obj.id, prev["status"], curr["status"])
                     )

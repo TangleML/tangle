@@ -598,6 +598,31 @@ class TestSlowTransitionCounter:
         )
         assert calls == []
 
+    @pytest.mark.parametrize(
+        "status_from",
+        [
+            bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM,
+            bts.ContainerExecutionStatus.UNINITIALIZED,
+        ],
+        ids=["waiting-for-upstream", "parked"],
+    )
+    def test_a_wait_we_do_not_own_is_not_counted(
+        self, session: orm.Session, status_from: bts.ContainerExecutionStatus
+    ) -> None:
+        """A task waiting for its own parent is the DAG working, not a Tangle delay.
+
+        This counter names an owner, so counting these charges a submitter for the
+        shape of their own pipeline: a step after a long upstream step waits exactly
+        as long as that step took.
+        """
+        _, calls = self._transition(
+            session,
+            gap=self.SLOW,
+            status_from=status_from,
+            status_to=bts.ContainerExecutionStatus.RUNNING,
+        )
+        assert calls == []
+
     def test_a_long_wait_that_never_ran_is_counted(self, session: orm.Session) -> None:
         """Leaving PENDING for FAILED still means the submitter waited."""
         _, calls = self._transition(
