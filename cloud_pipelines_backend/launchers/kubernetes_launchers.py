@@ -931,7 +931,9 @@ class LaunchedKubernetesContainer(interfaces.LaunchedContainer):
         return launcher_error_message
 
     def to_dict(self) -> dict[str, Any]:
-        pod_dict = _serialize_kubernetes_object_to_compact_dict(self._debug_pod)
+        pod_dict = _serialize_kubernetes_object_to_compact_dict_and_censor_it(
+            obj=self._debug_pod
+        )
         result = dict(
             kubernetes=dict(
                 # launched_container_class_name=self.__class__.__name__,
@@ -1577,12 +1579,16 @@ class LaunchedKubernetesJob(interfaces.LaunchedContainer):
     SERIALIZATION_ROOT_KEY = "kubernetes_job"
 
     def to_dict(self) -> dict[str, Any]:
-        job_dict = _serialize_kubernetes_object_to_compact_dict(self._debug_job)
+        job_dict = _serialize_kubernetes_object_to_compact_dict_and_censor_it(
+            obj=self._debug_job
+        )
         pod_dicts = None
         if self._debug_pods is not None:
             pod_dicts = {
                 pod_name: (
-                    _serialize_kubernetes_object_to_compact_dict(pod) if pod else None
+                    _serialize_kubernetes_object_to_compact_dict_and_censor_it(obj=pod)
+                    if pod
+                    else None
                 )
                 for pod_name, pod in self._debug_pods.items()
             }
@@ -2139,12 +2145,18 @@ def _serialize_kubernetes_object_to_compact_dict(obj) -> dict[str, Any]:
     obj_dict = _kubernetes_serialize(obj)
     # Removing trash
     _remove_keys_with_none_values(obj_dict)
-    # A container that consumes a secret as a value receives that value on its command line,
-    # so a stored command line can hold a secret in plaintext.
-    _remove_command_lines(obj_dict)
     obj_metadata: dict | None = obj_dict.get("metadata")
     if obj_metadata:
         obj_metadata.pop("managedFields", None)
+    return obj_dict
+
+
+def _serialize_kubernetes_object_to_compact_dict_and_censor_it(
+    *, obj: k8s_client_lib.V1Job | k8s_client_lib.V1Pod
+) -> dict[str, Any]:
+    """Serializes a Kubernetes object without the command lines, which can hold a secret that the container consumes as a value."""
+    obj_dict = _serialize_kubernetes_object_to_compact_dict(obj)
+    _remove_command_lines(obj_dict)
     return obj_dict
 
 
