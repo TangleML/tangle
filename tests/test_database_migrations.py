@@ -21,6 +21,8 @@ Source 2 (bulk SQL -- component_spec JSON path):
 import logging
 from unittest import mock
 
+from alembic import migration as alembic_migration
+from alembic import operations as alembic_operations
 import pytest
 import sqlalchemy
 from sqlalchemy import orm
@@ -2021,3 +2023,189 @@ def test_migrate_secret_value_column_idempotent(
     our_msgs = [m for m in caplog.messages if m.startswith("migrate column to TEXT:")]
     assert our_msgs[-2] == "migrate column to TEXT: complete"
     assert our_msgs[-1] == "migrate column to TEXT: skipped (already TEXT)"
+
+
+# ---------------------------------------------------------------------------
+# execution_node.updated_at column: migration, backfill, revert
+# ---------------------------------------------------------------------------
+
+
+def _create_execution_node_table_without_updated_at(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> None:
+    """Create all tables normally, then drop execution_node.updated_at to
+    simulate a pre-migration production DB (column not yet added)."""
+    bts._TableBase.metadata.create_all(db_engine)
+    with db_engine.connect() as conn:
+        ctx = alembic_migration.MigrationContext.configure(conn)
+        op = alembic_operations.Operations(ctx)
+        with op.batch_alter_table("execution_node") as batch_op:
+            batch_op.drop_column("updated_at")
+        conn.commit()
+
+
+def _get_execution_node_columns(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> set[str]:
+    inspector = sqlalchemy.inspect(db_engine)
+    return {c["name"] for c in inspector.get_columns("execution_node")}
+
+
+class TestMigrateAddExecutionNodeUpdatedAtColumn:
+    def test_adds_column_when_missing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+        _create_execution_node_table_without_updated_at(db_engine=db_engine)
+        assert "updated_at" not in _get_execution_node_columns(db_engine=db_engine)
+
+        with caplog.at_level(logging.INFO):
+            did_add = database_migrations.migrate_add_execution_node_updated_at_column(
+                db_engine=db_engine
+            )
+
+        assert did_add is True
+        assert "updated_at" in _get_execution_node_columns(db_engine=db_engine)
+        assert "Adding column: execution_node.updated_at" in caplog.text
+
+    def test_second_call_is_noop_and_logs_nothing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+        _create_execution_node_table_without_updated_at(db_engine=db_engine)
+
+        database_migrations.migrate_add_execution_node_updated_at_column(
+            db_engine=db_engine
+        )
+        caplog.clear()
+
+        with caplog.at_level(
+            logging.INFO, logger="cloud_pipelines_backend.database_migrations"
+        ):
+            did_add = database_migrations.migrate_add_execution_node_updated_at_column(
+                db_engine=db_engine
+            )
+
+        assert did_add is False
+        assert caplog.messages == []
+
+    def test_column_is_queryable_after_migration(self) -> None:
+        db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+        _create_execution_node_table_without_updated_at(db_engine=db_engine)
+        database_migrations.migrate_add_execution_node_updated_at_column(
+            db_engine=db_engine
+        )
+
+        session_factory = orm.sessionmaker(db_engine)
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            session_factory=session_factory,
+            service=service,
+            root_task=_make_task_spec(),
+        )
+        with session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            exec_node = session.get(bts.ExecutionNode, db_run.root_execution_id)
+            # insert_default should have stamped this on creation, even though
+            # the column didn't exist until the migration above ran first.
+            assert exec_node.updated_at is not None
+
+
+class TestBackfillExecutionNodeUpdatedAt:
+    def test_backfills_null_rows_with_flat_timestamp(self) -> None:
+        db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+        _create_execution_node_table_without_updated_at(db_engine=db_engine)
+        database_migrations.migrate_add_execution_node_updated_at_column(
+            db_engine=db_engine
+        )
+
+        session_factory = orm.sessionmaker(db_engine)
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            session_factory=session_factory,
+            service=service,
+            root_task=_make_task_spec(),
+        )
+        # New rows already get updated_at via insert_default -- null it out to
+        # simulate a row created before the column existed.
+        with session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            exec_node = session.get(bts.ExecutionNode, db_run.root_execution_id)
+            exec_node.updated_at = None
+            session.commit()
+
+        with session_factory() as session:
+            count = database_migrations.backfill_execution_node_updated_at(
+                session=session,
+                auto_commit=True,
+            )
+        assert count == 1
+
+        with session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            exec_node = session.get(bts.ExecutionNode, db_run.root_execution_id)
+            assert exec_node.updated_at is not None
+
+    def test_leaves_existing_values_untouched(self) -> None:
+        db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+        bts._TableBase.metadata.create_all(db_engine)
+        session_factory = orm.sessionmaker(db_engine)
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            session_factory=session_factory,
+            service=service,
+            root_task=_make_task_spec(),
+        )
+        with session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            exec_node = session.get(bts.ExecutionNode, db_run.root_execution_id)
+            original_updated_at = exec_node.updated_at
+        assert original_updated_at is not None
+
+        with session_factory() as session:
+            database_migrations.backfill_execution_node_updated_at(
+                session=session,
+                auto_commit=True,
+            )
+
+        with session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            exec_node = session.get(bts.ExecutionNode, db_run.root_execution_id)
+            assert exec_node.updated_at == original_updated_at
+
+    def test_second_call_updates_zero_rows(self) -> None:
+        db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+        _create_execution_node_table_without_updated_at(db_engine=db_engine)
+        database_migrations.migrate_add_execution_node_updated_at_column(
+            db_engine=db_engine
+        )
+        session_factory = orm.sessionmaker(db_engine)
+        service = api_server_sql.PipelineRunsApiService_Sql()
+        run = _create_run(
+            session_factory=session_factory,
+            service=service,
+            root_task=_make_task_spec(),
+        )
+        with session_factory() as session:
+            db_run = session.get(bts.PipelineRun, run.id)
+            exec_node = session.get(bts.ExecutionNode, db_run.root_execution_id)
+            exec_node.updated_at = None
+            session.commit()
+
+        with session_factory() as session:
+            first = database_migrations.backfill_execution_node_updated_at(
+                session=session,
+                auto_commit=True,
+            )
+        assert first == 1
+
+        with session_factory() as session:
+            second = database_migrations.backfill_execution_node_updated_at(
+                session=session,
+                auto_commit=True,
+            )
+        assert second == 0
