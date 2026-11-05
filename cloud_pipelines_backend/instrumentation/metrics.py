@@ -412,7 +412,7 @@ def _drop_slow_transitions_on_rollback(
 
 
 @sql_event.listens_for(orm.Session, "after_commit")
-def _count_slow_transitions_by_owner(session: orm.Session) -> None:
+def _count_slow_transitions(session: orm.Session) -> None:
     """Count transitions that spent too long waiting, against whoever submitted them.
 
         reads: pipeline_run.created_by
@@ -428,11 +428,11 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
           UNINITIALIZED → QUEUED           9h   skipped   parked on purpose
           QUEUED  → PENDING                4s   skipped   under the threshold
 
-        WHAT IS STORED    one series per (from, to, owner), monotonic
+        WHAT IS STORED    one series per (from, to, owner, namespace), monotonic
 
-          …slow{from="QUEUED", to="PENDING", owner="pipeline-runner@…"}  37
-          …slow{from="QUEUED", to="PENDING", owner="batch-scorer@…"}      6
-          …slow{from="QUEUED", to="PENDING", owner="none"}                3   (a)
+          …slow{…, owner="pipeline-runner@…", k8s_namespace_name="ml-serving"}  37
+          …slow{…, owner="batch-scorer@…",    k8s_namespace_name="ml-serving"}   6
+          …slow{…, owner="none",              k8s_namespace_name="oasis-jobs"}   3   (a)
 
         WHAT A HUMAN ASKS    the window lives here, in the query
 
@@ -443,9 +443,20 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
           how many        count(count by (owner)(increase(…[1h]) > 0))
           people            3
 
+          the same, scoped   count(count by (owner)(increase(
+          to one namespace     …{k8s_namespace_name="ml-serving"}[1h]) > 0))
+                               2   (b)
+
         (a) no run owns the node, or the lookup failed — counted anyway, because
             this is what an alert fires on and a point missing one label beats
             no point at all
+        (b) an alert that fires for one namespace can now count the people in
+            that namespace, instead of everyone on the fleet
+
+    Namespace does not multiply the series count the way its 42 values suggest. It is
+    derived from the submitter's service account and ``owner`` is usually that same
+    account, so the two move together; the fan-out is confined to the three namespaces
+    that are a cluster default rather than a team.
 
     The owner read happens after the commit, not during it: ``before_commit`` runs
     inside the flush in progress, so a SELECT on that session re-enters it.
@@ -458,7 +469,7 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
         with orm.Session(bind=session.get_bind()) as lookup_session:
             owners = _owners_of(
                 session=lookup_session,
-                node_ids={node_id for node_id, _, _, _ in stashed},
+                node_ids={node_id for node_id, _, _, _, _ in stashed},
             )
     except Exception:
         _logger.warning(
@@ -466,7 +477,7 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
             len(stashed),
             exc_info=True,
         )
-    for node_id, status_from, status_to, pending_reason in stashed:
+    for node_id, status_from, status_to, pending_reason, namespace in stashed:
         try:
             execution_slow_transitions.add(
                 1,
@@ -475,6 +486,7 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
                     "execution.status.to": status_to,
                     "owner": owners.get(node_id, _UNSET),
                     "execution.pending_reason": pending_reason,
+                    "k8s.namespace.name": namespace,
                 },
             )
         except Exception:
@@ -720,7 +732,13 @@ def _handle_before_commit(session: orm.Session) -> None:
                     and waited >= _SLOW_TRANSITION_SECONDS
                 ):
                     session.info.setdefault(_SLOW_KEY, []).append(
-                        (obj.id, prev["status"], curr["status"], pending_reason)
+                        (
+                            obj.id,
+                            prev["status"],
+                            curr["status"],
+                            pending_reason,
+                            namespace,
+                        )
                     )
             except Exception:
                 _logger.warning(
