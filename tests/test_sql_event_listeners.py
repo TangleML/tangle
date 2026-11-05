@@ -530,6 +530,88 @@ class TestRunAttempt:
         assert attempts == ["first", "repeat", "repeat"]
 
 
+class TestSlowTransitionsDroppedOnRollback:
+    """session.info outlives the transaction; the orchestrator reuses the session."""
+
+    def test_a_rolled_back_wait_is_not_charged_to_a_later_commit(
+        self, session: orm.Session
+    ) -> None:
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+
+        history = node.extra_data[metrics._HISTORY_KEY]
+        earlier = datetime.datetime.fromisoformat(
+            history[-1]["first_observed_at"]
+        ) - datetime.timedelta(seconds=metrics._SLOW_TRANSITION_SECONDS + 1)
+        history[-1]["first_observed_at"] = earlier.isoformat()
+        orm.attributes.flag_modified(node, "extra_data")
+        session.commit()
+
+        # before_commit measures the wait and stashes it, then the commit fails.
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration,
+            "record",
+            side_effect=None,
+        ):
+            with unittest.mock.patch.object(
+                session, "flush", side_effect=RuntimeError("commit fails")
+            ):
+                with pytest.raises(RuntimeError):
+                    session.commit()
+        session.rollback()
+        assert metrics._SLOW_KEY not in session.info
+
+        # An unrelated, fast transition on the same session must count nothing.
+        other = bts.ExecutionNode(task_spec={})
+        session.add(other)
+        other.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        with unittest.mock.patch.object(
+            metrics.execution_slow_transitions, "add"
+        ) as mock_add:
+            session.commit()
+        assert mock_add.call_args_list == []
+
+
+class TestSlowTransitionThreshold:
+    """Read at import, which is while the API and the orchestrator are starting."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (None, 6000.0),
+            ("900", 900.0),
+            ("900.5", 900.5),
+            ("9oo", 6000.0),
+            ("", 6000.0),
+            ("0", 6000.0),
+            ("-1", 6000.0),
+        ],
+        ids=[
+            "unset",
+            "integer",
+            "fractional",
+            "typo",
+            "empty",
+            "zero",
+            "negative",
+        ],
+    )
+    def test_a_bad_value_falls_back_instead_of_raising(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        raw: str | None,
+        expected: float,
+    ) -> None:
+        if raw is None:
+            monkeypatch.delenv("TANGLE_SLOW_TRANSITION_SECONDS", raising=False)
+        else:
+            monkeypatch.setenv("TANGLE_SLOW_TRANSITION_SECONDS", raw)
+        assert metrics._slow_transition_seconds() == expected
+
+
 class TestSlowTransitionCounter:
     """The slow-path counter, and the rule that the commit path issues no query."""
 
