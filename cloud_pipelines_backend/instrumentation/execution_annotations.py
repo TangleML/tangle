@@ -156,6 +156,11 @@ def namespace(*, execution: "bts.ExecutionNode") -> str | None:
     )
     if not account or not created_by:
         return None
+    if not isinstance(account, str):
+        # Dict[str, Any]: a client can send any JSON value, and the caller's
+        # fallback to the cluster namespace is the right answer for one we
+        # cannot slugify.
+        return None
     return re.sub(
         r"[^-a-z0-9]",
         "-",

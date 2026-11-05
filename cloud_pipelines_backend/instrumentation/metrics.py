@@ -254,6 +254,8 @@ def _accelerator(*, execution: backend_types_sql.ExecutionNode) -> tuple[str, st
         absent  or  '{}'                 →  "none"                 "0"
         '{"A":"1","B":"1"}'              →  "unparseable"          "0"    (c)
         'not json'                       →  "unparseable"          "0"    (c)
+        {"nvidia-l4": "8"}               →  "unparseable"          "0"    (c)
+        '{"nvidia-l4": null}'            →  "unparseable"          "0"    (c)
 
         (a) one space from the row above -- one series, not two
         (b) the capacity API's spelling of the same GPU; both kept as written
@@ -265,7 +267,10 @@ def _accelerator(*, execution: backend_types_sql.ExecutionNode) -> tuple[str, st
     """
     try:
         requested = execution_annotations.accelerators(execution=execution)
-    except ValueError:
+    except (TypeError, ValueError):
+        # The reader promises ValueError alone.  TypeError is caught anyway: the
+        # annotation is Dict[str, Any], and a reader that regresses must not be
+        # able to fail the commit this runs inside.
         return "unparseable", "0"
     if requested is None:
         return _UNSET, "0"
@@ -282,14 +287,18 @@ def _handle_before_commit(session: orm.Session) -> None:
             continue
         history: list = (obj.extra_data or {}).get(_HISTORY_KEY, [])
         if len(history) >= 2:
-            prev = history[-2]
-            curr = history[-1]
-            prev_time = datetime.datetime.fromisoformat(prev["first_observed_at"])
-            curr_time = datetime.datetime.fromisoformat(curr["first_observed_at"])
-            accelerator_type, accelerator_count = _accelerator(execution=obj)
-            cluster = _cluster(execution=obj)
-            namespace = _namespace(execution=obj)
+            # Every value here is derived from what a client wrote, and this runs
+            # inside the orchestrator's commit.  A reader that raises must cost a
+            # missing sample, never the commit -- so the try opens before the first
+            # derivation, not just before the record call.
             try:
+                prev = history[-2]
+                curr = history[-1]
+                prev_time = datetime.datetime.fromisoformat(prev["first_observed_at"])
+                curr_time = datetime.datetime.fromisoformat(curr["first_observed_at"])
+                accelerator_type, accelerator_count = _accelerator(execution=obj)
+                cluster = _cluster(execution=obj)
+                namespace = _namespace(execution=obj)
                 execution_status_transition_duration.record(
                     (curr_time - prev_time).total_seconds(),
                     attributes={

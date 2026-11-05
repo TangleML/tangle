@@ -341,6 +341,9 @@ class TestAcceleratorLabels:
             ("{}", "none", "0"),
             ('{"A":"1","B":"1"}', "unparseable", "0"),
             ("not json", "unparseable", "0"),
+            ('{"nvidia-l4": null}', "unparseable", "0"),
+            ('{"nvidia-l4": ["8"]}', "unparseable", "0"),
+            ({"nvidia-l4": "8"}, "unparseable", "0"),
         ],
         ids=[
             "compact",
@@ -350,6 +353,9 @@ class TestAcceleratorLabels:
             "empty-object",
             "two-models",
             "malformed",
+            "null-count",
+            "list-count",
+            "sent-as-an-object",
         ],
     )
     def test_the_annotation_is_parsed_not_copied(
@@ -392,6 +398,62 @@ class TestAcceleratorLabels:
             bts.ContainerExecutionStatus.RUNNING
         )
         assert attributes["execution.accelerator_type"] == "unparseable"
+
+
+class TestNoAnnotationCanFailTheCommit:
+    """The listener runs inside the orchestrator's commit.
+
+    A reader that raises there does not merely lose a sample: the commit fails, the
+    node is never marked launched, and the next sweep launches it again -- so a
+    single task becomes a launch per sweep for as long as it is queued.
+    """
+
+    ACCEL = execution_annotations.RESOURCES_ACCELERATORS_KEY
+
+    @staticmethod
+    def _advance(session: orm.Session, annotations: dict) -> bts.ExecutionNode:
+        node = bts.ExecutionNode(task_spec={"annotations": annotations})
+        session.add(node)
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        session.commit()
+        return node
+
+    @pytest.mark.parametrize(
+        "annotations",
+        [
+            {ACCEL: '{"nvidia-l4": null}'},
+            {ACCEL: '{"nvidia-l4": ["8"]}'},
+            {ACCEL: {"nvidia-l4": "8"}},
+            {execution_annotations.CLOUD_PROVIDER_KEY: ["lt3"]},
+            {execution_annotations.GOOGLE_SERVICE_ACCOUNT_KEY: ["a@b.test"]},
+        ],
+        ids=[
+            "null-count",
+            "list-count",
+            "accelerators-as-an-object",
+            "provider-as-a-list",
+            "service-account-as-a-list",
+        ],
+    )
+    def test_the_status_still_advances(
+        self, session: orm.Session, annotations: dict
+    ) -> None:
+        node = self._advance(session, annotations)
+        assert node.container_execution_status == bts.ContainerExecutionStatus.RUNNING
+
+    def test_a_reader_that_raises_anything_still_advances(
+        self, session: orm.Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Not just the inputs we thought of -- any reader, any exception."""
+        monkeypatch.setattr(
+            execution_annotations,
+            "target",
+            lambda **_: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        node = self._advance(session, {})
+        assert node.container_execution_status == bts.ContainerExecutionStatus.RUNNING
 
 
 class TestRunAttempt:
