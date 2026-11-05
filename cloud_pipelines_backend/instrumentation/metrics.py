@@ -31,6 +31,7 @@ import sqlalchemy as sql
 from opentelemetry import metrics as otel_metrics
 from sqlalchemy import event as sql_event
 from sqlalchemy import orm
+from sqlalchemy.orm import util as orm_util
 
 from .. import backend_types_sql
 from . import execution_annotations
@@ -228,7 +229,9 @@ def _run_attempt(*, history: list[dict[str, str]]) -> str:
     return "repeat" if any(e["status"] == _RUNNING for e in history[:-1]) else "first"
 
 
-def _cloud_provider(*, execution: backend_types_sql.ExecutionNode) -> str:
+def _cloud_provider(
+    *, execution: backend_types_sql.ExecutionNode, launcher_data: dict | None = None
+) -> str:
     """Whose machines ran the work.
 
         reads: cloud-pipelines.net/orchestration/cloud_provider
@@ -250,11 +253,15 @@ def _cloud_provider(*, execution: backend_types_sql.ExecutionNode) -> str:
     The map decides, not the annotation. The config section is `gke` and the label
     is `google`, because it answers whose machines, not which config stanza.
     """
-    resolved = execution_annotations.target(execution=execution)
+    resolved = execution_annotations.target(
+        execution=execution, launcher_data=launcher_data
+    )
     return _UNSET if resolved is None else resolved.provider
 
 
-def _namespace(*, execution: backend_types_sql.ExecutionNode) -> str:
+def _namespace(
+    *, execution: backend_types_sql.ExecutionNode, launcher_data: dict | None = None
+) -> str:
     """Which Kubernetes namespace the work ran in.
 
         reads: cloud-pipelines.net/launchers/google/service_account
@@ -277,11 +284,15 @@ def _namespace(*, execution: backend_types_sql.ExecutionNode) -> str:
     own = execution_annotations.namespace(execution=execution)
     if own is not None:
         return own
-    resolved = execution_annotations.target(execution=execution)
+    resolved = execution_annotations.target(
+        execution=execution, launcher_data=launcher_data
+    )
     return _UNSET if resolved is None else resolved.namespace
 
 
-def _cluster(*, execution: backend_types_sql.ExecutionNode) -> str:
+def _cluster(
+    *, execution: backend_types_sql.ExecutionNode, launcher_data: dict | None = None
+) -> str:
     """Which cluster inside that platform.
 
         reads: cloud-pipelines.net/orchestration/cloud_provider
@@ -303,7 +314,9 @@ def _cluster(*, execution: backend_types_sql.ExecutionNode) -> str:
     a query. Resolved through the map, never read off the annotation -- the
     annotation names a target, which is not the same thing as a cluster.
     """
-    resolved = execution_annotations.target(execution=execution)
+    resolved = execution_annotations.target(
+        execution=execution, launcher_data=launcher_data
+    )
     return _UNSET if resolved is None else resolved.cluster
 
 
@@ -443,7 +456,8 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
     try:
         with orm.Session(bind=session.get_bind()) as lookup_session:
             owners = _owners_of(
-                session=lookup_session, node_ids={node_id for node_id, _, _ in stashed}
+                session=lookup_session,
+                node_ids={node_id for node_id, _, _, _ in stashed},
             )
     except Exception:
         _logger.warning(
@@ -451,7 +465,7 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
             len(stashed),
             exc_info=True,
         )
-    for node_id, status_from, status_to in stashed:
+    for node_id, status_from, status_to, pending_reason in stashed:
         try:
             execution_slow_transitions.add(
                 1,
@@ -459,6 +473,7 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
                     "execution.status.from": status_from,
                     "execution.status.to": status_to,
                     "owner": owners.get(node_id, _UNSET),
+                    "execution.pending_reason": pending_reason,
                 },
             )
         except Exception:
@@ -466,6 +481,121 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
                 f"Failed to count slow transition for execution {node_id!r}",
                 exc_info=True,
             )
+
+
+@sql_event.listens_for(backend_types_sql.ContainerExecution.launcher_data, "set")
+def _persist_pending_reason_on_extra_data(
+    container_execution: "backend_types_sql.ContainerExecution",
+    value: dict | None,
+    _old_value: object,
+    _initiator: object,
+) -> None:
+    """Save why a task is waiting onto its row, while it is still waiting.
+
+        poll, pod Pending, no containers   → extra_data = {"last_pending_reason": "waiting_for_node"}
+        poll, pod Pending, ImagePullBackOff → extra_data = {"last_pending_reason": "image_unavailable"}
+        poll, pod Running                   → left alone, the last reason stands   (a)
+
+        (a) by the time a task stops waiting its pod is running and the reason is gone,
+            so the transition can only read what an earlier poll wrote
+
+    The orchestrator assigns launcher_data on every sweep that sees a change, which is
+    the only thing in the system that updates while the status does not. The serialised
+    pod arrives as this event's own argument, so nothing is read from the database.
+    """
+    # A "set" listener raises into the assignment that triggered it, which is the
+    # orchestrator storing a pod it just polled.  A label we failed to derive must
+    # cost that label, not the task: losing the write turns a running task into a
+    # SYSTEM_ERROR.
+    try:
+        if not value:
+            return
+        reason = execution_annotations.pending_reason(launcher_data=value)
+        if reason is None:
+            return
+        extra_data = container_execution.extra_data or {}
+        if extra_data.get(execution_annotations.PENDING_REASON_KEY) == reason.value:
+            return
+        container_execution.extra_data = {
+            **extra_data,
+            # .value, not the member: extra_data is a JSON column and an attribute is
+            # a string, so the enum stops at this boundary.
+            execution_annotations.PENDING_REASON_KEY: reason.value,
+        }
+    except Exception:
+        _logger.warning(
+            "Failed to stamp the pending reason for container execution "
+            f"{getattr(container_execution, 'id', None)!r}",
+            exc_info=True,
+        )
+
+
+def _container_execution(
+    *, session: orm.Session, execution: "backend_types_sql.ExecutionNode"
+) -> "backend_types_sql.ContainerExecution | None":
+    """The task's container execution, if the session already holds it.
+
+        it is in the session       → the object
+        the task has none          → None
+        it is not in the session   → None   (a)
+
+        (a) this runs in before_commit, where a lazy load would put a SELECT inside
+            the flush in progress; an unlabelled point beats a re-entrant query
+
+    The identity map is asked by key rather than the relationship by attribute. The
+    orchestrator reaches a node through container_execution.execution_nodes after a
+    rollback, which leaves the many-to-one loaded in the session but still listed as
+    unloaded on the node -- reading the attribute there either emits a SELECT or,
+    guarded against that, reports every task as unlabelled.
+    """
+    if "container_execution_id" in sql.inspect(execution).unloaded:
+        # The column, not the relationship: reading an expired attribute emits the
+        # SELECT this listener must never cause.
+        return None
+    if execution.container_execution_id is None:
+        return None
+    return session.identity_map.get(
+        orm_util.identity_key(
+            backend_types_sql.ContainerExecution, execution.container_execution_id
+        )
+    )
+
+
+def _launcher_data(
+    *, session: orm.Session, execution: "backend_types_sql.ExecutionNode"
+) -> dict | None:
+    """The persisted handle, which records the target the task was actually launched on.
+
+    reads: ContainerExecution.launcher_data
+    """
+    container_execution = _container_execution(session=session, execution=execution)
+    if container_execution is None:
+        return None
+    if "launcher_data" in sql.inspect(container_execution).unloaded:
+        return None
+    return container_execution.launcher_data
+
+
+def _pending_reason(
+    *, session: orm.Session, execution: "backend_types_sql.ExecutionNode"
+) -> str:
+    """Why this task was waiting, as stamped by the most recent poll.
+
+        the ContainerExecution is in the session   → "image_unavailable"
+        the task has none                          → "none"
+        it is not in the session                   → "none"   (a)
+        nothing ever stamped one                   → "none"
+
+        (a) this runs in before_commit, where a lazy load would put a SELECT inside
+            the flush in progress; an unlabelled point beats a re-entrant query
+
+    reads: ContainerExecution.extra_data["last_pending_reason"]
+    """
+    container_execution = _container_execution(session=session, execution=execution)
+    if container_execution is None:
+        return _UNSET
+    extra_data = container_execution.extra_data or {}
+    return extra_data.get(execution_annotations.PENDING_REASON_KEY) or _UNSET
 
 
 @sql_event.listens_for(orm.Session, "before_commit")
@@ -487,19 +617,26 @@ def _handle_before_commit(session: orm.Session) -> None:
                 prev_time = datetime.datetime.fromisoformat(prev["first_observed_at"])
                 curr_time = datetime.datetime.fromisoformat(curr["first_observed_at"])
                 accelerator_type, accelerator_count = _accelerator(execution=obj)
-                cluster = _cluster(execution=obj)
-                namespace = _namespace(execution=obj)
+                # Read once: three labels are derived from it, and the read
+                # walks the identity map.
+                launcher_data = _launcher_data(session=session, execution=obj)
+                cluster = _cluster(execution=obj, launcher_data=launcher_data)
+                namespace = _namespace(execution=obj, launcher_data=launcher_data)
+                pending_reason = _pending_reason(session=session, execution=obj)
                 execution_status_transition_duration.record(
                     (curr_time - prev_time).total_seconds(),
                     attributes={
                         "execution.status.from": prev["status"],
                         "execution.status.to": curr["status"],
                         "execution.run_attempt": _run_attempt(history=history),
-                        "execution.cloud_provider": _cloud_provider(execution=obj),
+                        "execution.cloud_provider": _cloud_provider(
+                            execution=obj, launcher_data=launcher_data
+                        ),
                         "execution.accelerator_type": accelerator_type,
                         "execution.accelerator_count": accelerator_count,
                         "execution.cluster": cluster,
                         "k8s.namespace.name": namespace,
+                        "execution.pending_reason": pending_reason,
                     },
                 )
                 waited = (curr_time - prev_time).total_seconds()
@@ -508,7 +645,7 @@ def _handle_before_commit(session: orm.Session) -> None:
                     and waited >= _SLOW_TRANSITION_SECONDS
                 ):
                     session.info.setdefault(_SLOW_KEY, []).append(
-                        (obj.id, prev["status"], curr["status"])
+                        (obj.id, prev["status"], curr["status"], pending_reason)
                     )
             except Exception:
                 _logger.warning(

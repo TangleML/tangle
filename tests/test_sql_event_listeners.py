@@ -4,6 +4,7 @@ import datetime
 import unittest.mock
 
 import pytest
+import sqlalchemy as sql
 from sqlalchemy import event as sql_event
 from sqlalchemy import orm
 
@@ -76,7 +77,117 @@ class TestStatusHistoryListeners:
             "execution.accelerator_count": "0",
             "execution.cluster": "none",
             "k8s.namespace.name": "none",
+            "execution.pending_reason": "none",
         }
+
+
+class TestLabelsFollowWhereTheTaskRan:
+    """Routing can move a task after its annotation is written; the labels must follow.
+
+    A percentage redirect sends a share of runs to a successor cluster and does not
+    rewrite the annotation, so provider, cluster and namespace built from the
+    annotation alone named the old cluster for exactly the tasks a migration moved --
+    the ones a migration most needs to watch.
+    """
+
+    FIELD = "tangle_launcher_key"
+
+    @pytest.fixture(autouse=True)
+    def _registered(self):
+        execution_annotations.register_targets(
+            targets={
+                "lt3": execution_annotations.Target(
+                    provider="google", cluster="lt3", namespace="jobs-staging"
+                ),
+                "eo9": execution_annotations.Target(
+                    provider="nebius", cluster="eo9", namespace="jobs-production"
+                ),
+            },
+            launcher_key_field=self.FIELD,
+        )
+        yield
+        execution_annotations.register_targets(targets={})
+
+    @staticmethod
+    def _record(
+        session: orm.Session,
+        *,
+        aimed_at: str,
+        launcher_data: dict | None,
+        keep_loaded: bool = True,
+    ) -> dict[str, str]:
+        # The orchestrator turns this off before it polls, which is why the handle is
+        # still loaded when the status change commits.
+        session.expire_on_commit = not keep_loaded
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.QUEUED,
+            launcher_data=launcher_data,
+        )
+        node = bts.ExecutionNode(
+            task_spec={
+                "annotations": {execution_annotations.CLOUD_PROVIDER_KEY: aimed_at}
+            }
+        )
+        node.container_execution = container_execution
+        session.add_all([container_execution, node])
+        node.container_execution_status = bts.ContainerExecutionStatus.QUEUED
+        session.commit()
+
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as mock_record:
+            session.commit()
+        return mock_record.call_args.kwargs["attributes"]
+
+    def test_a_redirected_task_is_labelled_with_the_cluster_it_ran_on(
+        self, session: orm.Session
+    ) -> None:
+        attributes = self._record(
+            session, aimed_at="lt3", launcher_data={self.FIELD: "eo9"}
+        )
+        assert (
+            attributes["execution.cloud_provider"],
+            attributes["execution.cluster"],
+            attributes["k8s.namespace.name"],
+        ) == ("nebius", "eo9", "jobs-production")
+
+    def test_a_task_that_went_where_it_was_aimed_is_unchanged(
+        self, session: orm.Session
+    ) -> None:
+        attributes = self._record(
+            session, aimed_at="lt3", launcher_data={self.FIELD: "lt3"}
+        )
+        assert attributes["execution.cluster"] == "lt3"
+
+    @pytest.mark.parametrize(
+        "launcher_data",
+        [None, {}, {"tangle_launcher_key": ""}, {"some_other_field": "eo9"}],
+        ids=["no-handle", "empty-handle", "blank-key", "a-field-we-do-not-read"],
+    )
+    def test_without_a_recorded_target_the_annotation_still_answers(
+        self, session: orm.Session, launcher_data: dict | None
+    ) -> None:
+        """Before the launch there is no handle, and the aim is all there is."""
+        attributes = self._record(session, aimed_at="lt3", launcher_data=launcher_data)
+        assert attributes["execution.cluster"] == "lt3"
+
+    def test_an_expired_handle_is_not_read_back_from_the_database(
+        self, session: orm.Session
+    ) -> None:
+        """The known limit: no label is worth a SELECT inside the flush in progress.
+
+        A session that expires on commit loses the handle, and reading it back would
+        be the re-entrant query this listener exists to avoid. The label falls back to
+        where the task was aimed -- wrong for a redirected task, and cheap.
+        """
+        attributes = self._record(
+            session,
+            aimed_at="lt3",
+            launcher_data={self.FIELD: "eo9"},
+            keep_loaded=False,
+        )
+        assert attributes["execution.cluster"] == "lt3"
 
 
 class TestCloudProviderLabel:
@@ -832,3 +943,285 @@ class TestSlowTransitionCounter:
             for s in issued_before_the_owner_read
             if s.lstrip().upper().startswith("SELECT")
         ]
+
+
+class TestPendingReasonOnTheOrchestratorsPath:
+    """The orchestrator reaches a node in a way the in-session tests do not.
+
+    It calls session.rollback() and then walks
+    container_execution.execution_nodes, which leaves the node's many-to-one
+    container_execution in the identity map but still listed as unloaded.
+    Building the objects in-session hides that, so this reproduces the real path.
+    """
+
+    @staticmethod
+    def _stamped_pair(session: orm.Session) -> tuple:
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            extra_data={execution_annotations.PENDING_REASON_KEY: "image_unavailable"},
+        )
+        node = bts.ExecutionNode(task_spec={"annotations": {}})
+        node.container_execution = container_execution
+        session.add_all([container_execution, node])
+        node.container_execution_status = bts.ContainerExecutionStatus.PENDING
+        session.commit()
+        return container_execution, node
+
+    def test_the_reason_survives_the_rollback_the_orchestrator_does(
+        self, session: orm.Session
+    ) -> None:
+        container_execution, node = self._stamped_pair(session)
+        session.rollback()
+        # The orchestrator's own route back to the node.
+        node = container_execution.execution_nodes[0]
+        assert "container_execution" in sql.inspect(node).unloaded, (
+            "precondition: the relationship must look unloaded, or this test is "
+            "exercising the in-session path instead of the orchestrator's"
+        )
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as mock_record:
+            session.commit()
+        attributes = mock_record.call_args.kwargs["attributes"]
+        assert attributes["execution.pending_reason"] == "image_unavailable"
+
+    def test_reading_it_issues_no_query(self, session: orm.Session) -> None:
+        """before_commit must not put a SELECT inside the flush in progress."""
+        container_execution, node = self._stamped_pair(session)
+        session.rollback()
+        node = container_execution.execution_nodes[0]
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        statements: list[str] = []
+        sql_event.listen(
+            session.get_bind(),
+            "before_cursor_execute",
+            lambda conn, cur, stmt, *a: statements.append(stmt),
+        )
+        session.commit()
+        assert not [s for s in statements if "SELECT" in s.upper()], statements
+
+
+class TestPendingReason:
+    """Why a task is waiting, stamped while it waits and read when it stops."""
+
+    @staticmethod
+    def _launcher_data(*, phase: str, reason: str | None, has_container: bool = True):
+        """The shape the Kubernetes launcher serialises onto launcher_data."""
+        status: dict = {"phase": phase}
+        if has_container:
+            state = {"waiting": {"reason": reason}} if reason else {}
+            status["containerStatuses"] = [{"state": state}]
+        return {"kubernetes_job": {"debug_pods": {"0": {"status": status}}}}
+
+    @pytest.mark.parametrize(
+        "reason, expected",
+        [
+            ("ContainerCreating", "starting_container"),
+            ("PodInitializing", "starting_container"),
+            ("ImagePullBackOff", "image_unavailable"),
+            ("ErrImagePull", "image_unavailable"),
+            ("CreateContainerConfigError", "bad_config"),
+            ("InvalidImageName", "bad_config"),
+        ],
+    )
+    def test_a_kubernetes_reason_becomes_one_of_ours(self, reason, expected):
+        data = self._launcher_data(phase="Pending", reason=reason)
+        assert execution_annotations.pending_reason(launcher_data=data) == expected
+
+    def test_an_unknown_kubernetes_reason_does_not_add_a_label_value(self):
+        data = self._launcher_data(phase="Pending", reason="SomeFutureK8sReason")
+        assert execution_annotations.pending_reason(launcher_data=data) == "other"
+
+    def test_a_pod_with_no_containers_yet_is_waiting_for_a_node(self):
+        data = self._launcher_data(phase="Pending", reason=None, has_container=False)
+        assert execution_annotations.pending_reason(launcher_data=data) == (
+            "waiting_for_node"
+        )
+
+    def test_a_running_pod_is_not_waiting_for_anything(self):
+        data = self._launcher_data(phase="Running", reason=None)
+        assert execution_annotations.pending_reason(launcher_data=data) is None
+
+    def test_a_launcher_that_is_not_kubernetes_yields_no_reason(self):
+        assert execution_annotations.pending_reason(launcher_data={"skypilot": {}}) is (
+            None
+        )
+
+    def test_a_reader_that_raises_costs_the_label_not_the_write(
+        self, session: orm.Session, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The assignment this listener fires on stores a pod the orchestrator polled."""
+        monkeypatch.setattr(
+            execution_annotations,
+            "pending_reason",
+            lambda **_: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        assert container_execution.id is not None
+        assert not (container_execution.extra_data or {}).get(
+            execution_annotations.PENDING_REASON_KEY
+        )
+
+    def test_a_poll_stamps_the_reason_onto_the_container_execution(
+        self, session: orm.Session
+    ):
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        assert container_execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "image_unavailable"
+        }
+
+    def test_what_lands_in_the_json_column_is_a_plain_string(
+        self, session: orm.Session
+    ):
+        """A str-valued enum passes == either way, so pin the stored type itself."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        # Before the commit: afterwards SQLite round-trips the JSON and hands back a
+        # plain string whatever was put in, which would hide the difference.
+        stored = container_execution.extra_data[
+            execution_annotations.PENDING_REASON_KEY
+        ]
+        assert type(stored) is str
+
+    def test_the_reason_survives_the_pod_starting_to_run(self, session: orm.Session):
+        """The flip is exactly when the pod no longer says why it was waiting."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        session.add(container_execution)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        container_execution.launcher_data = self._launcher_data(
+            phase="Running", reason=None
+        )
+        session.commit()
+        assert container_execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "image_unavailable"
+        }
+
+    def test_a_node_reads_the_reason_off_its_container_execution(
+        self, session: orm.Session
+    ):
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        node = bts.ExecutionNode(task_spec={})
+        node.container_execution = container_execution
+        session.add(node)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="CreateContainerConfigError"
+        )
+        session.commit()
+        # The orchestrator holds both objects when it flips a status, which is the only
+        # time this reader runs; commit expires them, so reload as that caller would.
+        node.container_execution
+        assert metrics._pending_reason(session=session, execution=node) == "bad_config"
+
+    def test_a_reason_behind_a_lazy_load_is_skipped_rather_than_fetched(
+        self, session: orm.Session
+    ):
+        """A SELECT here would land inside the flush that before_commit runs in."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        node = bts.ExecutionNode(task_spec={})
+        node.container_execution = container_execution
+        session.add(node)
+        container_execution.launcher_data = self._launcher_data(
+            phase="Pending", reason="ImagePullBackOff"
+        )
+        session.commit()
+        session.expire(node)
+        assert metrics._pending_reason(session=session, execution=node) == "none"
+
+    def test_a_node_with_no_container_execution_is_unlabelled(
+        self, session: orm.Session
+    ):
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        session.commit()
+        assert metrics._pending_reason(session=session, execution=node) == "none"
+
+
+class TestPendingReasonOnTheInstruments:
+    """The reason rides both instruments, so an alert and its link agree."""
+
+    @staticmethod
+    def _waiting(reason: str) -> dict:
+        return {
+            "kubernetes_job": {
+                "debug_pods": {
+                    "0": {
+                        "status": {
+                            "phase": "Pending",
+                            "containerStatuses": [
+                                {"state": {"waiting": {"reason": reason}}}
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+
+    def _wait_then_run(self, session: orm.Session, *, gap: datetime.timedelta):
+        """A task that waits on an image pull, then starts -- the case T5 exists for."""
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING
+        )
+        node = bts.ExecutionNode(task_spec={})
+        node.container_execution = container_execution
+        session.add(node)
+        node.container_execution_status = bts.ContainerExecutionStatus.PENDING
+        container_execution.launcher_data = self._waiting("ImagePullBackOff")
+        session.commit()
+        node.container_execution
+        history = node.extra_data[bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY]
+        history[-1]["first_observed_at"] = (
+            datetime.datetime.now(datetime.timezone.utc) - gap
+        ).isoformat()
+        node.extra_data = {**node.extra_data}
+        node.container_execution_status = bts.ContainerExecutionStatus.RUNNING
+        return node
+
+    def test_the_histogram_carries_why_the_task_was_waiting(self, session: orm.Session):
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as record:
+            self._wait_then_run(session, gap=datetime.timedelta(minutes=3))
+            session.commit()
+        attributes = record.call_args.kwargs["attributes"]
+        assert attributes["execution.pending_reason"] == "image_unavailable"
+
+    def test_the_slow_counter_carries_why_the_task_was_waiting(
+        self, session: orm.Session
+    ):
+        with unittest.mock.patch.object(
+            metrics.execution_slow_transitions, "add"
+        ) as add:
+            self._wait_then_run(session, gap=datetime.timedelta(hours=4))
+            session.commit()
+        attributes = add.call_args.kwargs["attributes"]
+        assert attributes["execution.pending_reason"] == "image_unavailable"
+        assert attributes["execution.status.to"] == "RUNNING"
