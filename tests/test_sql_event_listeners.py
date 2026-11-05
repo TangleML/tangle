@@ -1051,20 +1051,22 @@ class TestPendingReason:
     def test_a_reader_that_raises_costs_the_label_not_the_write(
         self, session: orm.Session, monkeypatch: pytest.MonkeyPatch
     ):
-        """The assignment this listener fires on stores a pod the orchestrator polled."""
+        """Both listeners write a task that is already running in the cluster."""
         monkeypatch.setattr(
             execution_annotations,
             "pending_reason",
             lambda **_: (_ for _ in ()).throw(RuntimeError("boom")),
         )
         container_execution = bts.ContainerExecution(
-            status=bts.ContainerExecutionStatus.PENDING
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._launcher_data(phase="Pending", reason="Unschedulable"),
         )
         session.add(container_execution)
+        session.commit()  # before_insert ran and swallowed it
         container_execution.launcher_data = self._launcher_data(
             phase="Pending", reason="ImagePullBackOff"
         )
-        session.commit()
+        session.commit()  # the set listener ran and swallowed it too
         assert container_execution.id is not None
         assert not (container_execution.extra_data or {}).get(
             execution_annotations.PENDING_REASON_KEY
@@ -1225,3 +1227,159 @@ class TestPendingReasonOnTheInstruments:
         attributes = add.call_args.kwargs["attributes"]
         assert attributes["execution.pending_reason"] == "image_unavailable"
         assert attributes["execution.status.to"] == "RUNNING"
+
+
+class TestNoPodCreatedOnlyLabelsAWaitThatEnded:
+    """Every Job is launched with an empty pod map, so the first stamp is always this.
+
+    Arriving in PENDING is that moment, so labelling the queue-time series with it
+    would pin QUEUED->PENDING to a value that reads as an admission refusal. Leaving
+    PENDING with the stamp intact is the case the value exists for.
+    """
+
+    @staticmethod
+    def _transition(
+        session: orm.Session,
+        *,
+        status_from: bts.ContainerExecutionStatus,
+        status_to: bts.ContainerExecutionStatus,
+    ) -> dict:
+        container_execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            extra_data={
+                execution_annotations.PENDING_REASON_KEY: "no_pod_created",
+            },
+        )
+        node = bts.ExecutionNode(task_spec={"annotations": {}})
+        node.container_execution = container_execution
+        session.add_all([container_execution, node])
+        node.container_execution_status = status_from
+        session.commit()
+        node.container_execution_status = status_to
+        with unittest.mock.patch.object(
+            metrics.execution_status_transition_duration, "record"
+        ) as mock_record:
+            session.commit()
+        return mock_record.call_args.kwargs["attributes"]
+
+    def test_arriving_in_pending_is_not_labelled_a_failure(
+        self, session: orm.Session
+    ) -> None:
+        attributes = self._transition(
+            session,
+            status_from=bts.ContainerExecutionStatus.QUEUED,
+            status_to=bts.ContainerExecutionStatus.PENDING,
+        )
+        assert attributes["execution.pending_reason"] == "none"
+
+    @pytest.mark.parametrize(
+        "status_to",
+        [
+            bts.ContainerExecutionStatus.FAILED,
+            bts.ContainerExecutionStatus.SYSTEM_ERROR,
+        ],
+        ids=["failed", "system-error"],
+    )
+    def test_leaving_pending_still_carries_it(
+        self, session: orm.Session, status_to: bts.ContainerExecutionStatus
+    ) -> None:
+        attributes = self._transition(
+            session,
+            status_from=bts.ContainerExecutionStatus.PENDING,
+            status_to=status_to,
+        )
+        assert attributes["execution.pending_reason"] == "no_pod_created"
+
+
+class TestPendingReasonWhenNoPodExists:
+    """A Job whose pods were refused at admission, and the first write of any task."""
+
+    @staticmethod
+    def _no_pods() -> dict:
+        """What the launcher serialises for a Job that has produced no pod."""
+        return {"kubernetes_job": {"debug_pods": {}}}
+
+    def test_a_job_with_no_pods_is_not_silent(self):
+        assert (
+            execution_annotations.pending_reason(launcher_data=self._no_pods())
+            == "no_pod_created"
+        )
+
+    def test_a_launcher_that_is_not_kubernetes_says_nothing(self):
+        # Without the explicit None check this would fall through to an empty pod map
+        # and label every local-process task as a refused Kubernetes pod.
+        for data in ({}, {"local_process": {"pid": 42}}):
+            assert execution_annotations.pending_reason(launcher_data=data) is None
+
+    def test_a_pod_that_exists_but_is_not_pending_is_still_none(self):
+        data = {
+            "kubernetes_job": {"debug_pods": {"0": {"status": {"phase": "Running"}}}}
+        }
+        assert execution_annotations.pending_reason(launcher_data=data) is None
+
+    def test_the_set_listener_alone_would_lose_the_constructor_reason(self):
+        # Pins why there are two listeners. ContainerExecution declares extra_data
+        # after launcher_data, so __init__ assigns the reason and then overwrites it
+        # with extra_data's own default of None. Nothing is flushed here, so only the
+        # attribute listener has run. Move extra_data above launcher_data and this
+        # fails -- which is the warning that the insert hook has become dead code.
+        execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._no_pods(),
+        )
+        assert execution.launcher_data is not None
+        assert execution.extra_data is None
+
+    def test_the_reason_supplied_to_the_constructor_is_persisted(
+        self, session: orm.Session
+    ):
+        # The orchestrator passes the first launcher_data as a constructor argument,
+        # which is not an attribute assignment and never reaches the "set" listener.
+        execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._no_pods(),
+        )
+        session.add(execution)
+        session.commit()
+        execution_id = execution.id
+        session.expunge_all()
+
+        reloaded = session.get(bts.ContainerExecution, execution_id)
+        assert reloaded is not None
+        assert reloaded.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "no_pod_created"
+        }
+
+    def test_a_later_poll_overwrites_the_reason_from_the_first_write(
+        self, session: orm.Session
+    ):
+        # Every task is launched with an empty pod map, so a healthy one must not stay
+        # labelled as refused once its pod shows up.
+        execution = bts.ContainerExecution(
+            status=bts.ContainerExecutionStatus.PENDING,
+            launcher_data=self._no_pods(),
+        )
+        session.add(execution)
+        session.commit()
+        assert execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "no_pod_created"
+        }
+
+        execution.launcher_data = {
+            "kubernetes_job": {
+                "debug_pods": {
+                    "0": {
+                        "status": {
+                            "phase": "Pending",
+                            "containerStatuses": [
+                                {"state": {"waiting": {"reason": "ContainerCreating"}}}
+                            ],
+                        }
+                    }
+                }
+            }
+        }
+        session.commit()
+        assert execution.extra_data == {
+            execution_annotations.PENDING_REASON_KEY: "starting_container"
+        }
