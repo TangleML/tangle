@@ -810,6 +810,17 @@ class OrchestratorService_Sql:
                 raise OrchestratorError(
                     f"Unexpected status of just launched container: {launched_container.status=}, {launched_container=}"
                 )
+        except launcher_interfaces.LaunchRejectedError as ex:
+            _logger.warning(
+                f"Launch of execution {execution.id} was rejected ({ex.reason}): {ex.message}"
+            )
+            _fail_rejected_launch(
+                session=session,
+                execution=execution,
+                reason=ex.reason,
+                message=ex.message,
+            )
+            return
         except Exception as ex:
             session.rollback()
             with session.begin():
@@ -1380,6 +1391,31 @@ def record_system_error_exception(execution: bts.ExecutionNode, exception: Excep
     execution.extra_data[
         bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY
     ] = traceback.format_exc()
+
+
+def _fail_rejected_launch(
+    *,
+    session: orm.Session,
+    execution: bts.ExecutionNode,
+    reason: str,
+    message: str,
+) -> None:
+    """Mark an execution whose launch was rejected as FAILED and skip its downstream.
+
+    FAILED rather than SYSTEM_ERROR: the user can fix what was rejected, so it
+    is not reported as a system error.
+    """
+    session.rollback()
+    with session.begin():
+        execution.container_execution_status = bts.ContainerExecutionStatus.FAILED
+        execution.extra_data = {
+            **(execution.extra_data or {}),
+            bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY: message,
+        }
+        _mark_all_downstream_executions_as_skipped(session=session, execution=execution)
+    app_metrics.execution_launch_rejections.add(
+        1, attributes={"execution.launch_rejection.reason": reason}
+    )
 
 
 def _record_orchestration_error_message(

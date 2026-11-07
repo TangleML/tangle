@@ -915,9 +915,11 @@ class ExecutionNodesApiService_Sql:
             system_error_exception_full or orchestration_error_message
         )
         if not container_execution:
-            if (
-                execution.container_execution_status
-                == bts.ContainerExecutionStatus.SYSTEM_ERROR
+            # Never launched, for example because the launcher rejected it, so the
+            # error is all there is to show.
+            if execution.container_execution_status in (
+                bts.ContainerExecutionStatus.SYSTEM_ERROR,
+                bts.ContainerExecutionStatus.FAILED,
             ):
                 return GetContainerExecutionLogResponse(
                     system_error_exception_full=system_error_exception_full,

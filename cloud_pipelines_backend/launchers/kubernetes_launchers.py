@@ -622,8 +622,11 @@ class _KubernetesPodLauncher(
                 _request_timeout=self._request_timeout,
             )
         except Exception as ex:
-            raise interfaces.LauncherError(
-                f"Failed to create pod: {_kubernetes_serialize(pod)}"
+            raise _create_error(
+                ex,
+                workload=pod,
+                namespace=pod.metadata.namespace or namespace,
+                message=f"Failed to create pod: {_kubernetes_serialize(pod)}",
             ) from ex
 
         pod_name: str = created_pod.metadata.name
@@ -1387,8 +1390,11 @@ class _KubernetesJobLauncher(
                 _request_timeout=self._request_timeout,
             )
         except Exception as ex:
-            raise interfaces.LauncherError(
-                f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}"
+            raise _create_error(
+                ex,
+                workload=job,
+                namespace=job.metadata.namespace or namespace,
+                message=f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}",
             ) from ex
 
         job_name: str = created_job.metadata.name
@@ -2313,6 +2319,58 @@ def _is_kubelet_unreachable_error(
         and "/containerLogs/" in body
         and "dial tcp" in body
     )
+
+
+def _admission_denial_message(exception: Exception) -> str | None:
+    """The API server's message if an admission webhook denied a create request, else None.
+
+    The API server reports a denial as a `Status` whose message contains
+    both `admission webhook` and `denied the request`, along with whatever
+    the webhook said. The status code is the webhook's choice: 400 and 403
+    are the ones seen in practice. That wording is not a documented contract,
+    so a non-match is treated as some other error. An RBAC 403 has no webhook
+    text and does not match, and neither does a webhook that could not be
+    reached, which is a 500.
+    """
+    if not isinstance(exception, kubernetes.client.exceptions.ApiException):
+        return None
+    if exception.status not in (
+        http.HTTPStatus.BAD_REQUEST,
+        http.HTTPStatus.FORBIDDEN,
+    ):
+        return None
+    try:
+        status = json.loads(_extract_api_exception_body(exception))
+    except ValueError:
+        return None
+    message = status.get("message") if isinstance(status, dict) else None
+    if not isinstance(message, str):
+        return None
+    if "admission webhook" in message and "denied the request" in message:
+        return message
+    return None
+
+
+def _create_error(
+    exception: Exception,
+    *,
+    workload: k8s_client_lib.V1Pod | k8s_client_lib.V1Job,
+    namespace: str,
+    message: str,
+) -> interfaces.LauncherError:
+    """The launcher error for a failed request to create `workload` in `namespace`."""
+    denial_message = _admission_denial_message(exception)
+    if denial_message is None:
+        return interfaces.LauncherError(message)
+    # The user is shown only the denial, so keep what was denied for operators.
+    workload_dict = _serialize_kubernetes_object_to_compact_dict_and_censor_it(
+        obj=workload
+    )
+    _logger.warning(
+        f"Admission denied the workload submitted to namespace {namespace}:"
+        f" {json.dumps(workload_dict)}"
+    )
+    return interfaces.LaunchRejectedError(denial_message, reason="admission_denied")
 
 
 def _launcher_error_from_api_exception(
