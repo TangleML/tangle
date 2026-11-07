@@ -995,3 +995,117 @@ class TestRefreshMetrics:
         app_metrics.record_completion_lag.assert_called_once_with(
             ended_at=self._ENDED_AT, status=bts.ContainerExecutionStatus.FAILED
         )
+
+
+# --------------------------------------------------------------------------- #
+# A launch the launcher rejects is FAILED, not SYSTEM_ERROR.
+# --------------------------------------------------------------------------- #
+
+_DENIAL = 'admission webhook "validate.example" denied the request: not here'
+
+
+def _orchestrator_with_launcher(
+    session_factory: Callable[[], orm.Session], launcher: mock.MagicMock
+) -> orchestrator_sql.OrchestratorService_Sql:
+    return orchestrator_sql.OrchestratorService_Sql(
+        session_factory=session_factory,
+        launcher=launcher,
+        storage_provider=mock.MagicMock(),
+        data_root_uri="file:///tmp/artifacts",
+        logs_root_uri="file:///tmp/logs",
+    )
+
+
+def _drain_queued_executions(
+    orchestrator: orchestrator_sql.OrchestratorService_Sql,
+    session_factory: Callable[[], orm.Session],
+) -> None:
+    for _ in range(20):
+        with session_factory() as session:
+            if not orchestrator.internal_process_queued_executions_queue(
+                session=session
+            ):
+                return
+
+
+class TestLaunchRejection:
+    def test_rejected_launch_is_failed_with_its_message_and_skips_downstream(
+        self,
+    ) -> None:
+        root_task = _make_graph_task_spec(
+            tasks={
+                "upstream": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component(outputs=["out"])
+                    ),
+                ),
+                "downstream": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component(inputs=["in"])
+                    ),
+                    arguments={"in": _output_argument("upstream", "out")},
+                ),
+            },
+        )
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, root_task)
+        launcher = mock.MagicMock()
+        launcher.launch_container_task.side_effect = (
+            launcher_interfaces.LaunchRejectedError(_DENIAL, reason="admission_denied")
+        )
+        orchestrator = _orchestrator_with_launcher(session_factory, launcher)
+
+        with (
+            mock.patch.object(orchestrator_sql, "app_metrics") as app_metrics,
+            mock.patch.object(orchestrator_sql, "bugsnag_instrumentation") as bugsnag,
+        ):
+            _drain_queued_executions(orchestrator, session_factory)
+
+        session = session_factory()
+        upstream = _get_execution_node(session, "upstream")
+        assert (
+            upstream.container_execution_status == bts.ContainerExecutionStatus.FAILED
+        )
+        assert (
+            upstream.extra_data[
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+            ]
+            == _DENIAL
+        )
+        assert (
+            bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY
+            not in upstream.extra_data
+        )
+        assert upstream.container_execution is None
+        assert (
+            _get_execution_node(session, "downstream").container_execution_status
+            == bts.ContainerExecutionStatus.SKIPPED
+        )
+        app_metrics.execution_system_errors.add.assert_not_called()
+        bugsnag.notify.assert_not_called()
+        app_metrics.execution_launch_rejections.add.assert_called_once_with(
+            1, attributes={"execution.launch_rejection.reason": "admission_denied"}
+        )
+
+    def test_other_launcher_errors_are_still_system_errors(self) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launcher = mock.MagicMock()
+        launcher.launch_container_task.side_effect = launcher_interfaces.LauncherError(
+            "Failed to create Kubernetes Job"
+        )
+        orchestrator = _orchestrator_with_launcher(session_factory, launcher)
+
+        with (
+            mock.patch.object(orchestrator_sql, "app_metrics") as app_metrics,
+            mock.patch.object(orchestrator_sql, "bugsnag_instrumentation") as bugsnag,
+        ):
+            _drain_queued_executions(orchestrator, session_factory)
+
+        node = _get_execution_node(session_factory(), "task")
+        assert node.container_execution_status == (
+            bts.ContainerExecutionStatus.SYSTEM_ERROR
+        )
+        app_metrics.execution_system_errors.add.assert_called_once_with(1)
+        bugsnag.notify.assert_called_once()
+        app_metrics.execution_launch_rejections.add.assert_not_called()

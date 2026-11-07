@@ -55,6 +55,15 @@ execution_system_errors = orchestrator_meter.create_counter(
     unit=MetricUnit.ERRORS,
 )
 
+execution_launch_rejections = orchestrator_meter.create_counter(
+    name="execution.launch_rejections",
+    description=(
+        "Execution nodes that ended FAILED because the platform rejected their"
+        " launch for a reason the user can fix."
+    ),
+    unit=MetricUnit.ERRORS,
+)
+
 container_execution_missing_workloads = orchestrator_meter.create_counter(
     name="container_execution.missing_workloads",
     description=(

@@ -47,6 +47,23 @@ class LaunchedContainerNotFoundError(LauncherError):
     """
 
 
+class LaunchRejectedError(LauncherError):
+    """The platform refused to start the container, for a reason the user can fix.
+
+    For example, a Kubernetes admission webhook denied the workload. A launcher
+    raises this only for a definitive refusal; a fault in the platform itself
+    stays a plain `LauncherError`.
+
+    `message` is shown to the user as is. `reason` is a short, stable code for
+    metrics, such as "admission_denied".
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.reason = reason
+
+
 @dataclasses.dataclass(kw_only=True)
 class InputArgument:
     total_size: int
