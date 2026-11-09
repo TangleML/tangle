@@ -85,6 +85,8 @@ _MULTI_NODE_MAX_NUMBER_OF_NODES = 16
 # dynamicData argument keys
 _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY = "system/multi_node/number_of_nodes"
 _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY = "system/multi_node/node_index"
+_DYNAMIC_DATA_SECRET_KEY = "secret"
+_DYNAMIC_DATA_SECRET_NAME_KEY = "name"
 _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY = "system/multi_node/node_0_address"
 _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_addresses"
 
@@ -95,6 +97,11 @@ _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 _T = typing.TypeVar("_T")
 
 _CONTAINER_FILE_NAME = "data"
+
+
+def _secret_env_var_name(*, input_name: str) -> str:
+    """Returns the environment variable, also the Secret key, that carries a secret input."""
+    return "__TANGLE_SECRET_" + re.sub("[^_0-9a-zA-Z]+", "_", input_name.upper())
 
 
 def _create_volume_and_volume_mount_host_path(
@@ -247,7 +254,6 @@ class _KubernetesContainerLauncherBase:
         *,
         input_arguments: dict[str, interfaces.InputArgument],
     ) -> tuple[dict[str, str], dict[str, str]]:
-        # TODO!: Handle secrets consumed as files by mounting the required Secret keys as volumes.
         secret_name_to_secret_value: dict[str, str] = {}
         secret_env_name_to_secret_name: dict[str, str] = {}
         for input_name, input_argument in list(input_arguments.items()):
@@ -259,8 +265,6 @@ class _KubernetesContainerLauncherBase:
                 )
             )
             # Hiding secrets
-            _DYNAMIC_DATA_SECRET_KEY = "secret"
-            _DYNAMIC_DATA_SECRET_NAME_KEY = "name"
             if dynamic_data_kind == _DYNAMIC_DATA_SECRET_KEY:
                 secret_name = (dynamic_data_properties or {}).get(
                     _DYNAMIC_DATA_SECRET_NAME_KEY
@@ -274,9 +278,7 @@ class _KubernetesContainerLauncherBase:
                         f"Secret does not have name: {input_argument.dynamic_data=}"
                     )
 
-                env_var_name = "__TANGLE_SECRET_" + re.sub(
-                    "[^_0-9a-zA-Z]+", "_", input_name.upper()
-                )
+                env_var_name = _secret_env_var_name(input_name=input_name)
                 if env_var_name in secret_env_name_to_secret_name:
                     raise interfaces.LauncherError(
                         f"Two secret inputs map to the environment variable {env_var_name}; rename {input_name!r} or the other one"
@@ -316,7 +318,11 @@ class _KubernetesContainerLauncherBase:
             for container in pod.spec.containers
             if container.name == _MAIN_CONTAINER_NAME
         )
+        command_line = (main_container.command or []) + (main_container.args or [])
         for env_var_name in secret_env_name_to_secret_name:
+            # An input consumed as a file reads the Secret volume, not the environment.
+            if not any(f"$({env_var_name})" in part for part in command_line):
+                continue
             main_container.env = main_container.env or []
             main_container.env.append(
                 k8s_client_lib.V1EnvVar(
@@ -329,6 +335,9 @@ class _KubernetesContainerLauncherBase:
                     ),
                 )
             )
+        for volume in pod.spec.volumes or []:
+            if volume.secret and not volume.secret.secret_name:
+                volume.secret.secret_name = kubernetes_secret_name
         return k8s_client_lib.V1Secret(
             metadata=k8s_client_lib.V1ObjectMeta(name=kubernetes_secret_name),
             string_data=secret_data,
@@ -433,10 +442,18 @@ class _KubernetesContainerLauncherBase:
         def get_input_path(input_name: str) -> str:
             input_argument = input_arguments[input_name]
             uri = input_argument.uri
+            container_path = (
+                container_inputs_root
+                / naming_utils.sanitize_file_name(input_name)
+                / _CONTAINER_FILE_NAME
+            ).as_posix()
+            volume_name = naming_utils.sanitize_kubernetes_resource_name(
+                "inputs-" + input_name
+            )
             if not uri:
                 # Prohibiting consuming some kinds of dynamic data as file
                 if input_argument.dynamic_data:
-                    dynamic_data_kind, _ = (
+                    dynamic_data_kind, dynamic_data_properties = (
                         container_component_utils.parse_dynamic_data_argument(
                             input_argument.dynamic_data
                         )
@@ -445,6 +462,29 @@ class _KubernetesContainerLauncherBase:
                         raise interfaces.LauncherError(
                             f"It's not possible to consume this dynamic data argument as a file: {input_name=}, {input_argument=}"
                         )
+                    if dynamic_data_kind == _DYNAMIC_DATA_SECRET_KEY:
+                        # The second secret phase fills in the Secret's name.
+                        volume_map[volume_name] = k8s_client_lib.V1Volume(
+                            name=volume_name,
+                            secret=k8s_client_lib.V1SecretVolumeSource(
+                                items=[
+                                    k8s_client_lib.V1KeyToPath(
+                                        key=_secret_env_var_name(input_name=input_name),
+                                        path=_CONTAINER_FILE_NAME,
+                                    )
+                                ]
+                            ),
+                        )
+                        volume_mounts.append(
+                            k8s_client_lib.V1VolumeMount(
+                                name=volume_name,
+                                mount_path=pathlib.PurePosixPath(
+                                    container_path
+                                ).parent.as_posix(),
+                                read_only=True,
+                            )
+                        )
+                        return container_path
                 if input_argument.value is None:
                     if input_argument.dynamic_data:
                         raise NotImplementedError(
@@ -466,14 +506,6 @@ class _KubernetesContainerLauncherBase:
                 # Updating the input_arguments with the URI of the uploaded value
                 input_argument.uri = uri
 
-            container_path = (
-                container_inputs_root
-                / naming_utils.sanitize_file_name(input_name)
-                / _CONTAINER_FILE_NAME
-            ).as_posix()
-            volume_name = naming_utils.sanitize_kubernetes_resource_name(
-                "inputs-" + input_name
-            )
             volume, volume_mount = self._create_volume_and_volume_mount(
                 container_path=container_path,
                 artifact_uri=uri,
