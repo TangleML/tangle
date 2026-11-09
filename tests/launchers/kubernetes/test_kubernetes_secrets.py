@@ -198,3 +198,13 @@ def test_two_secret_inputs_on_one_env_var_name_are_a_launcher_error() -> None:
         _make_launcher()._handle_secrets_before_preparing_pod(
             input_arguments={"api-key": first, "api_key": second}
         )
+
+
+@pytest.mark.usefixtures("secrets_api")
+def test_placeholder_names_the_environment_variable_the_pod_defines() -> None:
+    pod = _launch(launcher=_make_launcher())
+
+    container = pod.spec.containers[0]
+    assert [env.name for env in container.env] == ["__TANGLE_SECRET_TOKEN"]
+    assert container.args == ["$(__TANGLE_SECRET_TOKEN)"]
+    assert _SECRET_VALUE not in container.args[0]

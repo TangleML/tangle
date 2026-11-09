@@ -594,7 +594,7 @@ class _KubernetesPodLauncher(
                 secret_name_to_secret_value[secret_name] = input_argument.value
                 secret_env_name_to_secret_name[env_var_name] = secret_name
                 # Hiding the secret value by replacing it with env variable sourced from a Kubernetes Secret
-                input_argument.value = f"$({secret_name})"
+                input_argument.value = f"$({env_var_name})"
                 continue
         return secret_name_to_secret_value, secret_env_name_to_secret_name
 
