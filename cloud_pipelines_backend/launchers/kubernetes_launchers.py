@@ -181,6 +181,10 @@ class PodPostProcessor(typing.Protocol):
     ) -> k8s_client_lib.V1Pod: ...
 
 
+class NamespaceChooser(typing.Protocol):
+    def __call__(self, *, annotations: dict[str, str] | None = None) -> str | None: ...
+
+
 class _KubernetesContainerLauncherBase:
     """Launcher that launches container using Kubernetes"""
 
@@ -195,6 +199,7 @@ class _KubernetesContainerLauncherBase:
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -212,6 +217,7 @@ class _KubernetesContainerLauncherBase:
             pod_annotations or {}
         )
         self._pod_postprocessor = pod_postprocessor
+        self._namespace_chooser = namespace_chooser
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
 
         try:
@@ -665,7 +671,8 @@ class _KubernetesContainerLauncherBase:
 
         Override this method to choose namespace dynamically.
         """
-        del annotations
+        if self._namespace_chooser:
+            return self._namespace_chooser(annotations=annotations) or self._namespace
         return self._namespace
 
 
@@ -686,6 +693,7 @@ class _KubernetesPodLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -701,6 +709,7 @@ class _KubernetesPodLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            namespace_chooser=namespace_chooser,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
@@ -916,6 +925,7 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
     ):
         super().__init__(
             namespace=namespace,
@@ -927,6 +937,7 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            namespace_chooser=namespace_chooser,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
 
@@ -946,6 +957,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
     ):
         pod_postprocessors = [_google_kubernetes_engine_accelerator_pod_postprocessor]
         if pod_postprocessor:
@@ -966,6 +978,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
+            namespace_chooser=namespace_chooser,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_google_cloud_storage,
         )
 
@@ -1293,6 +1306,7 @@ class _KubernetesJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -1309,6 +1323,7 @@ class _KubernetesJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            namespace_chooser=namespace_chooser,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
 
@@ -2238,6 +2253,7 @@ class _KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
         always_launch_jobs: bool = False,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
@@ -2254,6 +2270,7 @@ class _KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            namespace_chooser=namespace_chooser,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
@@ -2265,6 +2282,7 @@ class _KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            namespace_chooser=namespace_chooser,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
@@ -2345,6 +2363,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
     ):
         super().__init__(
             namespace=namespace,
@@ -2354,6 +2373,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            namespace_chooser=namespace_chooser,
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
@@ -2372,6 +2392,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
+        namespace_chooser: NamespaceChooser | None = None,
     ):
         super().__init__(
             namespace=namespace,
@@ -2381,6 +2402,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
+            namespace_chooser=namespace_chooser,
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
