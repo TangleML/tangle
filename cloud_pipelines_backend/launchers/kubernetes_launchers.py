@@ -12,6 +12,7 @@ import re
 import threading
 import time
 import typing
+import uuid
 from typing import Any, Final, Optional
 
 import kubernetes.client.exceptions
@@ -294,39 +295,15 @@ class _KubernetesContainerLauncherBase:
         secret_name_to_secret_value: dict[str, str],
         secret_env_name_to_secret_name: dict[str, str],
         annotations: dict[str, Any] | None = None,
-    ):
-        # Create secrets
+    ) -> k8s_client_lib.V1Secret | None:
         if not secret_name_to_secret_value or not secret_env_name_to_secret_name:
-            return
+            return None
 
-        assert pod.metadata
-        # TODO: Stop supporting changing namespace in _pod_postprocessor
-        namespace = pod.metadata.namespace or self._namespace
-
-        created_by = (annotations or {}).get(
-            common_annotations.PIPELINE_RUN_CREATED_BY_ANNOTATION_KEY
-        ) or "anonymous"
-        # Kubernetes' Secrets can contain multiple key-value pairs.
-        # So we store all user's secret in a single Kubernetes Secret object
-        kubernetes_secret_name = naming_utils.sanitize_kubernetes_resource_name(
-            created_by.replace("@", "-at-")
-        )
-        core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
-        try:
-            core_api_client.create_namespaced_secret(
-                namespace=namespace,
-                body=k8s_client_lib.V1Secret(
-                    metadata=k8s_client_lib.V1ObjectMeta(name=kubernetes_secret_name),
-                    string_data=secret_name_to_secret_value,
-                ),
-            )
-        except Exception:
-            # TODO: Verify that such patching does not delete other secret key-value pairs.
-            core_api_client.patch_namespaced_secret(
-                name=kubernetes_secret_name,
-                namespace=namespace,
-                body=k8s_client_lib.V1Secret(string_data=secret_name_to_secret_value),
-            )
+        # One Secret per container execution, created once its Pod or Job exists.
+        container_execution_id = (annotations or {}).get(
+            common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
+        ) or uuid.uuid4().hex[:8]
+        kubernetes_secret_name = "tangle-ce-" + container_execution_id
 
         main_container = next(
             container
@@ -346,6 +323,37 @@ class _KubernetesContainerLauncherBase:
                     ),
                 )
             )
+        return k8s_client_lib.V1Secret(
+            metadata=k8s_client_lib.V1ObjectMeta(name=kubernetes_secret_name),
+            string_data=secret_name_to_secret_value,
+        )
+
+    def _create_secret_or_delete_pod_or_job(
+        self,
+        *,
+        secret: k8s_client_lib.V1Secret,
+        pod_or_job: k8s_client_lib.V1OwnerReference,
+        namespace: str,
+        delete_pod_or_job: typing.Callable[[], Any],
+    ) -> None:
+        """Creates the Secret owned by the Pod or Job, deleting the Pod or Job if that fails."""
+        secret.metadata.owner_references = [pod_or_job]
+        try:
+            k8s_client_lib.CoreV1Api(
+                api_client=self._api_client
+            ).create_namespaced_secret(
+                namespace=namespace, body=secret, _request_timeout=self._request_timeout
+            )
+        except Exception as ex:
+            try:
+                delete_pod_or_job()
+            except Exception:
+                _logger.exception(
+                    f"Failed to roll back {pod_or_job.kind} {pod_or_job.name} after Secret creation failed."
+                )
+            raise interfaces.LauncherError(
+                f"Failed to create Kubernetes Secret {secret.metadata.name}"
+            ) from ex
 
     def _prepare_kubernetes_pod(
         self,
@@ -724,7 +732,7 @@ class _KubernetesPodLauncher(
         if self._pod_postprocessor:
             pod = self._pod_postprocessor(pod=pod, annotations=annotations)
 
-        self._handle_secrets_after_preparing_pod(
+        secret = self._handle_secrets_after_preparing_pod(
             pod=pod,
             secret_name_to_secret_value=secret_name_to_secret_value,
             secret_env_name_to_secret_name=secret_env_name_to_secret_name,
@@ -746,6 +754,20 @@ class _KubernetesPodLauncher(
         pod_name: str = created_pod.metadata.name
         pod_namespace: str = created_pod.metadata.namespace
         _logger.info(f"Created pod {pod_name} in namespace {pod_namespace}")
+        if secret:
+            self._create_secret_or_delete_pod_or_job(
+                secret=secret,
+                pod_or_job=k8s_client_lib.V1OwnerReference(
+                    api_version="v1",
+                    kind="Pod",
+                    name=pod_name,
+                    uid=created_pod.metadata.uid,
+                ),
+                namespace=pod_namespace,
+                delete_pod_or_job=lambda: core_api_client.delete_namespaced_pod(
+                    name=pod_name, namespace=pod_namespace, grace_period_seconds=0
+                ),
+            )
 
         launched_kubernetes_container = LaunchedKubernetesContainer(
             pod_name=pod_name,
@@ -1405,7 +1427,7 @@ class _KubernetesJobLauncher(
         # we should prohibit/ignore changing pod namespace in the pod post-processor.
         namespace = pod.metadata.namespace
 
-        self._handle_secrets_after_preparing_pod(
+        secret = self._handle_secrets_after_preparing_pod(
             pod=pod,
             secret_name_to_secret_value=secret_name_to_secret_value,
             secret_env_name_to_secret_name=secret_env_name_to_secret_name,
@@ -1522,6 +1544,20 @@ class _KubernetesJobLauncher(
         job_namespace: str = created_job.metadata.namespace
         job_uid: str = created_job.metadata.uid
         _logger.info(f"Created Kubernetes Job {job_name} in namespace {job_namespace}")
+        if secret:
+            self._create_secret_or_delete_pod_or_job(
+                secret=secret,
+                pod_or_job=k8s_client_lib.V1OwnerReference(
+                    api_version="batch/v1", kind="Job", name=job_name, uid=job_uid
+                ),
+                namespace=job_namespace,
+                delete_pod_or_job=lambda: batch_api_client.delete_namespaced_job(
+                    name=job_name,
+                    namespace=job_namespace,
+                    grace_period_seconds=0,
+                    propagation_policy="Background",
+                ),
+            )
 
         if enable_multi_node:
             assert service
