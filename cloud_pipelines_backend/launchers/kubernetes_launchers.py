@@ -628,7 +628,7 @@ class _KubernetesPodLauncher(
                 namespace=namespace,
                 body=k8s_client_lib.V1Secret(
                     metadata=k8s_client_lib.V1ObjectMeta(name=kubernetes_secret_name),
-                    data=secret_name_to_secret_value,
+                    string_data=secret_name_to_secret_value,
                 ),
             )
         except Exception:
@@ -636,7 +636,7 @@ class _KubernetesPodLauncher(
             core_api_client.patch_namespaced_secret(
                 name=kubernetes_secret_name,
                 namespace=namespace,
-                body=k8s_client_lib.V1Secret(data=secret_name_to_secret_value),
+                body=k8s_client_lib.V1Secret(string_data=secret_name_to_secret_value),
             )
 
         # TODO: properly select the main container
