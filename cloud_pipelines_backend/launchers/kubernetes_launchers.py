@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import threading
 import time
 import typing
@@ -551,6 +552,105 @@ class _KubernetesPodLauncher(
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
 
+    def _handle_secrets_before_preparing_pod(
+        self,
+        *,
+        input_arguments: dict[str, interfaces.InputArgument],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        # TODO!: Handle secrets consumed as files by mounting the required Secret keys as volumes.
+        secret_name_to_secret_value: dict[str, str] = {}
+        secret_env_name_to_secret_name: dict[str, str] = {}
+        for input_name, input_argument in list(input_arguments.items()):
+            if not input_argument.dynamic_data:
+                continue
+            dynamic_data_kind, dynamic_data_properties = (
+                container_component_utils.parse_dynamic_data_argument(
+                    input_argument.dynamic_data
+                )
+            )
+            # Hiding secrets
+            _DYNAMIC_DATA_SECRET_KEY = "secret"
+            _DYNAMIC_DATA_SECRET_NAME_KEY = "name"
+            if dynamic_data_kind == _DYNAMIC_DATA_SECRET_KEY:
+                secret_name = (dynamic_data_properties or {}).get(
+                    _DYNAMIC_DATA_SECRET_NAME_KEY
+                )
+                if not input_argument.value:
+                    raise interfaces.LauncherError(
+                        f"Orchestrator should have filled secret value for {input_name=}, but got: {input_argument=}"
+                    )
+                if not secret_name:
+                    raise interfaces.LauncherError(
+                        f"Secret does not have name: {input_argument.dynamic_data=}"
+                    )
+
+                env_var_name = "__TANGLE_SECRET_" + re.sub(
+                    "[^_0-9a-zA-Z]+", "_", input_name.upper()
+                )
+                secret_name_to_secret_value[secret_name] = input_argument.value
+                secret_env_name_to_secret_name[env_var_name] = secret_name
+                # Hiding the secret value by replacing it with env variable sourced from a Kubernetes Secret
+                input_argument.value = f"$({secret_name})"
+                continue
+        return secret_name_to_secret_value, secret_env_name_to_secret_name
+
+    def _handle_secrets_after_preparing_pod(
+        self,
+        *,
+        pod: k8s_client_lib.V1Pod,
+        secret_name_to_secret_value: dict[str, str],
+        secret_env_name_to_secret_name: dict[str, str],
+        annotations: dict[str, Any] | None = None,
+    ):
+        # Create secrets
+        if not secret_name_to_secret_value or not secret_env_name_to_secret_name:
+            return
+
+        assert pod.metadata
+        # TODO: Stop supporting changing namespace in _pod_postprocessor
+        namespace = pod.metadata.namespace or self._namespace
+
+        created_by = (annotations or {}).get(
+            common_annotations.PIPELINE_RUN_CREATED_BY_ANNOTATION_KEY
+        ) or "anonymous"
+        # Kubernetes' Secrets can contain multiple key-value pairs.
+        # So we store all user's secret in a single Kubernetes Secret object
+        kubernetes_secret_name = naming_utils.sanitize_kubernetes_resource_name(
+            created_by.replace("@", "-at-")
+        )
+        core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
+        try:
+            core_api_client.create_namespaced_secret(
+                namespace=namespace,
+                body=k8s_client_lib.V1Secret(
+                    metadata=k8s_client_lib.V1ObjectMeta(name=kubernetes_secret_name),
+                    data=secret_name_to_secret_value,
+                ),
+            )
+        except Exception:
+            # TODO: Verify that such patching does not delete other secret key-value pairs.
+            core_api_client.patch_namespaced_secret(
+                name=kubernetes_secret_name,
+                namespace=namespace,
+                body=k8s_client_lib.V1Secret(data=secret_name_to_secret_value),
+            )
+
+        # TODO: properly select the main container
+        main_container = pod.spec.containers[0]
+        for env_var_name, secret_name in secret_env_name_to_secret_name.items():
+            main_container.env = main_container.env or []
+            main_container.env.append(
+                k8s_client_lib.V1EnvVar(
+                    name=env_var_name,
+                    value_from=k8s_client_lib.V1EnvVarSource(
+                        secret_key_ref=k8s_client_lib.V1SecretKeySelector(
+                            name=kubernetes_secret_name,
+                            key=secret_name,
+                        )
+                    ),
+                )
+            )
+
     def launch_container_task(
         self,
         *,
@@ -580,6 +680,9 @@ class _KubernetesPodLauncher(
             _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: "localhost",
             _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: "localhost",
         }
+        secret_name_to_secret_value, secret_env_name_to_secret_name = (
+            self._handle_secrets_before_preparing_pod(input_arguments=input_arguments)
+        )
         for input_name, input_argument in list(input_arguments.items()):
             if input_argument.value is not None or input_argument.uri is not None:
                 continue
@@ -613,6 +716,13 @@ class _KubernetesPodLauncher(
         # Applying the pod post-processor
         if self._pod_postprocessor:
             pod = self._pod_postprocessor(pod=pod, annotations=annotations)
+
+        self._handle_secrets_after_preparing_pod(
+            pod=pod,
+            secret_name_to_secret_value=secret_name_to_secret_value,
+            secret_env_name_to_secret_name=secret_env_name_to_secret_name,
+            annotations=annotations,
+        )
 
         core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
         try:
