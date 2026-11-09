@@ -219,3 +219,21 @@ def test_secret_carries_the_plain_value_in_string_data(
     [(_, secret)] = secrets_api.created
     assert secret.string_data == {"hf-token": _SECRET_VALUE}
     assert secret.data is None
+
+
+@pytest.mark.usefixtures("secrets_api")
+def test_environment_entry_goes_to_the_main_container_not_the_first() -> None:
+    sidecar = k8s_client_lib.V1Container(name="sidecar")
+    pod = _make_pod(args=[])
+    pod.spec.containers.insert(0, sidecar)
+
+    _make_launcher()._handle_secrets_after_preparing_pod(
+        pod=pod,
+        secret_name_to_secret_value={"hf-token": _SECRET_VALUE},
+        secret_env_name_to_secret_name={"__TANGLE_SECRET_TOKEN": "hf-token"},
+        annotations=None,
+    )
+
+    [_, main] = pod.spec.containers
+    assert sidecar.env is None
+    assert [env.name for env in main.env] == ["__TANGLE_SECRET_TOKEN"]

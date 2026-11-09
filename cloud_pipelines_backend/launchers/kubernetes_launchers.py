@@ -639,8 +639,11 @@ class _KubernetesPodLauncher(
                 body=k8s_client_lib.V1Secret(string_data=secret_name_to_secret_value),
             )
 
-        # TODO: properly select the main container
-        main_container = pod.spec.containers[0]
+        main_container = next(
+            container
+            for container in pod.spec.containers
+            if container.name == _MAIN_CONTAINER_NAME
+        )
         for env_var_name, secret_name in secret_env_name_to_secret_name.items():
             main_container.env = main_container.env or []
             main_container.env.append(
