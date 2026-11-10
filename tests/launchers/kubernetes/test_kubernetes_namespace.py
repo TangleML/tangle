@@ -26,6 +26,8 @@ class _Cluster:
     def create_namespaced_pod(
         self, *, namespace: str, body: k8s_client_lib.V1Pod, _request_timeout: int
     ) -> k8s_client_lib.V1Pod:
+        if body.metadata.namespace not in (None, namespace):
+            raise k8s_client_lib.ApiException(status=400, reason="namespace mismatch")
         self.namespaces.append(("Pod", namespace))
         body.metadata.name = "task-pod"
         body.metadata.namespace = namespace
@@ -222,3 +224,57 @@ def test_informers_start_on_a_namespace_string_only(
 
     # The Pod launcher's pod informer, and the Job launcher's pod and Job informers.
     assert seen == [watched] * 3
+
+
+def _move_to_another_namespace(
+    *, pod: k8s_client_lib.V1Pod, annotations: dict[str, str] | None = None
+) -> k8s_client_lib.V1Pod:
+    pod.metadata.namespace = "another-namespace"
+    return pod
+
+
+def _leave_the_namespace(
+    *, pod: k8s_client_lib.V1Pod, annotations: dict[str, str] | None = None
+) -> k8s_client_lib.V1Pod:
+    return pod
+
+
+@pytest.mark.parametrize(
+    "annotations, kind",
+    [
+        pytest.param({}, "Pod", id="pod"),
+        pytest.param({_RETRIES_KEY: "1"}, "Job", id="job"),
+    ],
+)
+def test_namespace_change_by_the_post_processor_is_ignored_with_a_warning(
+    annotations: dict[str, str],
+    kind: str,
+    cluster: _Cluster,
+    tmp_path: pathlib.Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    launcher = kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
+        api_client=k8s_client_lib.ApiClient(),
+        pod_postprocessor=_move_to_another_namespace,
+    )
+
+    _launch(launcher=launcher, annotations=annotations, log_uri=str(tmp_path / "log"))
+
+    assert cluster.namespaces == [(kind, "default")]
+    assert (
+        "Ignoring the pod post-processor's namespace 'another-namespace'" in caplog.text
+    )
+
+
+def test_post_processor_that_keeps_the_namespace_logs_no_warning(
+    cluster: _Cluster, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    launcher = kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
+        api_client=k8s_client_lib.ApiClient(),
+        pod_postprocessor=_leave_the_namespace,
+    )
+
+    _launch(launcher=launcher, annotations={}, log_uri=str(tmp_path / "log"))
+
+    assert cluster.namespaces == [("Pod", "default")]
+    assert "Ignoring the pod post-processor's namespace" not in caplog.text
