@@ -153,50 +153,48 @@ class OrchestratorService_Sql:
         )
         queued_execution = session.scalar(query)
         query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
-        if queued_execution:
-            self._queued_executions_queue_idle = False
-            start_timestamp = time.monotonic_ns()
-
-            with contextual_logging.execution_logging_context(queued_execution):
-                _logger.info(
-                    f"Before processing queued execution. (Query duration: {query_duration_ms}ms)"
-                )
-                try:
-                    self.internal_process_one_queued_execution(
-                        session=session, execution=queued_execution
-                    )
-                except Exception as ex:
-                    _logger.exception("Error processing queued execution")
-                    session.rollback()
-                    queued_execution.container_execution_status = (
-                        bts.ContainerExecutionStatus.SYSTEM_ERROR
-                    )
-                    record_system_error_exception(
-                        execution=queued_execution, exception=ex
-                    )
-                    session.commit()
-                    # Skipping downstream happens after the commit above, so that
-                    # the SYSTEM_ERROR status is durable even if this traversal
-                    # fails. Otherwise the execution would stay QUEUED and be
-                    # reprocessed on every sweep.
-                    _mark_all_downstream_executions_as_skipped(
-                        session=session, execution=queued_execution
-                    )
-                    session.commit()
-                finally:
-                    duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
-                    _logger.info(
-                        f"After processing queued execution (duration: {duration_ms}ms)"
-                    )
-
-            return True
-        else:
+        if not queued_execution:
             if not self._queued_executions_queue_idle or query_duration_ms > 1000:
                 self._queued_executions_queue_idle = True
                 _logger.debug(
                     f"No queued executions found. (Query duration: {query_duration_ms}ms.)"
                 )
             return False
+
+        self._queued_executions_queue_idle = False
+        start_timestamp = time.monotonic_ns()
+
+        with contextual_logging.execution_logging_context(queued_execution):
+            _logger.info(
+                f"Before processing queued execution. (Query duration: {query_duration_ms}ms)"
+            )
+            try:
+                self.internal_process_one_queued_execution(
+                    session=session, execution=queued_execution
+                )
+            except Exception as ex:
+                _logger.exception("Error processing queued execution")
+                session.rollback()
+                queued_execution.container_execution_status = (
+                    bts.ContainerExecutionStatus.SYSTEM_ERROR
+                )
+                record_system_error_exception(execution=queued_execution, exception=ex)
+                session.commit()
+                # Skipping downstream happens after the commit above, so that
+                # the SYSTEM_ERROR status is durable even if this traversal
+                # fails. Otherwise the execution would stay QUEUED and be
+                # reprocessed on every sweep.
+                _mark_all_downstream_executions_as_skipped(
+                    session=session, execution=queued_execution
+                )
+                session.commit()
+            finally:
+                duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
+                _logger.info(
+                    f"After processing queued execution (duration: {duration_ms}ms)"
+                )
+
+        return True
 
     def internal_process_running_executions_queue(self, session: orm.Session):
         _logger.debug("Selecting running container execution to process.)")
@@ -221,131 +219,127 @@ class OrchestratorService_Sql:
             session.get(bts.ContainerExecution, execution_id) if execution_id else None
         )
         query_duration_ms = (time.monotonic_ns() - query_start_timestamp) / 1_000_000
-        if running_container_execution:
-            self._running_executions_queue_idle = False
-
-            execution_node_ids = list(
-                session.scalars(
-                    sql.select(bts.ExecutionNode.id).where(
-                        bts.ExecutionNode.container_execution_id
-                        == running_container_execution.id
-                    )
-                ).all()
-            )
-
-            with contextual_logging.logging_context(
-                container_execution_id=running_container_execution.id,
-                execution_node_ids=execution_node_ids,
-            ):
-                queries_duration_ms = (
-                    time.monotonic_ns() - query_start_timestamp
-                ) / 1_000_000
-                start_timestamp = time.monotonic_ns()
-                _logger.info(
-                    f"Before processing running container execution. Queries duration {queries_duration_ms}ms."
-                )
-                try:
-                    with orchestrator_tracing.operation_span(
-                        "orchestrator.process_running_execution",
-                        attributes={
-                            "container_execution.id": running_container_execution.id
-                        },
-                    ):
-                        self.internal_process_one_running_execution(
-                            session=session,
-                            container_execution=running_container_execution,
-                        )
-                except Exception as ex:
-                    _logger.exception("Error processing running container execution")
-                    session.rollback()
-
-                    is_retriable = (
-                        isinstance(ex, launcher_interfaces.LauncherError)
-                        and ex.is_retriable
-                    )
-                    if isinstance(
-                        ex, launcher_interfaces.LaunchedContainerNotFoundError
-                    ):
-                        app_metrics.container_execution_missing_workloads.add(
-                            1,
-                            attributes={
-                                "status": running_container_execution.status.value
-                            },
-                        )
-
-                    error_count = (
-                        self._container_execution_refresh_error_counts.get(
-                            running_container_execution.id, 0
-                        )
-                        + 1
-                    )
-                    if (
-                        is_retriable
-                        and error_count
-                        < self._max_container_execution_refresh_error_retries
-                    ):
-                        self._container_execution_refresh_error_counts[
-                            running_container_execution.id
-                        ] = error_count
-                        _logger.warning(
-                            "Could not refresh running container execution "
-                            f"({error_count} of "
-                            f"{self._max_container_execution_refresh_error_retries}"
-                            f" consecutive retriable failures): {ex!r}. Leaving "
-                            f"it in {running_container_execution.status} and "
-                            "refreshing it on a later sweep."
-                        )
-                        return True
-
-                    self._container_execution_refresh_error_counts.pop(
-                        running_container_execution.id, None
-                    )
-                    running_container_execution.status = (
-                        bts.ContainerExecutionStatus.SYSTEM_ERROR
-                    )
-                    running_container_execution.ended_at = _get_current_time()
-                    # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
-                    session.commit()
-
-                    # Mark our ExecutionNode as SYSTEM_ERROR
-                    execution_nodes = running_container_execution.execution_nodes
-                    for execution_node in execution_nodes:
-                        execution_node.container_execution_status = (
-                            bts.ContainerExecutionStatus.SYSTEM_ERROR
-                        )
-                        record_system_error_exception(
-                            execution=execution_node, exception=ex
-                        )
-                    # Doing an intermediate commit here because it's most important to mark the problematic node as SYSTEM_ERROR.
-                    session.commit()
-
-                    # Skip downstream executions
-                    for execution_node in execution_nodes:
-                        _mark_all_downstream_executions_as_skipped(
-                            session=session, execution=execution_node
-                        )
-                    session.commit()
-                else:
-                    self._container_execution_refresh_error_counts.pop(
-                        running_container_execution.id, None
-                    )
-                finally:
-                    duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
-                    _logger.info(
-                        f"After processing running container execution (duration: {duration_ms}ms)"
-                    )
-                    app_metrics.record_refresh_duration(
-                        queries_duration_ms=queries_duration_ms,
-                        processing_duration_ms=duration_ms,
-                    )
-            return True
-        else:
+        if not running_container_execution:
             if not self._running_executions_queue_idle or query_duration_ms > 1000:
                 _logger.debug(
                     f"No running container executions found. (Query duration: {query_duration_ms}ms.)"
                 )
                 self._running_executions_queue_idle = True
             return False
+
+        self._running_executions_queue_idle = False
+
+        execution_node_ids = list(
+            session.scalars(
+                sql.select(bts.ExecutionNode.id).where(
+                    bts.ExecutionNode.container_execution_id
+                    == running_container_execution.id
+                )
+            ).all()
+        )
+
+        with contextual_logging.logging_context(
+            container_execution_id=running_container_execution.id,
+            execution_node_ids=execution_node_ids,
+        ):
+            queries_duration_ms = (
+                time.monotonic_ns() - query_start_timestamp
+            ) / 1_000_000
+            start_timestamp = time.monotonic_ns()
+            _logger.info(
+                f"Before processing running container execution. Queries duration {queries_duration_ms}ms."
+            )
+            try:
+                with orchestrator_tracing.operation_span(
+                    "orchestrator.process_running_execution",
+                    attributes={
+                        "container_execution.id": running_container_execution.id
+                    },
+                ):
+                    self.internal_process_one_running_execution(
+                        session=session,
+                        container_execution=running_container_execution,
+                    )
+            except Exception as ex:
+                _logger.exception("Error processing running container execution")
+                session.rollback()
+
+                is_retriable = (
+                    isinstance(ex, launcher_interfaces.LauncherError)
+                    and ex.is_retriable
+                )
+                if isinstance(ex, launcher_interfaces.LaunchedContainerNotFoundError):
+                    app_metrics.container_execution_missing_workloads.add(
+                        1,
+                        attributes={"status": running_container_execution.status.value},
+                    )
+
+                error_count = (
+                    self._container_execution_refresh_error_counts.get(
+                        running_container_execution.id, 0
+                    )
+                    + 1
+                )
+                if (
+                    is_retriable
+                    and error_count
+                    < self._max_container_execution_refresh_error_retries
+                ):
+                    self._container_execution_refresh_error_counts[
+                        running_container_execution.id
+                    ] = error_count
+                    _logger.warning(
+                        "Could not refresh running container execution "
+                        f"({error_count} of "
+                        f"{self._max_container_execution_refresh_error_retries}"
+                        f" consecutive retriable failures): {ex!r}. Leaving "
+                        f"it in {running_container_execution.status} and "
+                        "refreshing it on a later sweep."
+                    )
+                    return True
+
+                self._container_execution_refresh_error_counts.pop(
+                    running_container_execution.id, None
+                )
+                running_container_execution.status = (
+                    bts.ContainerExecutionStatus.SYSTEM_ERROR
+                )
+                running_container_execution.ended_at = _get_current_time()
+                # Doing an intermediate commit here because it's most important to mark the problematic execution as SYSTEM_ERROR.
+                session.commit()
+
+                # Mark our ExecutionNode as SYSTEM_ERROR
+                execution_nodes = running_container_execution.execution_nodes
+                for execution_node in execution_nodes:
+                    execution_node.container_execution_status = (
+                        bts.ContainerExecutionStatus.SYSTEM_ERROR
+                    )
+                    record_system_error_exception(
+                        execution=execution_node, exception=ex
+                    )
+                # Doing an intermediate commit here because it's most important to mark the problematic node as SYSTEM_ERROR.
+                session.commit()
+
+                # Skip downstream executions
+                for execution_node in execution_nodes:
+                    _mark_all_downstream_executions_as_skipped(
+                        session=session, execution=execution_node
+                    )
+                session.commit()
+            else:
+                self._container_execution_refresh_error_counts.pop(
+                    running_container_execution.id, None
+                )
+            finally:
+                duration_ms = (time.monotonic_ns() - start_timestamp) / 1_000_000
+                _logger.info(
+                    f"After processing running container execution (duration: {duration_ms}ms)"
+                )
+                app_metrics.record_refresh_duration(
+                    queries_duration_ms=queries_duration_ms,
+                    processing_duration_ms=duration_ms,
+                )
+        return True
 
     def internal_process_one_queued_execution(
         self, session: orm.Session, execution: bts.ExecutionNode
