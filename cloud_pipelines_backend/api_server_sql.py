@@ -899,6 +899,13 @@ class ExecutionNodesApiService_Sql:
         if not execution:
             raise errors.ItemNotFoundError(f"Execution with {id=} does not exist.")
         container_execution = execution.container_execution
+
+        # ! We need to close the DB connection before doing prolonged log operations.
+        # Calling `session.rollback()` closes the DB connection.
+        # But first we need to expunge/detach the execution objects so that they remain accessible after the rollback.
+        session.expunge_all()
+        session.rollback()
+
         execution_extra_data = execution.extra_data or {}
         system_error_exception_full = execution_extra_data.get(
             bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_FULL_KEY
@@ -999,6 +1006,13 @@ class ExecutionNodesApiService_Sql:
             raise ApiServiceError(
                 "Execution does not have container launcher information."
             )
+
+        # ! We need to close the DB connection before doing prolonged log operations.
+        # Calling `session.rollback()` closes the DB connection.
+        # But first we need to expunge/detach the execution objects so that they remain accessible after the rollback.
+        session.expunge_all()
+        session.rollback()
+
         if container_execution.status == bts.ContainerExecutionStatus.RUNNING:
             launched_container = (
                 container_launcher.deserialize_launched_container_from_dict(
