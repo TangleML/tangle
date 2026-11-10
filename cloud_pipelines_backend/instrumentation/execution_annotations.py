@@ -46,9 +46,6 @@ class Target(NamedTuple):
     cluster: str
     namespace: str = "none"
     cluster_from_annotation: str | None = None
-    # The clusters the deployment expects its tasks to name, already label-shaped.
-    # None means it keeps no list, so any name a task gives is taken as written.
-    known_clusters: frozenset[str] | None = None
 
 
 # Filled once at startup from the launcher config, which names either spelling of every
@@ -79,12 +76,10 @@ def as_label(*, value: str) -> str:
 
         (a) "none" rather than "": an empty label value is dropped by some
             backends, and a dropped label reads as a different series
-        (b) a cap bounds the width of one series, not how many there are; a
-            caller that needs the count bounded checks the value as well
+        (b) a cap bounds the width of one series, not how many there are
 
-    This bounds the shape of a label, which is the half that does not need to know
-    what the deployment runs. Two spellings of one name becoming one series is the
-    point: "B300 Cluster" and "b300-cluster" are the same machine.
+    Two spellings of one name becoming one series is the point: "B300 Cluster" and
+    "b300-cluster" are the same machine.
     """
     slug = _NOT_LABEL_SAFE.sub("-", value.strip().lower()).strip("-")
     if not slug:
@@ -204,14 +199,7 @@ def target(
     named = _annotations(execution=execution).get(resolved.cluster_from_annotation)
     if not isinstance(named, str) or not named.strip():
         return resolved._replace(cluster="none")
-    reshaped = as_label(value=named)
-    if resolved.known_clusters is not None and reshaped not in resolved.known_clusters:
-        # The task is launched before the provider rejects the name, and the
-        # transition into SYSTEM_ERROR is recorded in between -- so a typo would
-        # otherwise open a series of its own on a histogram that already has nine
-        # labels. "other" stays visible without being unbounded.
-        return resolved._replace(cluster="other")
-    return resolved._replace(cluster=reshaped)
+    return resolved._replace(cluster=as_label(value=named))
 
 
 def namespace(*, execution: "bts.ExecutionNode") -> str | None:

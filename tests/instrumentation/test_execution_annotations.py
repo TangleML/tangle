@@ -185,19 +185,18 @@ class TestAsLabel:
             assert len(result) <= 40
 
 
-class TestClusterNamesAreBounded:
-    """Davies takes its cluster from the task, so the value is a client's to choose."""
+class TestClusterNamedByTheTask:
+    """Davies takes its cluster from the task: reshaped, never checked against a list."""
 
     KEY = "ml.shopify.io/davies/cluster"
 
-    def _target(self, named: object, *, known: frozenset[str] | None) -> object:
+    def _target(self, named: object) -> object:
         ea.register_targets(
             targets={
                 "davies": ea.Target(
                     provider="davies",
                     cluster="davies",
                     cluster_from_annotation=self.KEY,
-                    known_clusters=known,
                 )
             }
         )
@@ -215,8 +214,7 @@ class TestClusterNamesAreBounded:
         [
             ("b300", "b300"),
             ("B300 Cluster", "b300-cluster"),
-            ("h200", "other"),
-            ("b3OO", "other"),
+            ("a-cluster-added-yesterday", "a-cluster-added-yesterday"),
             ("", "none"),
             ("   ", "none"),
             (None, "none"),
@@ -224,10 +222,9 @@ class TestClusterNamesAreBounded:
             ({"a": 1}, "none"),
         ],
         ids=[
-            "a-name-it-knows",
+            "as-written",
             "the-same-name-spelled-loudly",
-            "a-name-it-does-not-know",
-            "a-typo",
+            "a-name-no-list-ever-held",
             "empty",
             "whitespace",
             "absent",
@@ -235,16 +232,10 @@ class TestClusterNamesAreBounded:
             "an-object",
         ],
     )
-    def test_an_unexpected_name_does_not_open_a_series(
+    def test_the_name_is_reshaped_into_a_label(
         self, named: object, expected: str
     ) -> None:
-        assert (
-            self._target(named, known=frozenset({"b300", "b300-cluster"})) == expected
-        )
-
-    def test_without_a_list_a_name_is_taken_as_written(self) -> None:
-        """A deployment that keeps no list still gets the reshaping, not the allowlist."""
-        assert self._target("H200 Cluster", known=None) == "h200-cluster"
+        assert self._target(named) == expected
 
 
 class TestWhereATaskActuallyRan:
