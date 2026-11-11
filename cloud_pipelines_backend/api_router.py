@@ -625,6 +625,18 @@ def _setup_routes_internal(
             execution_node = session.get(backend_types_sql.ExecutionNode, id)
             execution_node.container_execution_status = status
 
+    @router.post(
+        "/api/admin/secrets/backfill_encryption",
+        tags=["admin"],
+        dependencies=[ensure_admin_user_dependency],
+        **default_config,
+    )
+    def admin_backfill_secret_encryption(
+        session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
+        limit: typing.Annotated[int, fastapi.Query(ge=1, le=1000)] = 50,
+    ) -> dict[str, int]:
+        return secrets_service.backfill_encryption(session=session, limit=limit)
+
     @router.get("/api/admin/sql_engine_connection_pool_status")
     async def get_sql_engine_connection_pool_status(
         session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],

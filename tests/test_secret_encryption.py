@@ -214,3 +214,102 @@ def test_launch_fails_without_cipher_for_encrypted_row():
     launch, execution = _launch_secret(write_cipher=_FakeCipher(), read_cipher=None)
     launch.assert_not_called()
     assert "configured cipher is None" in _system_error(execution)
+
+
+def _backfill_client(
+    tmp_path: pathlib.Path,
+    *,
+    cipher: _FakeCipher | None,
+    plain: list[str],
+    encrypted: tuple[str, ...] = (),
+    admin: bool = True,
+) -> tuple[TestClient, Any]:
+    engine = database_ops.create_db_engine_and_migrate_db(
+        database_uri=f"sqlite:///{tmp_path / 'db.sqlite'}"
+    )
+    for names, write_cipher in [(plain, None), (encrypted, _FakeCipher())]:
+        for name in names:
+            api_server_sql.SecretsApiService(
+                secret_value_cipher=write_cipher
+            ).create_secret(
+                session=orm.Session(bind=engine),
+                user_id="alice",
+                secret_name=name,
+                secret_value="s3cret",
+            )
+    app = fastapi.FastAPI()
+    api_router.setup_routes(
+        app=app,
+        db_engine=engine,
+        user_details_getter=lambda: api_router.UserDetails(
+            name="alice", permissions={"read": True, "write": True, "admin": admin}
+        ),
+        secret_value_cipher=cipher,
+    )
+    return TestClient(app), engine
+
+
+def _stored(engine: Any, name: str) -> str:
+    with orm.Session(bind=engine) as session:
+        return session.get(bts.Secret, ("alice", name)).secret_value
+
+
+def test_backfill_encrypts_only_plaintext_rows(tmp_path: pathlib.Path):
+    client, engine = _backfill_client(
+        tmp_path, cipher=_FakeCipher(), plain=["A"], encrypted=("B",)
+    )
+    response = client.post("/api/admin/secrets/backfill_encryption")
+    assert response.json() == {"encrypted": 1, "already_encrypted": 1, "remaining": 0}
+    assert _stored(engine, "A") == "alice/A/terc3s"
+    assert _stored(engine, "B") == "alice/B/terc3s"
+
+
+def test_backfill_honours_limit(tmp_path: pathlib.Path):
+    client, engine = _backfill_client(
+        tmp_path, cipher=_FakeCipher(), plain=["A", "B", "C"]
+    )
+    response = client.post(
+        "/api/admin/secrets/backfill_encryption", params={"limit": 2}
+    )
+    assert response.json() == {"encrypted": 2, "already_encrypted": 0, "remaining": 1}
+    assert [_stored(engine, name) for name in "ABC"].count("s3cret") == 1
+
+
+def test_backfill_limit_defaults_to_50(tmp_path: pathlib.Path):
+    names = [f"S{i}" for i in range(51)]
+    client, _ = _backfill_client(tmp_path, cipher=_FakeCipher(), plain=names)
+    response = client.post("/api/admin/secrets/backfill_encryption")
+    assert response.json() == {"encrypted": 50, "already_encrypted": 0, "remaining": 1}
+
+
+def test_backfill_second_call_is_a_no_op(tmp_path: pathlib.Path):
+    client, engine = _backfill_client(tmp_path, cipher=_FakeCipher(), plain=["A"])
+    client.post("/api/admin/secrets/backfill_encryption")
+    response = client.post("/api/admin/secrets/backfill_encryption")
+    assert response.json() == {"encrypted": 0, "already_encrypted": 1, "remaining": 0}
+    assert _stored(engine, "A") == "alice/A/terc3s"
+
+
+def test_backfill_without_cipher_is_422(tmp_path: pathlib.Path):
+    client, engine = _backfill_client(tmp_path, cipher=None, plain=["A"])
+    response = client.post("/api/admin/secrets/backfill_encryption")
+    assert response.status_code == 422
+    assert _stored(engine, "A") == "s3cret"
+
+
+def test_backfill_rejects_limit_out_of_range(tmp_path: pathlib.Path):
+    client, _ = _backfill_client(tmp_path, cipher=_FakeCipher(), plain=["A"])
+    for limit in [0, 1001]:
+        response = client.post(
+            "/api/admin/secrets/backfill_encryption", params={"limit": limit}
+        )
+        assert response.status_code == 422, limit
+
+
+def test_backfill_refuses_non_admin(tmp_path: pathlib.Path):
+    client, engine = _backfill_client(
+        tmp_path, cipher=_FakeCipher(), plain=["A"], admin=False
+    )
+    response = client.post("/api/admin/secrets/backfill_encryption")
+    assert response.status_code == 403
+    assert _stored(engine, "A") == "s3cret"

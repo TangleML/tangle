@@ -1352,6 +1352,33 @@ class SecretsApiService:
         session.commit()
         return response
 
+    def backfill_encryption(
+        self, *, session: orm.Session, limit: int
+    ) -> dict[str, int]:
+        """Encrypts up to `limit` plain-text secrets and reports how many are left."""
+        if not self._secret_value_cipher:
+            raise errors.ApiValidationError("No secret value cipher is configured.")
+        is_plaintext = sql.func.json_extract(
+            bts.Secret.extra_data, f"$.{secret_value_cipher.EXTRA_DATA_ENCRYPTION_KEY}"
+        ).is_(None)
+        batch = session.scalars(
+            sql.select(bts.Secret).where(is_plaintext).limit(limit).with_for_update()
+        ).all()
+        for secret in batch:
+            secret_value_cipher.store_secret_value(
+                secret=secret,
+                plaintext=secret.secret_value,
+                cipher=self._secret_value_cipher,
+            )
+        session.commit()
+        count = sql.select(sql.func.count()).select_from(bts.Secret)
+        already_encrypted = session.scalar(count.where(~is_plaintext)) - len(batch)
+        return {
+            "encrypted": len(batch),
+            "already_encrypted": already_encrypted,
+            "remaining": session.scalar(count.where(is_plaintext)),
+        }
+
     def delete_secret(
         self,
         *,
