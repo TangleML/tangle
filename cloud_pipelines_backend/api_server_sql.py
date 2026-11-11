@@ -13,6 +13,7 @@ from . import errors
 from .access_control import checks as access_control_checks
 from .access_control import runs as access_control_runs
 from . import filter_query_sql
+from . import secret_value_cipher
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -1256,6 +1257,13 @@ class ListSecretsResponse:
 
 
 class SecretsApiService:
+    def __init__(
+        self,
+        *,
+        secret_value_cipher: secret_value_cipher.SecretValueCipher | None = None,
+    ):
+        self._secret_value_cipher = secret_value_cipher
+
     def create_secret(
         self,
         *,
@@ -1333,6 +1341,9 @@ class SecretsApiService:
                 updated_at=current_time,
             )
             session.add(secret)
+        secret_value_cipher.store_secret_value(
+            secret=secret, plaintext=secret_value, cipher=self._secret_value_cipher
+        )
         if description:
             secret.description = description
         if expires_at:
