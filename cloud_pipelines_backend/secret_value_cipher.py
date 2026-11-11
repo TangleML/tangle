@@ -1,8 +1,12 @@
 import datetime
 import typing
-from typing import Any
+from typing import Any, Final
 
 from . import backend_types_sql as bts
+
+EXTRA_DATA_ENCRYPTION_KEY: Final[str] = "encryption"
+ENCRYPTION_TYPE_KEY: Final[str] = "type"
+ENCRYPTION_DETAILS_KEY: Final[str] = "details"
 
 
 class SecretValueCipher(typing.Protocol):
@@ -36,12 +40,12 @@ def store_secret_value(
         secret.secret_value, details = cipher.encrypt(
             plaintext=plaintext, user_id=secret.user_id, secret_name=secret.secret_name
         )
-        extra_data["encryption"] = {
-            "type": cipher.type,
+        extra_data[EXTRA_DATA_ENCRYPTION_KEY] = {
+            ENCRYPTION_TYPE_KEY: cipher.type,
             "encrypted_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "details": details,
+            ENCRYPTION_DETAILS_KEY: details,
         }
-    elif extra_data.pop("encryption", None) is None:
+    elif extra_data.pop(EXTRA_DATA_ENCRYPTION_KEY, None) is None:
         return
-    # A merge: the copy keeps every other key, so only "encryption" changes.
+    # A merge: the copy keeps every other key, so only the encryption entry changes.
     secret.extra_data = extra_data
