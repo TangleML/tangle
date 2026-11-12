@@ -143,6 +143,7 @@ container_execution_completion_lag_duration = orchestrator_meter.create_histogra
 _HISTORY_KEY = backend_types_sql.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY
 
 _RUNNING = backend_types_sql.ContainerExecutionStatus.RUNNING.value
+_PENDING = backend_types_sql.ContainerExecutionStatus.PENDING.value
 
 # The waits this counter is allowed to blame somebody for.  QUEUED is waiting to be
 # launched and PENDING is a pod that exists but is not running -- both ours to
@@ -483,6 +484,28 @@ def _count_slow_transitions_by_owner(session: orm.Session) -> None:
             )
 
 
+# Two hooks save the pending reason, because the only moment that survives __init__ is
+# too late for the metric to read, and the only moment the metric can read is too early
+# to survive __init__.
+#
+#   FIRST WRITE -- the row is created         EVERY POLL AFTER -- the row is updated
+#   ---------------------------------         -------------------------------------
+#   ContainerExecution(launcher_data=..)      execution.launcher_data = <new pod>
+#     |                                         |
+#     +- "set" stamps the reason                +- "set" stamps the reason
+#     +- __init__ sets extra_data=None          |    object is already built,
+#     |    the stamp is GONE            x       |    so nothing overwrites it   ok
+#     v                                         v
+#   flush                                     session before_commit
+#     +- before_insert stamps again     ok       +- the metric READS it         ok
+#     v                                         v
+#   the INSERT carries the reason             flush
+#                                               +- before_update would stamp
+#                                                  HERE, after the read     too late
+#
+# So neither hook can replace the other, and a single flush hook cannot do both.
+
+
 @sql_event.listens_for(backend_types_sql.ContainerExecution.launcher_data, "set")
 def _persist_pending_reason_on_extra_data(
     container_execution: "backend_types_sql.ContainerExecution",
@@ -492,7 +515,7 @@ def _persist_pending_reason_on_extra_data(
 ) -> None:
     """Save why a task is waiting onto its row, while it is still waiting.
 
-        poll, pod Pending, no containers   → extra_data = {"last_pending_reason": "waiting_for_node"}
+        poll, pod Pending, no containers    → extra_data = {"last_pending_reason": "waiting_for_node"}
         poll, pod Pending, ImagePullBackOff → extra_data = {"last_pending_reason": "image_unavailable"}
         poll, pod Running                   → left alone, the last reason stands   (a)
 
@@ -503,14 +526,53 @@ def _persist_pending_reason_on_extra_data(
     the only thing in the system that updates while the status does not. The serialised
     pod arrives as this event's own argument, so nothing is read from the database.
     """
-    # A "set" listener raises into the assignment that triggered it, which is the
-    # orchestrator storing a pod it just polled.  A label we failed to derive must
-    # cost that label, not the task: losing the write turns a running task into a
-    # SYSTEM_ERROR.
+    _stamp_pending_reason(container_execution=container_execution, launcher_data=value)
+
+
+@sql_event.listens_for(backend_types_sql.ContainerExecution, "before_insert")
+def _persist_pending_reason_on_first_write(
+    _mapper: object,
+    _connection: object,
+    container_execution: "backend_types_sql.ContainerExecution",
+) -> None:
+    """Save the reason that arrives with the row itself, before any poll has run.
+
+        ContainerExecution(launcher_data=...)  → extra_data written into the same INSERT
+
+    extra_data is declared after launcher_data, so __init__ overwrites the "set"
+    listener's stamp with its own default of None. This runs at flush instead, where no
+    declaration order can reach it, and the stamp rides the INSERT at no extra cost.
+    """
+    _stamp_pending_reason(
+        container_execution=container_execution,
+        launcher_data=container_execution.launcher_data,
+    )
+
+
+def _stamp_pending_reason(
+    *,
+    container_execution: "backend_types_sql.ContainerExecution",
+    launcher_data: dict | None,
+) -> None:
+    """Write the reason onto the row, leaving it alone when there is nothing to say.
+
+    launcher_data None, or no reason found → extra_data untouched
+    reason already the one stored          → extra_data untouched           (a)
+    a different reason                     → extra_data replaced
+
+    (a) the dict is rewritten rather than mutated, so an unchanged value would
+        still mark the attribute dirty and force an UPDATE
+
+    Both callers raise into something that must not fail for want of a label: the
+    "set" listener into the orchestrator storing a pod it just polled, and
+    "before_insert" into the flush that records a Job already running in the
+    cluster. Guarding here covers both, because neither reaches the write any
+    other way.
+    """
     try:
-        if not value:
+        if not launcher_data:
             return
-        reason = execution_annotations.pending_reason(launcher_data=value)
+        reason = execution_annotations.pending_reason(launcher_data=launcher_data)
         if reason is None:
             return
         extra_data = container_execution.extra_data or {}
@@ -623,6 +685,19 @@ def _handle_before_commit(session: orm.Session) -> None:
                 cluster = _cluster(execution=obj, launcher_data=launcher_data)
                 namespace = _namespace(execution=obj, launcher_data=launcher_data)
                 pending_reason = _pending_reason(session=session, execution=obj)
+                if (
+                    curr["status"] == _PENDING
+                    and pending_reason
+                    == execution_annotations.PendingReason.NO_POD_CREATED.value
+                ):
+                    # A Job is created with an empty pod map, so the first stamp on
+                    # every task says no_pod_created.  Arriving in PENDING is that
+                    # moment, which makes the value an artefact of the launch rather
+                    # than an admission refusal -- and this is the series that
+                    # measures queue time, so it must not read as a failure.  The
+                    # value still labels transitions out of PENDING, where no pod
+                    # ever appearing is what it is for.
+                    pending_reason = _UNSET
                 execution_status_transition_duration.record(
                     (curr_time - prev_time).total_seconds(),
                     attributes={
