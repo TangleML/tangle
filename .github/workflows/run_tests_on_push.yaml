@@ -30,7 +30,7 @@ jobs:
       matrix:
         python-version:
           - "3.11"
-          - "3.13"
+          - "3.14"
     env:
       UV_PYTHON: ${{ matrix.python-version }}
 
