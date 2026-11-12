@@ -201,20 +201,37 @@ class OrchestratorService_Sql:
 
         # Select only the ID to avoid loading large JSON columns into the sort buffer.
         query_start_timestamp = time.monotonic_ns()
-        id_query = (
-            sql.select(bts.ContainerExecution.id)
-            .where(
-                bts.ContainerExecution.status.in_(
-                    (
-                        bts.ContainerExecutionStatus.PENDING,
-                        bts.ContainerExecutionStatus.RUNNING,
+
+        # Some launchers support suggesting the next container execution to refresh.
+        # Otherwise we query the next execution to process from the DB (oldest `last_processed_at` timestamp).
+        if isinstance(
+            self._launcher, launcher_interfaces.ContainerExecutionRefreshSuggester
+        ):
+            print(
+                "XXX",
+                f"{isinstance(self._storage_provider, launcher_interfaces.ContainerExecutionRefreshSuggester)=}",
+            )
+            suggestion = self._launcher.suggest_next_container_execution_to_refresh()
+            if not suggestion:
+                return False
+            execution_id = suggestion.container_execution_id
+        else:
+            id_query = (
+                sql.select(bts.ContainerExecution.id)
+                .where(
+                    bts.ContainerExecution.status.in_(
+                        (
+                            bts.ContainerExecutionStatus.PENDING,
+                            bts.ContainerExecutionStatus.RUNNING,
+                        )
                     )
                 )
+                .order_by(bts.ContainerExecution.last_processed_at)
+                .limit(1)
             )
-            .order_by(bts.ContainerExecution.last_processed_at)
-            .limit(1)
-        )
-        execution_id = session.scalar(id_query)
+            execution_id = session.scalar(id_query)
+            suggestion = None
+
         running_container_execution = (
             session.get(bts.ContainerExecution, execution_id) if execution_id else None
         )
@@ -225,6 +242,19 @@ class OrchestratorService_Sql:
                     f"No running container executions found. (Query duration: {query_duration_ms}ms.)"
                 )
                 self._running_executions_queue_idle = True
+            return False
+        if not running_container_execution.status in (
+            (
+                bts.ContainerExecutionStatus.PENDING,
+                bts.ContainerExecutionStatus.RUNNING,
+            )
+        ):
+            _logger.error(
+                f"The selected running container execution {execution_id} has unexpected status: {running_container_execution.status}. The execution suggester must have had a bug."
+            )
+            # Stop suggesting this execution
+            if suggestion and suggestion.mark_as_handled:
+                suggestion.mark_as_handled()
             return False
 
         self._running_executions_queue_idle = False
@@ -339,6 +369,9 @@ class OrchestratorService_Sql:
                     queries_duration_ms=queries_duration_ms,
                     processing_duration_ms=duration_ms,
                 )
+                # If the execution came from a suggester, then mark is as handled.
+                if suggestion and suggestion.mark_as_handled:
+                    suggestion.mark_as_handled()
         return True
 
     def internal_process_one_queued_execution(
