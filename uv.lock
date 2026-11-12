@@ -1510,11 +1510,11 @@ wheels = [
 
 [[package]]
 name = "kubernetes-stubs-elephant-fork"
-version = "36.0.3.post1"
+version = "37.0.1.post1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/66/43/59c28f1f8dbf8887dbc7752db86f8ff095576bcf5efae55e62c7bb2f6e0f/kubernetes_stubs_elephant_fork-36.0.3.post1.tar.gz", hash = "sha256:f3d7d372ac843d106eb99f219d8c04d1cdb18fffff275eb9751e552bf76e2a48", size = 162487, upload-time = "2026-07-20T09:56:28.603Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/c5/c167e512d2c9b0d115473d959a405b56bffd93f1382741973718d6517917/kubernetes_stubs_elephant_fork-37.0.1.post1.tar.gz", hash = "sha256:5a351f74de8cd5f8cbd4bab7c37019451cb64bcf3b960e38c1ea98813268cd97", size = 176219, upload-time = "2026-10-15T10:27:21.557Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0f/c0/a001a4e07d82dc1d9559dde6e4c0bf541d66d494190490b554f436ef3dda/kubernetes_stubs_elephant_fork-36.0.3.post1-py2.py3-none-any.whl", hash = "sha256:92e1745957faa9c1d01b2d399618410a8d029c85437060b70300efd48d3b1846", size = 488809, upload-time = "2026-07-20T09:56:27.34Z" },
+    { url = "https://files.pythonhosted.org/packages/99/87/734857d10e3f6451b3e81de8256e8f5761af8906d68b9a780a3a04df8922/kubernetes_stubs_elephant_fork-37.0.1.post1-py2.py3-none-any.whl", hash = "sha256:2589fc9453c16bf6ba95eb8a4ce395e937d93c96165088ab8f58832b2ec48803", size = 533298, upload-time = "2026-10-15T10:27:20.399Z" },
 ]
 
 [[package]]
