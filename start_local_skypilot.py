@@ -207,6 +207,10 @@ def run_configured_orchestrator():
 from cloud_pipelines_backend.instrumentation import api_tracing
 from cloud_pipelines_backend.instrumentation import contextual_logging
 
+# Importing the project routes registers the project tables, so this has to come before the
+# database tables are created at startup.
+from cloud_pipelines_backend.projects import api_routes as project_api_routes
+
 
 @contextlib.asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
@@ -245,6 +249,18 @@ api_router.setup_routes(
     user_details_getter=get_user_details,
     container_launcher_for_log_streaming=launcher,
     default_component_library_owner_username=default_component_library_owner_username,
+)
+
+
+def get_session():
+    with orm.Session(autocommit=False, autoflush=False, bind=db_engine) as session:
+        yield session
+
+
+project_api_routes.setup_project_routes(
+    app=app,
+    get_session=get_session,
+    user_details_getter=get_user_details,
 )
 
 
