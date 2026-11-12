@@ -596,5 +596,46 @@ class TestGetContainerExecutionState:
             assert not session.dirty
 
 
+class TestGetContainerExecutionLog:
+    """Tests for ExecutionNodesApiService_Sql.get_container_execution_log."""
+
+    def setup_method(self):
+        self.session_factory = _initialize_db_and_get_session_factory()
+        self.service = ExecutionNodesApiService_Sql()
+
+    def test_rejected_launch_serves_its_error_message(self):
+        message = 'admission webhook "validate.example" denied the request: no'
+        with self.session_factory() as session:
+            node = _make_execution_node(
+                task_spec=_make_task_spec_dict(),
+                container_execution_status=bts.ContainerExecutionStatus.FAILED,
+            )
+            node.extra_data = {
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY: message
+            }
+            session.add(node)
+            session.flush()
+
+            result = self.service.get_container_execution_log(
+                session=session, id=node.id
+            )
+
+        assert result.log_text is None
+        assert result.orchestration_error_message == message
+        assert result.system_error_exception_full == message
+
+    def test_pending_without_container_row_still_raises_not_ready(self):
+        with self.session_factory() as session:
+            node = _make_execution_node(
+                task_spec=_make_task_spec_dict(),
+                container_execution_status=bts.ContainerExecutionStatus.PENDING,
+            )
+            session.add(node)
+            session.flush()
+
+            with pytest.raises(errors.ContainerExecutionNotReadyError):
+                self.service.get_container_execution_log(session=session, id=node.id)
+
+
 if __name__ == "__main__":
     pytest.main()

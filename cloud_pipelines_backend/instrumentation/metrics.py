@@ -55,6 +55,15 @@ execution_system_errors = orchestrator_meter.create_counter(
     unit=MetricUnit.ERRORS,
 )
 
+execution_launch_rejections = orchestrator_meter.create_counter(
+    name="execution.launch_rejections",
+    description=(
+        "Number of execution nodes that ended in FAILED status because their"
+        " launch was rejected (e.g. an admission webhook denied the workload)"
+    ),
+    unit=MetricUnit.ERRORS,
+)
+
 container_execution_missing_workloads = orchestrator_meter.create_counter(
     name="container_execution.missing_workloads",
     description=(

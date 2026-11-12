@@ -1,10 +1,16 @@
 """Tests for translating Kubernetes API errors into launcher errors."""
 
+import json
+import logging
+from types import SimpleNamespace
 from unittest import mock
 
 import kubernetes.client.exceptions
 import pytest
+from kubernetes import client as k8s_client_lib
 
+from cloud_pipelines_backend import component_structures as structures
+from cloud_pipelines_backend.launchers import common_annotations
 from cloud_pipelines_backend.launchers import interfaces
 from cloud_pipelines_backend.launchers import kubernetes_launchers
 
@@ -165,3 +171,201 @@ class TestGetLogByPodKey:
         ):
             with pytest.raises(kubernetes.client.exceptions.ApiException):
                 job._get_log_by_pod_key("pod-0")
+
+
+def _api_exception_with_body(
+    status: int, body: str
+) -> kubernetes.client.exceptions.ApiException:
+    response = _FakeResponse(body.encode())
+    response.status = status
+    return kubernetes.client.exceptions.ApiException(http_resp=response)
+
+
+def _status_body(*, message: str, code: int) -> str:
+    return json.dumps(
+        {
+            "kind": "Status",
+            "apiVersion": "v1",
+            "metadata": {},
+            "status": "Failure",
+            "message": message,
+            "code": code,
+        }
+    )
+
+
+_KYVERNO_DENIAL_MESSAGE = (
+    'admission webhook "validate.kyverno.svc-fail" denied the request: \n\n'
+    "resource Job/tangle-jobs/tangle-ce-execution-1 was blocked due to the "
+    "following policies \n\nrequire-labels:\n  check-team: label 'team' is required\n"
+)
+_GATEKEEPER_DENIAL_MESSAGE = (
+    'admission webhook "validation.gatekeeper.sh" denied the request: '
+    "[require-limits] container <main> has no resource limits"
+)
+_RBAC_FORBIDDEN_MESSAGE = (
+    'jobs.batch is forbidden: User "system:serviceaccount:tangle:orchestrator" '
+    'cannot create resource "jobs" in API group "batch" in the namespace "other"'
+)
+_UNREACHABLE_WEBHOOK_MESSAGE = (
+    'Internal error occurred: failed calling webhook "validate.kyverno.svc-fail": '
+    'failed to call webhook: Post "https://kyverno-svc.kyverno.svc:443/validate/fail'
+    '?timeout=10s": context deadline exceeded'
+)
+
+
+def _denial() -> kubernetes.client.exceptions.ApiException:
+    return _api_exception_with_body(
+        400, _status_body(message=_KYVERNO_DENIAL_MESSAGE, code=400)
+    )
+
+
+class TestAdmissionDenialMessage:
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [(400, _KYVERNO_DENIAL_MESSAGE), (403, _GATEKEEPER_DENIAL_MESSAGE)],
+    )
+    def test_webhook_denial_returns_its_message(
+        self, status: int, message: str
+    ) -> None:
+        exception = _api_exception_with_body(
+            status, _status_body(message=message, code=status)
+        )
+        assert kubernetes_launchers._admission_denial_message(exception) == message
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            _api_exception_with_body(
+                403, _status_body(message=_RBAC_FORBIDDEN_MESSAGE, code=403)
+            ),
+            _api_exception_with_body(
+                500, _status_body(message=_UNREACHABLE_WEBHOOK_MESSAGE, code=500)
+            ),
+            _api_exception_with_body(
+                500, _status_body(message=_KYVERNO_DENIAL_MESSAGE, code=500)
+            ),
+            _api_exception_with_body(400, _KYVERNO_DENIAL_MESSAGE),
+            TimeoutError("timed out"),
+        ],
+        ids=[
+            "rbac-forbidden",
+            "unreachable-webhook",
+            "denial-text-under-500",
+            "body-not-json",
+            "no-response",
+        ],
+    )
+    def test_other_errors_are_not_denials(self, exception: Exception) -> None:
+        assert kubernetes_launchers._admission_denial_message(exception) is None
+
+
+def _launcher(launcher_class, monkeypatch, *, create_error: Exception):
+    def create(namespace, body, _request_timeout):
+        raise create_error
+
+    monkeypatch.setattr(
+        kubernetes_launchers.k8s_client_lib,
+        "BatchV1Api",
+        lambda api_client: SimpleNamespace(create_namespaced_job=create),
+    )
+    monkeypatch.setattr(
+        kubernetes_launchers.k8s_client_lib,
+        "CoreV1Api",
+        lambda api_client: SimpleNamespace(create_namespaced_pod=create),
+    )
+    launcher = object.__new__(launcher_class)
+    launcher._api_client = None
+    launcher._request_timeout = (3, 30)
+    launcher._namespace = "tangle-jobs"
+    launcher._service_account_name = "tangle"
+    launcher._pod_name_prefix = "task-"
+    launcher._pod_labels = {}
+    launcher._pod_annotations = {}
+    launcher._pod_postprocessor = None
+    launcher._prepare_kubernetes_pod = lambda **kwargs: k8s_client_lib.V1Pod(
+        metadata=k8s_client_lib.V1ObjectMeta(namespace=kwargs["pod_namespace"]),
+        spec=k8s_client_lib.V1PodSpec(
+            containers=[
+                k8s_client_lib.V1Container(
+                    name="main", command=["run", "--token=secret-value"]
+                )
+            ],
+            node_selector={"pool": "spot"},
+        ),
+    )
+    return launcher
+
+
+def _launch(launcher) -> None:
+    launcher.launch_container_task(
+        component_spec=structures.ComponentSpec(
+            implementation=structures.ContainerImplementation(
+                container=structures.ContainerSpec(image="python:3.12")
+            )
+        ),
+        input_arguments={},
+        output_uris={},
+        log_uri="memory://log",
+        annotations={
+            common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY: "execution-1"
+        },
+    )
+
+
+_LAUNCHER_CLASSES = [
+    kubernetes_launchers._KubernetesJobLauncher,
+    kubernetes_launchers._KubernetesPodLauncher,
+]
+
+
+@pytest.mark.parametrize("launcher_class", _LAUNCHER_CLASSES)
+class TestCreateRequestDenied:
+    def test_denial_is_a_launch_rejection(self, monkeypatch, launcher_class) -> None:
+        launcher = _launcher(launcher_class, monkeypatch, create_error=_denial())
+
+        with pytest.raises(interfaces.LaunchRejectedError) as exc_info:
+            _launch(launcher)
+
+        assert str(exc_info.value) == _KYVERNO_DENIAL_MESSAGE
+        assert exc_info.value.reason == "admission_denied"
+        assert not exc_info.value.is_retriable
+
+    def test_denied_spec_is_logged_without_its_command_line(
+        self, monkeypatch, caplog, launcher_class
+    ) -> None:
+        launcher = _launcher(launcher_class, monkeypatch, create_error=_denial())
+
+        with (
+            caplog.at_level(logging.WARNING, logger=kubernetes_launchers.__name__),
+            pytest.raises(interfaces.LaunchRejectedError),
+        ):
+            _launch(launcher)
+
+        [logged] = [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Admission webhook denied")
+        ]
+        assert '"pool": "spot"' in logged
+        assert "secret-value" not in logged
+
+    @pytest.mark.parametrize(
+        "create_error",
+        [
+            _api_exception_with_body(
+                403, _status_body(message=_RBAC_FORBIDDEN_MESSAGE, code=403)
+            ),
+            TimeoutError("timed out"),
+        ],
+        ids=["rbac-forbidden", "timeout"],
+    )
+    def test_other_failures_stay_launcher_errors(
+        self, monkeypatch, launcher_class, create_error: Exception
+    ) -> None:
+        launcher = _launcher(launcher_class, monkeypatch, create_error=create_error)
+
+        with pytest.raises(interfaces.LauncherError) as exc_info:
+            _launch(launcher)
+
+        assert not isinstance(exc_info.value, interfaces.LaunchRejectedError)
