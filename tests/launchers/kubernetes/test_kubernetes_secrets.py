@@ -147,6 +147,7 @@ def _launch(
         pod=pod,
         secret_name_to_secret_value=values,
         secret_env_name_to_secret_name=env_names,
+        secret_env_vars_consumed_as_value=set(env_names),
         annotations=annotations,
     )
     return pod
@@ -244,6 +245,7 @@ def test_secret_carries_the_plain_value_in_string_data() -> None:
         pod=_make_pod(args=[]),
         secret_name_to_secret_value={"hf-token": _SECRET_VALUE},
         secret_env_name_to_secret_name={"__TANGLE_SECRET_TOKEN": "hf-token"},
+        secret_env_vars_consumed_as_value=set(),
     )
 
     assert secret.string_data == {"__TANGLE_SECRET_TOKEN": _SECRET_VALUE}
@@ -260,6 +262,7 @@ def test_environment_entry_goes_to_the_main_container_not_the_first() -> None:
         pod=pod,
         secret_name_to_secret_value={"hf-token": _SECRET_VALUE},
         secret_env_name_to_secret_name={"__TANGLE_SECRET_TOKEN": "hf-token"},
+        secret_env_vars_consumed_as_value={"__TANGLE_SECRET_TOKEN"},
         annotations=None,
     )
 
@@ -268,18 +271,47 @@ def test_environment_entry_goes_to_the_main_container_not_the_first() -> None:
     assert [env.name for env in main.env] == ["__TANGLE_SECRET_TOKEN"]
 
 
-@pytest.mark.usefixtures("secrets_api")
-def test_placeholder_in_the_command_gets_its_environment_entry() -> None:
-    pod = _make_pod(args=[])
-    pod.spec.containers[0].command = ["$(__TANGLE_SECRET_TOKEN)"]
-
-    _make_launcher()._handle_secrets_after_preparing_pod(
-        pod=pod,
-        secret_name_to_secret_value={"hf-token": _SECRET_VALUE},
-        secret_env_name_to_secret_name={"__TANGLE_SECRET_TOKEN": "hf-token"},
+def test_plain_input_holding_the_placeholder_text_gets_no_environment_entry(
+    secrets_api: _SecretsApi, tmp_path: pathlib.Path
+) -> None:
+    # The secret is consumed as a file; another input happens to hold its placeholder text.
+    note = interfaces.InputArgument(
+        total_size=len("$(__TANGLE_SECRET_TOKEN)"),
+        is_dir=False,
+        value="$(__TANGLE_SECRET_TOKEN)",
+        staging_uri="gs://bucket/note",
+    )
+    launcher = kubernetes_launchers.KubernetesWithHostPathContainerLauncher(
+        api_client=k8s_client_lib.ApiClient()
     )
 
-    assert [env.name for env in pod.spec.containers[0].env] == ["__TANGLE_SECRET_TOKEN"]
+    launcher.launch_container_task(
+        component_spec=structures.ComponentSpec(
+            name="test",
+            inputs=[
+                structures.InputSpec(name="token"),
+                structures.InputSpec(name="note"),
+            ],
+            implementation=structures.ContainerImplementation(
+                container=structures.ContainerSpec(
+                    image="alpine",
+                    args=[
+                        structures.InputPathPlaceholder(input_name="token"),
+                        structures.InputValuePlaceholder(input_name="note"),
+                    ],
+                )
+            ),
+        ),
+        input_arguments={"token": _make_secret_argument(), "note": note},
+        output_uris={},
+        log_uri=str(tmp_path / "log.txt"),
+        annotations=_EXECUTION_123,
+    )
+
+    [pod] = secrets_api.created_pods
+    [main] = pod.spec.containers
+    assert main.args == ["/tmp/inputs/token/data", "$(__TANGLE_SECRET_TOKEN)"]
+    assert "__TANGLE_SECRET_TOKEN" not in [env.name for env in main.env or []]
 
 
 _JOB_LAUNCHER: Final = (
@@ -423,6 +455,7 @@ def test_secret_is_keyed_by_the_env_var_name_so_any_secret_name_works() -> None:
         pod=pod,
         secret_name_to_secret_value=values,
         secret_env_name_to_secret_name=env_names,
+        secret_env_vars_consumed_as_value=set(env_names),
     )
 
     assert secret.string_data == {"__TANGLE_SECRET_TOKEN": _SECRET_VALUE}

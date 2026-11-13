@@ -296,6 +296,7 @@ class _KubernetesContainerLauncherBase:
         pod: k8s_client_lib.V1Pod,
         secret_name_to_secret_value: dict[str, str],
         secret_env_name_to_secret_name: dict[str, str],
+        secret_env_vars_consumed_as_value: set[str],
         annotations: dict[str, Any] | None = None,
     ) -> k8s_client_lib.V1Secret | None:
         if not secret_name_to_secret_value or not secret_env_name_to_secret_name:
@@ -318,10 +319,9 @@ class _KubernetesContainerLauncherBase:
             for container in pod.spec.containers
             if container.name == _MAIN_CONTAINER_NAME
         )
-        command_line = (main_container.command or []) + (main_container.args or [])
         for env_var_name in secret_env_name_to_secret_name:
             # An input consumed as a file reads the Secret volume, not the environment.
-            if not any(f"$({env_var_name})" in part for part in command_line):
+            if env_var_name not in secret_env_vars_consumed_as_value:
                 continue
             main_container.env = main_container.env or []
             main_container.env.append(
@@ -385,6 +385,8 @@ class _KubernetesContainerLauncherBase:
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_service_account: str | None = None,
+        # Filled with the env var names of the secret inputs consumed as values.
+        secret_env_vars_consumed_as_value: set[str],
     ) -> k8s_client_lib.V1Pod:
         if not isinstance(
             component_spec.implementation, structures.ContainerImplementation
@@ -406,6 +408,16 @@ class _KubernetesContainerLauncherBase:
         # They also upload/download artifact data when needed.
         def get_input_value(input_name: str) -> str:
             input_argument = input_arguments[input_name]
+            if (
+                input_argument.dynamic_data
+                and container_component_utils.parse_dynamic_data_argument(
+                    input_argument.dynamic_data
+                )[0]
+                == _DYNAMIC_DATA_SECRET_KEY
+            ):
+                secret_env_vars_consumed_as_value.add(
+                    _secret_env_var_name(input_name=input_name)
+                )
             if input_argument.is_dir:
                 raise interfaces.LauncherError(
                     f"Cannot consume directory as value. {input_name=}, {input_argument=}"
@@ -754,6 +766,7 @@ class _KubernetesPodLauncher(
                 )
             input_argument.value = dynamic_data_value
 
+        secret_env_vars_consumed_as_value: set[str] = set()
         pod = self._prepare_kubernetes_pod(
             component_spec=component_spec,
             input_arguments=input_arguments,
@@ -765,6 +778,7 @@ class _KubernetesPodLauncher(
             pod_labels=self._pod_labels,
             pod_annotations=self._pod_annotations,
             pod_service_account=self._service_account_name,
+            secret_env_vars_consumed_as_value=secret_env_vars_consumed_as_value,
         )
 
         # Applying the pod post-processor
@@ -775,6 +789,7 @@ class _KubernetesPodLauncher(
             pod=pod,
             secret_name_to_secret_value=secret_name_to_secret_value,
             secret_env_name_to_secret_name=secret_env_name_to_secret_name,
+            secret_env_vars_consumed_as_value=secret_env_vars_consumed_as_value,
             annotations=annotations,
         )
 
@@ -1442,6 +1457,7 @@ class _KubernetesJobLauncher(
                 )
             input_argument.value = dynamic_data_value
 
+        secret_env_vars_consumed_as_value: set[str] = set()
         pod = self._prepare_kubernetes_pod(
             component_spec=component_spec,
             input_arguments=input_arguments,
@@ -1453,6 +1469,7 @@ class _KubernetesJobLauncher(
             pod_labels=self._pod_labels,
             pod_annotations=self._pod_annotations,
             pod_service_account=self._service_account_name,
+            secret_env_vars_consumed_as_value=secret_env_vars_consumed_as_value,
         )
 
         # Applying the pod post-processor
@@ -1470,6 +1487,7 @@ class _KubernetesJobLauncher(
             pod=pod,
             secret_name_to_secret_value=secret_name_to_secret_value,
             secret_env_name_to_secret_name=secret_env_name_to_secret_name,
+            secret_env_vars_consumed_as_value=secret_env_vars_consumed_as_value,
             annotations=annotations,
         )
 
