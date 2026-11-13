@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import pathlib
 from typing import Final
 
 import pytest
 from kubernetes import client as k8s_client_lib
 
+from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend.launchers import (
     common_annotations,
     interfaces,
@@ -40,11 +42,44 @@ class _SecretsApi:
         del namespace
         self.patched.append((name, body))
 
+    def create_namespaced_service(
+        self, *, namespace: str, body: k8s_client_lib.V1Service, _request_timeout: int
+    ) -> k8s_client_lib.V1Service:
+        return body
+
+
+class _JobsApi:
+    """Stands in for the Kubernetes batch API and records the Jobs the launcher creates."""
+
+    def __init__(self) -> None:
+        self.created: list[k8s_client_lib.V1Job] = []
+
+    def create_namespaced_job(
+        self, *, namespace: str, body: k8s_client_lib.V1Job, _request_timeout: int
+    ) -> k8s_client_lib.V1Job:
+        body.metadata.namespace = namespace
+        body.metadata.uid = "job-uid"
+        self.created.append(body)
+        return body
+
 
 @pytest.fixture
 def secrets_api(monkeypatch: pytest.MonkeyPatch) -> _SecretsApi:
     api = _SecretsApi()
-    monkeypatch.setattr(k8s_client_lib, "CoreV1Api", lambda *, api_client: api)
+    monkeypatch.setattr(k8s_client_lib, "CoreV1Api", lambda api_client: api)
+    return api
+
+
+@pytest.fixture
+def jobs_api(monkeypatch: pytest.MonkeyPatch) -> _JobsApi:
+    api = _JobsApi()
+    monkeypatch.setattr(k8s_client_lib, "BatchV1Api", lambda api_client: api)
+    monkeypatch.setattr(k8s_client_lib.VersionApi, "get_code", lambda self, **_: None)
+
+    def _no_informer(**kwargs: object) -> None:
+        raise RuntimeError("Informers are disabled in tests.")
+
+    monkeypatch.setattr(kubernetes_launchers, "MultiNamespaceInformer", _no_informer)
     return api
 
 
@@ -237,3 +272,55 @@ def test_environment_entry_goes_to_the_main_container_not_the_first() -> None:
     [_, main] = pod.spec.containers
     assert sidecar.env is None
     assert [env.name for env in main.env] == ["__TANGLE_SECRET_TOKEN"]
+
+
+def _launch_job(*, annotations: dict[str, str], log_uri: str) -> None:
+    """Launches a Job whose only argument is the secret input."""
+    launcher = kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
+        api_client=k8s_client_lib.ApiClient()
+    )
+    launcher.launch_container_task(
+        component_spec=structures.ComponentSpec(
+            name="test",
+            inputs=[structures.InputSpec(name="token")],
+            implementation=structures.ContainerImplementation(
+                container=structures.ContainerSpec(
+                    image="alpine",
+                    args=[structures.InputValuePlaceholder(input_name="token")],
+                )
+            ),
+        ),
+        input_arguments={"token": _make_secret_argument()},
+        output_uris={},
+        log_uri=log_uri,
+        annotations={
+            common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY: "123",
+            **annotations,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "annotations",
+    [
+        pytest.param({}, id="single node"),
+        pytest.param(
+            {kubernetes_launchers.MULTI_NODE_NUMBER_OF_NODES_ANNOTATION_KEY: "2"},
+            id="two nodes",
+        ),
+    ],
+)
+def test_job_container_reads_the_value_from_the_secret(
+    annotations: dict[str, str],
+    secrets_api: _SecretsApi,
+    jobs_api: _JobsApi,
+    tmp_path: pathlib.Path,
+) -> None:
+    _launch_job(annotations=annotations, log_uri=str(tmp_path / "log.txt"))
+
+    [job] = jobs_api.created
+    [main] = job.spec.template.spec.containers
+    assert "__TANGLE_SECRET_TOKEN" in [env.name for env in main.env]
+    assert main.args == ["$(__TANGLE_SECRET_TOKEN)"]
+    [(_, secret)] = secrets_api.created
+    assert secret.string_data == {"hf-token": _SECRET_VALUE}
