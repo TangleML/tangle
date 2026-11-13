@@ -208,7 +208,7 @@ def test_container_reads_the_value_from_the_secret() -> None:
             name="__TANGLE_SECRET_TOKEN",
             value_from=k8s_client_lib.V1EnvVarSource(
                 secret_key_ref=k8s_client_lib.V1SecretKeySelector(
-                    name="tangle-ce-123", key="hf-token"
+                    name="tangle-ce-123", key="__TANGLE_SECRET_TOKEN"
                 )
             ),
         )
@@ -244,7 +244,7 @@ def test_secret_carries_the_plain_value_in_string_data() -> None:
         secret_env_name_to_secret_name={"__TANGLE_SECRET_TOKEN": "hf-token"},
     )
 
-    assert secret.string_data == {"hf-token": _SECRET_VALUE}
+    assert secret.string_data == {"__TANGLE_SECRET_TOKEN": _SECRET_VALUE}
     assert secret.data is None
 
 
@@ -346,7 +346,7 @@ def test_job_container_reads_the_value_from_the_secret(
     assert "__TANGLE_SECRET_TOKEN" in [env.name for env in main.env]
     assert main.args == ["$(__TANGLE_SECRET_TOKEN)"]
     [(_, secret)] = secrets_api.created
-    assert secret.string_data == {"hf-token": _SECRET_VALUE}
+    assert secret.string_data == {"__TANGLE_SECRET_TOKEN": _SECRET_VALUE}
 
 
 @_POD_OR_JOB
@@ -387,3 +387,24 @@ def test_failed_secret_deletes_its_pod_or_job(
         )
 
     assert secrets_api.deleted_pods + jobs_api.deleted == [pod_or_job.name]
+
+
+def test_secret_is_keyed_by_the_env_var_name_so_any_secret_name_works() -> None:
+    # Kubernetes refuses "hf token" as a Secret key; the input-derived name is always valid.
+    argument = _make_secret_argument()
+    argument.dynamic_data = {"secret": {"name": "hf token"}}
+    launcher = _make_launcher()
+    values, env_names = launcher._handle_secrets_before_preparing_pod(
+        input_arguments={"token": argument}
+    )
+    pod = _make_pod(args=[argument.value])
+
+    secret = launcher._handle_secrets_after_preparing_pod(
+        pod=pod,
+        secret_name_to_secret_value=values,
+        secret_env_name_to_secret_name=env_names,
+    )
+
+    assert secret.string_data == {"__TANGLE_SECRET_TOKEN": _SECRET_VALUE}
+    [env] = pod.spec.containers[0].env
+    assert env.value_from.secret_key_ref.key == "__TANGLE_SECRET_TOKEN"

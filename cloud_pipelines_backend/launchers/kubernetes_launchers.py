@@ -304,13 +304,19 @@ class _KubernetesContainerLauncherBase:
             common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
         ) or uuid.uuid4().hex[:8]
         kubernetes_secret_name = "tangle-ce-" + container_execution_id
+        # Keyed by env var name, unique within this execution's Secret: Kubernetes
+        # refuses keys outside [-._a-zA-Z0-9], which secret names may use.
+        secret_data = {
+            env_var_name: secret_name_to_secret_value[secret_name]
+            for env_var_name, secret_name in secret_env_name_to_secret_name.items()
+        }
 
         main_container = next(
             container
             for container in pod.spec.containers
             if container.name == _MAIN_CONTAINER_NAME
         )
-        for env_var_name, secret_name in secret_env_name_to_secret_name.items():
+        for env_var_name in secret_env_name_to_secret_name:
             main_container.env = main_container.env or []
             main_container.env.append(
                 k8s_client_lib.V1EnvVar(
@@ -318,14 +324,14 @@ class _KubernetesContainerLauncherBase:
                     value_from=k8s_client_lib.V1EnvVarSource(
                         secret_key_ref=k8s_client_lib.V1SecretKeySelector(
                             name=kubernetes_secret_name,
-                            key=secret_name,
+                            key=env_var_name,
                         )
                     ),
                 )
             )
         return k8s_client_lib.V1Secret(
             metadata=k8s_client_lib.V1ObjectMeta(name=kubernetes_secret_name),
-            string_data=secret_name_to_secret_value,
+            string_data=secret_data,
         )
 
     def _create_secret_or_delete_pod_or_job(
