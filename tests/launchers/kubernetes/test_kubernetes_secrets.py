@@ -26,6 +26,7 @@ class _SecretsApi:
 
     def __init__(self) -> None:
         self.created: list[tuple[str, k8s_client_lib.V1Secret]] = []
+        self.created_pods: list[k8s_client_lib.V1Pod] = []
         self.deleted_pods: list[str] = []
         self.fail_secrets = False
 
@@ -44,6 +45,7 @@ class _SecretsApi:
         body.metadata.name = "task-pod"
         body.metadata.namespace = namespace
         body.metadata.uid = "pod-uid"
+        self.created_pods.append(body)
         return body
 
     def delete_namespaced_pod(
@@ -251,7 +253,7 @@ def test_secret_carries_the_plain_value_in_string_data() -> None:
 @pytest.mark.usefixtures("secrets_api")
 def test_environment_entry_goes_to_the_main_container_not_the_first() -> None:
     sidecar = k8s_client_lib.V1Container(name="sidecar")
-    pod = _make_pod(args=[])
+    pod = _make_pod(args=["$(__TANGLE_SECRET_TOKEN)"])
     pod.spec.containers.insert(0, sidecar)
 
     _make_launcher()._handle_secrets_after_preparing_pod(
@@ -264,6 +266,20 @@ def test_environment_entry_goes_to_the_main_container_not_the_first() -> None:
     [_, main] = pod.spec.containers
     assert sidecar.env is None
     assert [env.name for env in main.env] == ["__TANGLE_SECRET_TOKEN"]
+
+
+@pytest.mark.usefixtures("secrets_api")
+def test_placeholder_in_the_command_gets_its_environment_entry() -> None:
+    pod = _make_pod(args=[])
+    pod.spec.containers[0].command = ["$(__TANGLE_SECRET_TOKEN)"]
+
+    _make_launcher()._handle_secrets_after_preparing_pod(
+        pod=pod,
+        secret_name_to_secret_value={"hf-token": _SECRET_VALUE},
+        secret_env_name_to_secret_name={"__TANGLE_SECRET_TOKEN": "hf-token"},
+    )
+
+    assert [env.name for env in pod.spec.containers[0].env] == ["__TANGLE_SECRET_TOKEN"]
 
 
 _JOB_LAUNCHER: Final = (
@@ -295,8 +311,12 @@ def _launch_task(
     launcher_class: type[kubernetes_launchers._KubernetesContainerLauncherBase],
     annotations: dict[str, str],
     log_uri: str,
+    as_file: bool = False,
 ) -> None:
-    """Launches a task whose only argument is the secret input."""
+    """Launches a task whose only argument is the secret input, as a value or as a file."""
+    placeholder = (
+        structures.InputPathPlaceholder if as_file else structures.InputValuePlaceholder
+    )
     launcher = launcher_class(api_client=k8s_client_lib.ApiClient())
     launcher.launch_container_task(
         component_spec=structures.ComponentSpec(
@@ -305,7 +325,7 @@ def _launch_task(
             implementation=structures.ContainerImplementation(
                 container=structures.ContainerSpec(
                     image="alpine",
-                    args=[structures.InputValuePlaceholder(input_name="token")],
+                    args=[placeholder(input_name="token")],
                 )
             ),
         ),
@@ -408,3 +428,39 @@ def test_secret_is_keyed_by_the_env_var_name_so_any_secret_name_works() -> None:
     assert secret.string_data == {"__TANGLE_SECRET_TOKEN": _SECRET_VALUE}
     [env] = pod.spec.containers[0].env
     assert env.value_from.secret_key_ref.key == "__TANGLE_SECRET_TOKEN"
+
+
+@_POD_OR_JOB
+def test_file_input_reads_the_secret_volume(
+    launcher_class: type[kubernetes_launchers._KubernetesContainerLauncherBase],
+    pod_or_job: k8s_client_lib.V1OwnerReference,
+    secrets_api: _SecretsApi,
+    jobs_api: _JobsApi,
+    tmp_path: pathlib.Path,
+) -> None:
+    _launch_task(
+        launcher_class=launcher_class,
+        annotations={},
+        log_uri=str(tmp_path / "log.txt"),
+        as_file=True,
+    )
+
+    [pod_spec] = [pod.spec for pod in secrets_api.created_pods] + [
+        job.spec.template.spec for job in jobs_api.created
+    ]
+    [main] = pod_spec.containers
+    assert main.args == ["/tmp/inputs/token/data"]
+    assert "__TANGLE_SECRET_TOKEN" not in [env.name for env in main.env or []]
+    [volume] = [volume for volume in pod_spec.volumes if volume.secret]
+    assert volume.secret == k8s_client_lib.V1SecretVolumeSource(
+        secret_name="tangle-ce-123",
+        items=[k8s_client_lib.V1KeyToPath(key="__TANGLE_SECRET_TOKEN", path="data")],
+    )
+    assert (
+        k8s_client_lib.V1VolumeMount(
+            name=volume.name, mount_path="/tmp/inputs/token", read_only=True
+        )
+        in main.volume_mounts
+    )
+    [(_, secret)] = secrets_api.created
+    assert secret.string_data == {"__TANGLE_SECRET_TOKEN": _SECRET_VALUE}
