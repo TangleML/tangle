@@ -173,7 +173,7 @@ class PodPostProcessor(typing.Protocol):
 
 
 class NamespaceChooser(typing.Protocol):
-    def __call__(self, *, annotations: dict[str, str] | None = None) -> str | None: ...
+    def __call__(self, *, annotations: dict[str, str] | None = None) -> str: ...
 
 
 class _KubernetesContainerLauncherBase:
@@ -183,14 +183,13 @@ class _KubernetesContainerLauncherBase:
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -208,7 +207,6 @@ class _KubernetesContainerLauncherBase:
             pod_annotations or {}
         )
         self._pod_postprocessor = pod_postprocessor
-        self._namespace_chooser = namespace_chooser
         self._create_volume_and_volume_mount = _create_volume_and_volume_mount
 
         try:
@@ -233,7 +231,8 @@ class _KubernetesContainerLauncherBase:
                 # The SharedInformer class can only either watch all namespaces or a single namespace.
                 # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
                 list_func=core_api_client.list_namespaced_pod,
-                initial_namespaces=[namespace],
+                # A chooser's namespaces are watched as launches reach them.
+                initial_namespaces=[namespace] if isinstance(namespace, str) else [],
                 # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
                 # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
                 # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
@@ -517,9 +516,9 @@ class _KubernetesContainerLauncherBase:
 
         Override this method to choose namespace dynamically.
         """
-        if self._namespace_chooser:
-            return self._namespace_chooser(annotations=annotations) or self._namespace
-        return self._namespace
+        if isinstance(self._namespace, str):
+            return self._namespace
+        return self._namespace(annotations=annotations)
 
 
 class _KubernetesPodLauncher(
@@ -532,14 +531,13 @@ class _KubernetesPodLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -555,7 +553,6 @@ class _KubernetesPodLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
-            namespace_chooser=namespace_chooser,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
@@ -740,14 +737,13 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
     ):
         super().__init__(
             namespace=namespace,
@@ -759,7 +755,6 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
-            namespace_chooser=namespace_chooser,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
 
@@ -771,7 +766,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -779,7 +774,6 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
     ):
         pod_postprocessors = [_google_kubernetes_engine_accelerator_pod_postprocessor]
         if pod_postprocessor:
@@ -800,7 +794,6 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
             pod_labels=pod_labels,
             pod_annotations={"gke-gcsfuse/volumes": "true"} | (pod_annotations or {}),
             pod_postprocessor=final_pod_postporocessor,
-            namespace_chooser=namespace_chooser,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_google_cloud_storage,
         )
 
@@ -1122,13 +1115,12 @@ class _KubernetesJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
             [str, str, str, bool],
@@ -1145,7 +1137,6 @@ class _KubernetesJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
-            namespace_chooser=namespace_chooser,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
 
@@ -1160,7 +1151,8 @@ class _KubernetesJobLauncher(
                 # The SharedInformer class can only either watch all namespaces or a single namespace.
                 # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
                 list_func=batch_api_client.list_namespaced_job,
-                initial_namespaces=[namespace],
+                # A chooser's namespaces are watched as launches reach them.
+                initial_namespaces=[namespace] if isinstance(namespace, str) else [],
                 # list_func=batch_api_client.list_job_for_all_namespaces,
                 # namespace=None,
                 # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
@@ -2045,13 +2037,12 @@ class _KubernetesPodOrJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
         always_launch_jobs: bool = False,
         _storage_provider: storage_provider_interfaces.StorageProvider,
         _create_volume_and_volume_mount: typing.Callable[
@@ -2068,7 +2059,6 @@ class _KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
-            namespace_chooser=namespace_chooser,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
@@ -2080,7 +2070,6 @@ class _KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
-            namespace_chooser=namespace_chooser,
             _storage_provider=_storage_provider,
             _create_volume_and_volume_mount=_create_volume_and_volume_mount,
         )
@@ -2154,14 +2143,13 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         # job_name_prefix: str = "task-",
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
     ):
         super().__init__(
             namespace=namespace,
@@ -2171,7 +2159,6 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
-            namespace_chooser=namespace_chooser,
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )
@@ -2184,13 +2171,12 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
         pod_postprocessor: PodPostProcessor | None = None,
-        namespace_chooser: NamespaceChooser | None = None,
     ):
         super().__init__(
             namespace=namespace,
@@ -2200,7 +2186,6 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
             pod_labels=pod_labels,
             pod_annotations=pod_annotations,
             pod_postprocessor=pod_postprocessor,
-            namespace_chooser=namespace_chooser,
             _storage_provider=local_storage.LocalStorageProvider(),
             _create_volume_and_volume_mount=_create_volume_and_volume_mount_host_path,
         )

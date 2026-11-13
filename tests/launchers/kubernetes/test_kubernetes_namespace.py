@@ -1,4 +1,4 @@
-"""Tests for choosing a launch's namespace through the launcher's `namespace_chooser`."""
+"""Tests for choosing a launch's namespace with a chooser passed as the launcher's `namespace`."""
 
 from __future__ import annotations
 
@@ -59,8 +59,8 @@ def cluster(monkeypatch: pytest.MonkeyPatch) -> _Cluster:
     return api
 
 
-def _choose_team_namespace(*, annotations: dict[str, str] | None = None) -> str | None:
-    return "team-namespace" if (annotations or {}).get("team") else None
+def _choose_team_namespace(*, annotations: dict[str, str] | None = None) -> str:
+    return "team-namespace" if (annotations or {}).get("team") else "default"
 
 
 def _launch(
@@ -90,7 +90,7 @@ def _launch(
     "annotations, namespace",
     [
         pytest.param({"team": "yes"}, "team-namespace", id="chooser picks"),
-        pytest.param({}, "default", id="chooser declines"),
+        pytest.param({}, "default", id="chooser falls back"),
     ],
 )
 def test_job_is_created_in_the_namespace_the_chooser_picks(
@@ -101,7 +101,7 @@ def test_job_is_created_in_the_namespace_the_chooser_picks(
 ) -> None:
     launcher = kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
         api_client=k8s_client_lib.ApiClient(),
-        namespace_chooser=_choose_team_namespace,
+        namespace=_choose_team_namespace,
     )
 
     _launch(launcher=launcher, annotations=annotations, log_uri=str(tmp_path / "log"))
@@ -124,7 +124,7 @@ def test_router_hands_the_chooser_to_both_launchers(
 ) -> None:
     launcher = kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
         api_client=k8s_client_lib.ApiClient(),
-        namespace_chooser=_choose_team_namespace,
+        namespace=_choose_team_namespace,
     )
 
     _launch(launcher=launcher, annotations=annotations, log_uri=str(tmp_path / "log"))
@@ -179,7 +179,7 @@ def test_launcher_hands_the_chooser_on(
     }[module_name]
     launcher = getattr(module, class_name)(
         api_client=k8s_client_lib.ApiClient(),
-        namespace_chooser=_choose_team_namespace,
+        namespace=_choose_team_namespace,
     )
 
     _launch(
@@ -188,3 +188,37 @@ def test_launcher_hands_the_chooser_on(
 
     [(_, namespace)] = cluster.namespaces
     assert namespace == "team-namespace"
+
+
+@pytest.mark.parametrize(
+    "namespace, watched",
+    [
+        pytest.param("team-namespace", ["team-namespace"], id="string"),
+        pytest.param(_choose_team_namespace, [], id="chooser"),
+    ],
+)
+@pytest.mark.usefixtures("cluster")
+def test_informers_start_on_a_namespace_string_only(
+    namespace: str | kubernetes_launchers.NamespaceChooser,
+    watched: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    class _Informer:
+        def __init__(self, *, initial_namespaces: list[str], **kwargs: object) -> None:
+            seen.append(initial_namespaces)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(kubernetes_launchers, "MultiNamespaceInformer", _Informer)
+    for api in ["CoreV1Api", "BatchV1Api"]:
+        monkeypatch.setattr(k8s_client_lib, api, lambda api_client: mock.MagicMock())
+
+    kubernetes_launchers.Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
+        api_client=k8s_client_lib.ApiClient(), namespace=namespace
+    )
+
+    # The Pod launcher's pod informer, and the Job launcher's pod and Job informers.
+    assert seen == [watched] * 3
