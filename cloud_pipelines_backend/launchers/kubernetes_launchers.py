@@ -338,12 +338,12 @@ class _KubernetesContainerLauncherBase:
         self,
         *,
         secret: k8s_client_lib.V1Secret,
-        pod_or_job: k8s_client_lib.V1OwnerReference,
+        owner_reference: k8s_client_lib.V1OwnerReference,
         namespace: str,
         delete_pod_or_job: typing.Callable[[], Any],
     ) -> None:
         """Creates the Secret owned by the Pod or Job, deleting the Pod or Job if that fails."""
-        secret.metadata.owner_references = [pod_or_job]
+        secret.metadata.owner_references = [owner_reference]
         try:
             k8s_client_lib.CoreV1Api(
                 api_client=self._api_client
@@ -355,7 +355,7 @@ class _KubernetesContainerLauncherBase:
                 delete_pod_or_job()
             except Exception:
                 _logger.exception(
-                    f"Failed to roll back {pod_or_job.kind} {pod_or_job.name} after Secret creation failed."
+                    f"Failed to roll back {owner_reference.kind} {owner_reference.name} after Secret creation failed."
                 )
             raise interfaces.LauncherError(
                 f"Failed to create Kubernetes Secret {secret.metadata.name}"
@@ -763,7 +763,7 @@ class _KubernetesPodLauncher(
         if secret:
             self._create_secret_or_delete_pod_or_job(
                 secret=secret,
-                pod_or_job=k8s_client_lib.V1OwnerReference(
+                owner_reference=k8s_client_lib.V1OwnerReference(
                     api_version="v1",
                     kind="Pod",
                     name=pod_name,
@@ -1553,7 +1553,7 @@ class _KubernetesJobLauncher(
         if secret:
             self._create_secret_or_delete_pod_or_job(
                 secret=secret,
-                pod_or_job=k8s_client_lib.V1OwnerReference(
+                owner_reference=k8s_client_lib.V1OwnerReference(
                     api_version="batch/v1", kind="Job", name=job_name, uid=job_uid
                 ),
                 namespace=job_namespace,
