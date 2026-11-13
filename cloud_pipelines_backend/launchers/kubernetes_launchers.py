@@ -8,9 +8,11 @@ import json
 import logging
 import os
 import pathlib
+import re
 import threading
 import time
 import typing
+import uuid
 from typing import Any, Final, Optional
 
 import kubernetes.client.exceptions
@@ -83,6 +85,8 @@ _MULTI_NODE_MAX_NUMBER_OF_NODES = 16
 # dynamicData argument keys
 _MULTI_NODE_NUMBER_OF_NODES_DYNAMIC_DATA_KEY = "system/multi_node/number_of_nodes"
 _MULTI_NODE_NODE_INDEX_DYNAMIC_DATA_KEY = "system/multi_node/node_index"
+_DYNAMIC_DATA_SECRET_KEY = "secret"
+_DYNAMIC_DATA_SECRET_NAME_KEY = "name"
 _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY = "system/multi_node/node_0_address"
 _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY = "system/multi_node/all_node_addresses"
 
@@ -93,6 +97,11 @@ _MULTI_NODE_NODE_INDEX_ENV_VAR_NAME = "_TANGLE_MULTI_NODE_NODE_INDEX"
 _T = typing.TypeVar("_T")
 
 _CONTAINER_FILE_NAME = "data"
+
+
+def _secret_env_var_name(*, input_name: str) -> str:
+    """Returns the environment variable, also the Secret key, that carries a secret input."""
+    return "__TANGLE_SECRET_" + re.sub("[^_0-9a-zA-Z]+", "_", input_name.upper())
 
 
 def _create_volume_and_volume_mount_host_path(
@@ -172,6 +181,10 @@ class PodPostProcessor(typing.Protocol):
     ) -> k8s_client_lib.V1Pod: ...
 
 
+class NamespaceChooser(typing.Protocol):
+    def __call__(self, *, annotations: dict[str, str] | None = None) -> str: ...
+
+
 class _KubernetesContainerLauncherBase:
     """Launcher that launches container using Kubernetes"""
 
@@ -179,7 +192,7 @@ class _KubernetesContainerLauncherBase:
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -227,7 +240,8 @@ class _KubernetesContainerLauncherBase:
                 # The SharedInformer class can only either watch all namespaces or a single namespace.
                 # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
                 list_func=core_api_client.list_namespaced_pod,
-                initial_namespaces=[namespace],
+                # A chooser's namespaces are watched as launches reach them.
+                initial_namespaces=[namespace] if isinstance(namespace, str) else [],
                 # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
                 # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
                 # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
@@ -239,6 +253,128 @@ class _KubernetesContainerLauncherBase:
             # The failure can happen if the backend does not have Kubernetes permission to list Pods.
             # Fall back from using informer cache to using API calls.
             self._pod_informer = None
+
+    def _handle_secrets_before_preparing_pod(
+        self,
+        *,
+        input_arguments: dict[str, interfaces.InputArgument],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        secret_name_to_secret_value: dict[str, str] = {}
+        secret_env_name_to_secret_name: dict[str, str] = {}
+        for input_name, input_argument in list(input_arguments.items()):
+            if not input_argument.dynamic_data:
+                continue
+            dynamic_data_kind, dynamic_data_properties = (
+                container_component_utils.parse_dynamic_data_argument(
+                    input_argument.dynamic_data
+                )
+            )
+            # Hiding secrets
+            if dynamic_data_kind == _DYNAMIC_DATA_SECRET_KEY:
+                secret_name = (dynamic_data_properties or {}).get(
+                    _DYNAMIC_DATA_SECRET_NAME_KEY
+                )
+                if not input_argument.value:
+                    raise interfaces.LauncherError(
+                        f"Orchestrator should have filled secret value for {input_name=}, but got: {input_argument=}"
+                    )
+                if not secret_name:
+                    raise interfaces.LauncherError(
+                        f"Secret does not have name: {input_argument.dynamic_data=}"
+                    )
+
+                env_var_name = _secret_env_var_name(input_name=input_name)
+                if env_var_name in secret_env_name_to_secret_name:
+                    raise interfaces.LauncherError(
+                        f"Two secret inputs map to the environment variable {env_var_name}; rename {input_name!r} or the other one"
+                    )
+                secret_name_to_secret_value[secret_name] = input_argument.value
+                secret_env_name_to_secret_name[env_var_name] = secret_name
+                # Hiding the secret value by replacing it with env variable sourced from a Kubernetes Secret
+                input_argument.value = f"$({env_var_name})"
+                continue
+        return secret_name_to_secret_value, secret_env_name_to_secret_name
+
+    def _handle_secrets_after_preparing_pod(
+        self,
+        *,
+        pod: k8s_client_lib.V1Pod,
+        secret_name_to_secret_value: dict[str, str],
+        secret_env_name_to_secret_name: dict[str, str],
+        annotations: dict[str, Any] | None = None,
+    ) -> k8s_client_lib.V1Secret | None:
+        if not secret_name_to_secret_value or not secret_env_name_to_secret_name:
+            return None
+
+        # One Secret per container execution, created once its Pod or Job exists.
+        container_execution_id = (annotations or {}).get(
+            common_annotations.CONTAINER_EXECUTION_ID_ANNOTATION_KEY
+        ) or uuid.uuid4().hex[:8]
+        kubernetes_secret_name = "tangle-ce-" + container_execution_id
+        # Keyed by env var name, unique within this execution's Secret: Kubernetes
+        # refuses keys outside [-._a-zA-Z0-9], which secret names may use.
+        secret_data = {
+            env_var_name: secret_name_to_secret_value[secret_name]
+            for env_var_name, secret_name in secret_env_name_to_secret_name.items()
+        }
+
+        main_container = next(
+            container
+            for container in pod.spec.containers
+            if container.name == _MAIN_CONTAINER_NAME
+        )
+        command_line = (main_container.command or []) + (main_container.args or [])
+        for env_var_name in secret_env_name_to_secret_name:
+            # An input consumed as a file reads the Secret volume, not the environment.
+            if not any(f"$({env_var_name})" in part for part in command_line):
+                continue
+            main_container.env = main_container.env or []
+            main_container.env.append(
+                k8s_client_lib.V1EnvVar(
+                    name=env_var_name,
+                    value_from=k8s_client_lib.V1EnvVarSource(
+                        secret_key_ref=k8s_client_lib.V1SecretKeySelector(
+                            name=kubernetes_secret_name,
+                            key=env_var_name,
+                        )
+                    ),
+                )
+            )
+        # get_input_path leaves secret volumes unnamed; the name is chosen here, once, since its fallback is random.
+        for volume in pod.spec.volumes or []:
+            if volume.secret and not volume.secret.secret_name:
+                volume.secret.secret_name = kubernetes_secret_name
+        return k8s_client_lib.V1Secret(
+            metadata=k8s_client_lib.V1ObjectMeta(name=kubernetes_secret_name),
+            string_data=secret_data,
+        )
+
+    def _create_secret_or_delete_pod_or_job(
+        self,
+        *,
+        secret: k8s_client_lib.V1Secret,
+        owner_reference: k8s_client_lib.V1OwnerReference,
+        namespace: str,
+        delete_pod_or_job: typing.Callable[[], Any],
+    ) -> None:
+        """Creates the Secret owned by the Pod or Job, deleting the Pod or Job if that fails."""
+        secret.metadata.owner_references = [owner_reference]
+        try:
+            k8s_client_lib.CoreV1Api(
+                api_client=self._api_client
+            ).create_namespaced_secret(
+                namespace=namespace, body=secret, _request_timeout=self._request_timeout
+            )
+        except Exception as ex:
+            try:
+                delete_pod_or_job()
+            except Exception:
+                _logger.exception(
+                    f"Failed to roll back {owner_reference.kind} {owner_reference.name} after Secret creation failed."
+                )
+            raise interfaces.LauncherError(
+                f"Failed to create Kubernetes Secret {secret.metadata.name}"
+            ) from ex
 
     def _prepare_kubernetes_pod(
         self,
@@ -312,10 +448,18 @@ class _KubernetesContainerLauncherBase:
         def get_input_path(input_name: str) -> str:
             input_argument = input_arguments[input_name]
             uri = input_argument.uri
+            container_path = (
+                container_inputs_root
+                / naming_utils.sanitize_file_name(input_name)
+                / _CONTAINER_FILE_NAME
+            ).as_posix()
+            volume_name = naming_utils.sanitize_kubernetes_resource_name(
+                "inputs-" + input_name
+            )
             if not uri:
                 # Prohibiting consuming some kinds of dynamic data as file
                 if input_argument.dynamic_data:
-                    dynamic_data_kind, _ = (
+                    dynamic_data_kind, dynamic_data_properties = (
                         container_component_utils.parse_dynamic_data_argument(
                             input_argument.dynamic_data
                         )
@@ -324,6 +468,29 @@ class _KubernetesContainerLauncherBase:
                         raise interfaces.LauncherError(
                             f"It's not possible to consume this dynamic data argument as a file: {input_name=}, {input_argument=}"
                         )
+                    if dynamic_data_kind == _DYNAMIC_DATA_SECRET_KEY:
+                        # The second secret phase fills in the Secret's name.
+                        volume_map[volume_name] = k8s_client_lib.V1Volume(
+                            name=volume_name,
+                            secret=k8s_client_lib.V1SecretVolumeSource(
+                                items=[
+                                    k8s_client_lib.V1KeyToPath(
+                                        key=_secret_env_var_name(input_name=input_name),
+                                        path=_CONTAINER_FILE_NAME,
+                                    )
+                                ]
+                            ),
+                        )
+                        volume_mounts.append(
+                            k8s_client_lib.V1VolumeMount(
+                                name=volume_name,
+                                mount_path=pathlib.PurePosixPath(
+                                    container_path
+                                ).parent.as_posix(),
+                                read_only=True,
+                            )
+                        )
+                        return container_path
                 if input_argument.value is None:
                     if input_argument.dynamic_data:
                         raise NotImplementedError(
@@ -345,14 +512,6 @@ class _KubernetesContainerLauncherBase:
                 # Updating the input_arguments with the URI of the uploaded value
                 input_argument.uri = uri
 
-            container_path = (
-                container_inputs_root
-                / naming_utils.sanitize_file_name(input_name)
-                / _CONTAINER_FILE_NAME
-            ).as_posix()
-            volume_name = naming_utils.sanitize_kubernetes_resource_name(
-                "inputs-" + input_name
-            )
             volume, volume_mount = self._create_volume_and_volume_mount(
                 container_path=container_path,
                 artifact_uri=uri,
@@ -511,8 +670,9 @@ class _KubernetesContainerLauncherBase:
 
         Override this method to choose namespace dynamically.
         """
-        del annotations
-        return self._namespace
+        if isinstance(self._namespace, str):
+            return self._namespace
+        return self._namespace(annotations=annotations)
 
 
 class _KubernetesPodLauncher(
@@ -525,7 +685,7 @@ class _KubernetesPodLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -580,6 +740,9 @@ class _KubernetesPodLauncher(
             _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: "localhost",
             _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: "localhost",
         }
+        secret_name_to_secret_value, secret_env_name_to_secret_name = (
+            self._handle_secrets_before_preparing_pod(input_arguments=input_arguments)
+        )
         for input_name, input_argument in list(input_arguments.items()):
             if input_argument.value is not None or input_argument.uri is not None:
                 continue
@@ -613,11 +776,19 @@ class _KubernetesPodLauncher(
         # Applying the pod post-processor
         if self._pod_postprocessor:
             pod = self._pod_postprocessor(pod=pod, annotations=annotations)
+            _keep_chosen_namespace(pod=pod, namespace=namespace)
+
+        secret = self._handle_secrets_after_preparing_pod(
+            pod=pod,
+            secret_name_to_secret_value=secret_name_to_secret_value,
+            secret_env_name_to_secret_name=secret_env_name_to_secret_name,
+            annotations=annotations,
+        )
 
         core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
         try:
             created_pod: k8s_client_lib.V1Pod = core_api_client.create_namespaced_pod(
-                namespace=pod.metadata.namespace or namespace,
+                namespace=namespace,
                 body=pod,
                 _request_timeout=self._request_timeout,
             )
@@ -629,6 +800,20 @@ class _KubernetesPodLauncher(
         pod_name: str = created_pod.metadata.name
         pod_namespace: str = created_pod.metadata.namespace
         _logger.info(f"Created pod {pod_name} in namespace {pod_namespace}")
+        if secret:
+            self._create_secret_or_delete_pod_or_job(
+                secret=secret,
+                owner_reference=k8s_client_lib.V1OwnerReference(
+                    api_version="v1",
+                    kind="Pod",
+                    name=pod_name,
+                    uid=created_pod.metadata.uid,
+                ),
+                namespace=pod_namespace,
+                delete_pod_or_job=lambda: core_api_client.delete_namespaced_pod(
+                    name=pod_name, namespace=pod_namespace, grace_period_seconds=0
+                ),
+            )
 
         launched_kubernetes_container = LaunchedKubernetesContainer(
             pod_name=pod_name,
@@ -724,6 +909,14 @@ def _create_pod_postprocessor_stack(
     return _post_processor
 
 
+def _keep_chosen_namespace(*, pod: k8s_client_lib.V1Pod, namespace: str) -> None:
+    if pod.metadata.namespace != namespace:
+        _logger.warning(
+            f"Ignoring the pod post-processor's namespace {pod.metadata.namespace!r}; using {namespace!r}. Pass a namespace chooser as namespace instead."
+        )
+        pod.metadata.namespace = namespace
+
+
 class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
     """Launcher that uses single-node Kubernetes (uses hostPath for data passing)"""
 
@@ -731,7 +924,7 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -760,7 +953,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -1109,7 +1302,7 @@ class _KubernetesJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
@@ -1145,7 +1338,8 @@ class _KubernetesJobLauncher(
                 # The SharedInformer class can only either watch all namespaces or a single namespace.
                 # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
                 list_func=batch_api_client.list_namespaced_job,
-                initial_namespaces=[namespace],
+                # A chooser's namespaces are watched as launches reach them.
+                initial_namespaces=[namespace] if isinstance(namespace, str) else [],
                 # list_func=batch_api_client.list_job_for_all_namespaces,
                 # namespace=None,
                 # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
@@ -1243,6 +1437,9 @@ class _KubernetesJobLauncher(
             _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: node_0_address,
             _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: all_node_addresses_str,
         }
+        secret_name_to_secret_value, secret_env_name_to_secret_name = (
+            self._handle_secrets_before_preparing_pod(input_arguments=input_arguments)
+        )
 
         for input_name, input_argument in list(input_arguments.items()):
             if input_argument.value is not None or input_argument.uri is not None:
@@ -1280,10 +1477,14 @@ class _KubernetesJobLauncher(
         assert pod.spec
         assert pod.spec.containers
 
-        # Changing the namespace to the final outcome from the pod_postprocessor.
-        # TODO: In the future (once consumers have migrated to _choose_namespace)
-        # we should prohibit/ignore changing pod namespace in the pod post-processor.
-        namespace = pod.metadata.namespace
+        _keep_chosen_namespace(pod=pod, namespace=namespace)
+
+        secret = self._handle_secrets_after_preparing_pod(
+            pod=pod,
+            secret_name_to_secret_value=secret_name_to_secret_value,
+            secret_env_name_to_secret_name=secret_env_name_to_secret_name,
+            annotations=annotations,
+        )
 
         service: k8s_client_lib.V1Service | None = None
         if enable_multi_node:
@@ -1378,11 +1579,13 @@ class _KubernetesJobLauncher(
         )
 
         job = self._transform_job_before_launching(job=job, annotations=annotations)
+        # The namespace chosen above is final; a hook that moves the Job is undone.
+        job.metadata.namespace = namespace
 
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=self._api_client)
         try:
             created_job: k8s_client_lib.V1Job = batch_api_client.create_namespaced_job(
-                namespace=job.metadata.namespace or namespace,
+                namespace=namespace,
                 body=job,
                 _request_timeout=self._request_timeout,
             )
@@ -1395,6 +1598,20 @@ class _KubernetesJobLauncher(
         job_namespace: str = created_job.metadata.namespace
         job_uid: str = created_job.metadata.uid
         _logger.info(f"Created Kubernetes Job {job_name} in namespace {job_namespace}")
+        if secret:
+            self._create_secret_or_delete_pod_or_job(
+                secret=secret,
+                owner_reference=k8s_client_lib.V1OwnerReference(
+                    api_version="batch/v1", kind="Job", name=job_name, uid=job_uid
+                ),
+                namespace=job_namespace,
+                delete_pod_or_job=lambda: batch_api_client.delete_namespaced_job(
+                    name=job_name,
+                    namespace=job_namespace,
+                    grace_period_seconds=0,
+                    propagation_policy="Background",
+                ),
+            )
 
         if enable_multi_node:
             assert service
@@ -2030,7 +2247,7 @@ class _KubernetesPodOrJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
@@ -2136,7 +2353,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         # job_name_prefix: str = "task-",
@@ -2164,7 +2381,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
