@@ -13,6 +13,7 @@ from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import orchestrator_sql
+from cloud_pipelines_backend.launchers import common_annotations
 from cloud_pipelines_backend.launchers import interfaces as launcher_interfaces
 
 
@@ -995,3 +996,205 @@ class TestRefreshMetrics:
         app_metrics.record_completion_lag.assert_called_once_with(
             ended_at=self._ENDED_AT, status=bts.ContainerExecutionStatus.FAILED
         )
+
+
+@pytest.mark.parametrize(
+    "value, seconds",
+    [("PT30M", 1800), ("P1DT2H", 93600), ("PT1H30M5S", 5405)],
+)
+def test_parse_duration(value: str, seconds: int) -> None:
+    assert orchestrator_sql._parse_duration(value).total_seconds() == seconds
+
+
+@pytest.mark.parametrize("value", ["", "P", "PT", "PT0S", "P1M", "P1Y", "1H", "soon"])
+def test_parse_duration_rejects_the_rest(value: str) -> None:
+    with pytest.raises(ValueError):
+        orchestrator_sql._parse_duration(value)
+
+
+def test_invalid_duration_is_warned_once(caplog) -> None:
+    task_spec = {"annotations": {"some/key": "warn-once"}}
+    for _ in range(3):
+        assert orchestrator_sql._get_duration_annotation(task_spec, "some/key") is None
+    assert caplog.text.count("Ignoring invalid some/key: 'warn-once'") == 1
+
+
+_PENDING_KEY = common_annotations.MAX_PENDING_DURATION_ANNOTATION_KEY
+_RUN_KEY = common_annotations.MAX_RUN_DURATION_ANNOTATION_KEY
+_PIPELINE_RUN_KEY = common_annotations.MAX_PIPELINE_RUN_DURATION_ANNOTATION_KEY
+_ERROR_KEY = bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+PENDING = launcher_interfaces.ContainerStatus.PENDING
+RUNNING = launcher_interfaces.ContainerStatus.RUNNING
+
+
+def _hours_ago(hours: int) -> datetime.datetime:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now - datetime.timedelta(hours=hours)
+
+
+def _create_two_task_run(session_factory, *, task=None, root=None) -> None:
+    """`a` -> `b`, with annotations on `a` and on the root task."""
+    container = structures.ComponentReference
+    root_task = _make_graph_task_spec(
+        tasks={
+            "a": structures.TaskSpec(
+                component_ref=container(spec=_make_container_component(outputs=["o"])),
+                annotations=task,
+            ),
+            "b": structures.TaskSpec(
+                component_ref=container(spec=_make_container_component(inputs=["i"])),
+                arguments={"i": _output_argument("a", "o")},
+            ),
+        }
+    )
+    root_task.annotations = root
+    _create_pipeline_run(session_factory, root_task)
+
+
+def _statuses(session_factory, task_id: str) -> set[bts.ContainerExecutionStatus]:
+    nodes = session_factory().scalars(
+        sql.select(bts.ExecutionNode).where(
+            bts.ExecutionNode.task_id_in_parent_execution == task_id
+        )
+    )
+    return {node.container_execution_status for node in nodes}
+
+
+def _error(session_factory) -> str | None:
+    return _get_execution_node(session_factory(), "a").extra_data.get(_ERROR_KEY)
+
+
+class TestTimedOut:
+    """The max pending / run duration annotations end a container as FAILED."""
+
+    def _sweep(
+        self, *task_annotations, status=PENDING, started_before=False, naive=False
+    ):
+        """A run per entry (one shared container), aged 2h, swept twice."""
+        session_factory = _create_session_factory()
+        launched_container_mock = _make_launched_container_mock()
+        for annotations in task_annotations:
+            _create_two_task_run(session_factory, task=annotations)
+            _process_queued_executions(session_factory, launched_container_mock)
+        launched_container_mock.return_value.status = status
+        started_at = _hours_ago(2)
+        # The Docker launcher returns a naive UTC start time.
+        launched_container_mock.return_value.started_at = (
+            started_at.replace(tzinfo=None) if naive else started_at
+        )
+        session = session_factory()
+        container_execution = session.scalar(sql.select(bts.ContainerExecution))
+        container_execution.created_at = _hours_ago(2)
+        container_execution.started_at = _hours_ago(2) if started_before else None
+        session.commit()
+        orchestrator = _make_running_orchestrator(
+            session_factory, launched_container_mock
+        )
+        for _ in range(2):  # The first sweep flags the node, the second ends it.
+            orchestrator.internal_process_running_executions_queue(
+                session=session_factory()
+            )
+        return session_factory, launched_container_mock.return_value.terminate
+
+    @pytest.mark.parametrize(
+        "status, key, naive",
+        [
+            (PENDING, _PENDING_KEY, False),
+            (RUNNING, _RUN_KEY, False),
+            (RUNNING, _RUN_KEY, True),  # naive start time from the Docker launcher
+        ],
+    )
+    def test_over_the_limit_fails_with_a_reason(self, status, key, naive) -> None:
+        session_factory, terminate = self._sweep(
+            {key: "PT1H"}, status=status, naive=naive
+        )
+
+        terminate.assert_called_once()
+        assert _statuses(session_factory, "a") == {bts.ContainerExecutionStatus.FAILED}
+        assert _statuses(session_factory, "b") == {bts.ContainerExecutionStatus.SKIPPED}
+        assert _error(session_factory) == f"Exceeded {key} of 1:00:00."
+
+    @pytest.mark.parametrize(
+        "task_annotations, started_before",
+        [
+            ([{_PENDING_KEY: "PT3H"}], False),  # not reached yet
+            ([{}], False),  # no limit
+            ([{_PENDING_KEY: "soon"}], False),  # invalid
+            ([{_PENDING_KEY: 3600}], False),  # not a duration string
+            ([{_RUN_KEY: "PT1H"}], False),  # applies to RUNNING only
+            ([{_PENDING_KEY: "PT1H"}], True),  # waiting again after it started
+            ([{_PENDING_KEY: "PT1H"}, {}], False),  # shared with a run without limit
+        ],
+    )
+    def test_otherwise_it_keeps_going(self, task_annotations, started_before) -> None:
+        session_factory, terminate = self._sweep(
+            *task_annotations, started_before=started_before
+        )
+
+        terminate.assert_not_called()
+        assert _statuses(session_factory, "a") == {bts.ContainerExecutionStatus.PENDING}
+        assert _statuses(session_factory, "b") == {
+            bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+        }
+
+
+class TestPipelineRunTimedOut:
+    """The max pipeline run duration annotation on the root task limits the run."""
+
+    _REASON = f"The pipeline run exceeded {_PIPELINE_RUN_KEY} of 1:00:00."
+
+    def _run(self, *, limit="PT1H", launched=False, node=None, run=None):
+        """A run aged 2h, processed once while queued or while running."""
+        session_factory = _create_session_factory()
+        launched_container_mock = _make_launched_container_mock()
+        root = {_PIPELINE_RUN_KEY: limit} if limit else None
+        _create_two_task_run(session_factory, root=root)
+        if launched:
+            _process_queued_executions(session_factory, launched_container_mock)
+        session = session_factory()
+        session.scalar(sql.select(bts.PipelineRun)).created_at = _hours_ago(2)
+        session.scalar(sql.select(bts.PipelineRun)).extra_data = run
+        if node:
+            _get_execution_node(session, "a").extra_data = node
+        session.commit()
+        if launched:
+            _make_running_orchestrator(
+                session_factory, launched_container_mock
+            ).internal_process_running_executions_queue(session=session_factory())
+        else:
+            _process_queued_executions(session_factory, launched_container_mock)
+        return session_factory, launched_container_mock
+
+    @pytest.mark.parametrize("launched", [False, True])
+    def test_over_the_limit_fails_with_a_reason(self, launched) -> None:
+        session_factory, launched_container_mock = self._run(launched=launched)
+
+        if launched:
+            launched_container_mock.return_value.terminate.assert_called_once()
+        else:
+            launched_container_mock.assert_not_called()
+        assert _statuses(session_factory, "a") == {bts.ContainerExecutionStatus.FAILED}
+        assert _statuses(session_factory, "b") == {bts.ContainerExecutionStatus.SKIPPED}
+        assert _error(session_factory) == self._REASON
+
+    @pytest.mark.parametrize("limit", ["PT3H", None])
+    def test_otherwise_it_keeps_going(self, limit) -> None:
+        session_factory, _ = self._run(limit=limit)
+
+        assert _statuses(session_factory, "a") == {bts.ContainerExecutionStatus.PENDING}
+
+    @pytest.mark.parametrize(
+        "launched, node",
+        [
+            (False, None),
+            (True, {"desired_state": "TIMED_OUT", "timed_out_reason": "Exceeded."}),
+        ],
+    )
+    def test_a_cancel_wins(self, launched, node) -> None:
+        session_factory, _ = self._run(
+            launched=launched, node=node, run={"desired_state": "TERMINATED"}
+        )
+
+        assert _statuses(session_factory, "a") == {
+            bts.ContainerExecutionStatus.CANCELLED
+        }

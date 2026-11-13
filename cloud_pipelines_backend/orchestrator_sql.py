@@ -1,9 +1,11 @@
 import copy
 import json
 import datetime
+import functools
 import logging
 import itertools
 import os
+import re
 import time
 import traceback
 import typing
@@ -90,6 +92,8 @@ class OrchestratorService_Sql:
             _max_container_execution_refresh_error_retries
         )
         self._container_execution_refresh_error_counts: dict[Any, int] = {}
+        # Run id -> max run duration (None: no limit). Read from the root task once.
+        self._pipeline_run_limits: dict[Any, datetime.timedelta | None] = {}
 
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
@@ -623,6 +627,23 @@ class OrchestratorService_Sql:
             session.commit()
             return
 
+        # The run is over its max duration: fail the task without launching it.
+        timeout_reason = self._get_pipeline_run_timeout_reason(pipeline_run)
+        if timeout_reason:
+            _logger.info(
+                f"Failing execution {execution.id} and skipping all downstream executions: {timeout_reason}"
+            )
+            execution.container_execution_status = bts.ContainerExecutionStatus.FAILED
+            execution.extra_data = {
+                **(execution.extra_data or {}),
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY: timeout_reason,
+            }
+            _mark_all_downstream_executions_as_skipped(
+                session=session, execution=execution
+            )
+            session.commit()
+            return
+
         # Give the interceptor a chance to take this execution off the launch path.
         # If it returns True it has taken ownership: it decided what state the execution is
         # in and committed that itself. We stop here and do not launch.
@@ -857,6 +878,26 @@ class OrchestratorService_Sql:
             execution.container_execution_status = container_execution.status
             # TODO: Maybe add artifact value and URI to input ArtifactData.
 
+    def _get_pipeline_run_timeout_reason(
+        self, pipeline_run: bts.PipelineRun
+    ) -> str | None:
+        """Returns why the run is over its max duration, or None if it is not.
+
+        The limit is read from the root task once per run and then cached.
+        """
+        key = common_annotations.MAX_PIPELINE_RUN_DURATION_ANNOTATION_KEY
+        if pipeline_run.id not in self._pipeline_run_limits:
+            if len(self._pipeline_run_limits) >= 10_000:
+                self._pipeline_run_limits.clear()
+            self._pipeline_run_limits[pipeline_run.id] = _get_duration_annotation(
+                pipeline_run.root_execution.task_spec, key
+            )
+        limit = self._pipeline_run_limits[pipeline_run.id]
+        created_at = pipeline_run.created_at
+        if limit and created_at and _get_current_time() - created_at > limit:
+            return f"The pipeline run exceeded {key} of {limit}."
+        return None
+
     def internal_process_one_running_execution(
         self, session: orm.Session, container_execution: bts.ContainerExecution
     ):
@@ -882,6 +923,8 @@ class OrchestratorService_Sql:
         # Handling cancellation
         votes_to_terminate = []
         votes_to_not_terminate = []
+        # Nodes that must stop -> (final status, reason).
+        stop_reasons: dict[Any, tuple[bts.ContainerExecutionStatus, str]] = {}
         execution_nodes = container_execution.execution_nodes
         for execution_node in execution_nodes:
             # A stale session can rewrite the node's `extra_data` and drop its flag,
@@ -898,13 +941,17 @@ class OrchestratorService_Sql:
                     == execution_node.id
                 )
             )
-            should_terminate = (execution_node.extra_data or {}).get(
-                "desired_state"
-            ) == "TERMINATED" or (
-                pipeline_run is not None
-                and (pipeline_run.extra_data or {}).get("desired_state") == "TERMINATED"
+            # Decide if this node must stop (user cancel, task limit or run limit).
+            run_timeout_reason = (
+                self._get_pipeline_run_timeout_reason(pipeline_run)
+                if pipeline_run
+                else None
             )
-            if should_terminate:
+            stop_reason = _get_stop_reason(
+                execution_node, pipeline_run, run_timeout_reason
+            )
+            if stop_reason:
+                stop_reasons[execution_node.id] = stop_reason
                 votes_to_terminate.append(execution_node)
             else:
                 votes_to_not_terminate.append(execution_node)
@@ -960,23 +1007,37 @@ class OrchestratorService_Sql:
                         execution_nodes=execution_nodes,
                     )
                 container_execution.ended_at = _get_current_time()
-                # We need to mark the execution as CANCELLED otherwise orchestrator will continue polling it.
-                container_execution.status = bts.ContainerExecutionStatus.CANCELLED
+                # End it, otherwise the orchestrator keeps polling it.
+                # A user cancel wins over a timeout.
+                container_execution.status = (
+                    bts.ContainerExecutionStatus.CANCELLED
+                    if _CANCELLED in stop_reasons.values()
+                    else bts.ContainerExecutionStatus.FAILED
+                )
                 terminated = True
 
-                # Marking the execution nodes as cancelled only after the launched container is successfully terminated
+                # Mark each node as ended, only after the container is terminated.
                 for execution_node in votes_to_terminate:
-                    _logger.info(
-                        f"Marking the execution node {execution_node.id} as CANCELLED."
-                    )
-                    execution_node.container_execution_status = (
-                        bts.ContainerExecutionStatus.CANCELLED
-                    )
+                    # A cancel ends CANCELLED, a timeout ends FAILED with its reason.
+                    status, reason = stop_reasons[execution_node.id]
+                    if status == bts.ContainerExecutionStatus.FAILED:
+                        _record_orchestration_error_message(
+                            container_execution=container_execution,
+                            execution_nodes=[execution_node],
+                            message=reason,
+                        )
+                    _logger.info(f"Marking {execution_node.id} as {status.value}.")
+                    execution_node.container_execution_status = status
 
             # Mark the execution nodes as cancelled only after the launched container is successfully terminated (if needed)
             for execution_node in votes_to_terminate:
+                is_cancel = stop_reasons[execution_node.id] == _CANCELLED
+                # A timed-out node that is not stopped yet keeps its downstream waiting.
+                if not terminated and not is_cancel:
+                    continue
+                stopped = "cancelled" if is_cancel else "timed-out"
                 _logger.info(
-                    f"Skipping all downstream executions of cancelled execution node {execution_node.id}."
+                    f"Skipping all downstream executions of {stopped} execution node {execution_node.id}."
                 )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution_node
@@ -1000,6 +1061,14 @@ class OrchestratorService_Sql:
         new_status: launcher_interfaces.ContainerStatus = (
             reloaded_launched_container.status
         )
+        # Flag nodes over their max pending / run duration. The next sweep stops them.
+        if _flag_nodes_over_task_limit(
+            container_execution,
+            new_status,
+            reloaded_launched_container.started_at,
+            current_time,
+        ):
+            session.commit()
         if new_status == previous_status:
             _logger.info(f"Container execution remains in {new_status} state.")
             return
@@ -1246,6 +1315,120 @@ def _get_direct_downstream_executions(
         .join(bts.InputArtifactLink)
         .join(bts.ExecutionNode)
     ).all()
+
+
+_CANCELLED = (bts.ContainerExecutionStatus.CANCELLED, "Cancelled by a user.")
+_TIMED_OUT_STATE = "TIMED_OUT"  # Internal flag. The task ends as FAILED.
+_TIMED_OUT_REASON_KEY = "timed_out_reason"  # Stored in the node's extra_data.
+_DURATION_RE = re.compile(r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$")
+
+
+def _parse_duration(value: str) -> datetime.timedelta:
+    """Parses durations like "PT30M" or "P1DT2H".
+
+    Months, years and zero are rejected, since they have no fixed use as a limit.
+    """
+    match = _DURATION_RE.match(value)
+    parts = [int(g or 0) for g in match.groups()] if match else []
+    if not any(parts):
+        raise ValueError(f"Unsupported or zero duration: {value!r}")
+    days, hours, minutes, seconds = parts
+    return datetime.timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+
+
+def _get_duration_annotation(
+    task_spec: dict[str, Any] | None, key: str
+) -> datetime.timedelta | None:
+    """Reads a duration limit from a stored task spec.
+
+    A missing, invalid or non-string value gives None, so the task has no limit.
+    """
+    value = ((task_spec or {}).get("annotations") or {}).get(key)
+    return None if value is None else _parse_duration_annotation(key, str(value))
+
+
+@functools.lru_cache(maxsize=1024)
+def _parse_duration_annotation(key: str, value: str) -> datetime.timedelta | None:
+    """Parses an annotation value, or gives None for an invalid one.
+
+    Results are cached, so an invalid value is warned about once, not on every sweep.
+    """
+    try:
+        return _parse_duration(value)
+    except ValueError:
+        _logger.warning(f"Ignoring invalid {key}: {value!r}")
+        return None
+
+
+def _get_stop_reason(
+    execution_node: bts.ExecutionNode,
+    pipeline_run: bts.PipelineRun | None,
+    run_timeout_reason: str | None,
+) -> tuple[bts.ContainerExecutionStatus, str] | None:
+    """Returns the (final status, reason) if the node must stop, else None.
+
+    A user cancel wins over a task limit, which wins over the run limit.
+    """
+    node_data = execution_node.extra_data or {}
+    run_data = (pipeline_run.extra_data if pipeline_run else None) or {}
+    if "TERMINATED" in (node_data.get("desired_state"), run_data.get("desired_state")):
+        return _CANCELLED
+    if node_data.get("desired_state") == _TIMED_OUT_STATE:
+        # A task limit flagged it on an earlier sweep.
+        return bts.ContainerExecutionStatus.FAILED, node_data[_TIMED_OUT_REASON_KEY]
+    # The run limit is not flagged, it is checked again on every sweep.
+    if run_timeout_reason:
+        return bts.ContainerExecutionStatus.FAILED, run_timeout_reason
+    return None
+
+
+def _flag_nodes_over_task_limit(
+    container_execution: bts.ContainerExecution,
+    status: launcher_interfaces.ContainerStatus,
+    started_at: datetime.datetime | None,
+    current_time: datetime.datetime,
+) -> bool:
+    """Flags nodes over their max pending / run duration. Returns whether any was flagged.
+
+    The pending clock starts at launch, the run clock at the container start.
+    """
+    since = None  # The clock start.
+    if status == launcher_interfaces.ContainerStatus.PENDING:
+        key = common_annotations.MAX_PENDING_DURATION_ANNOTATION_KEY
+        # A container that already started and waits again is not timed out.
+        if container_execution.started_at is None:
+            since = container_execution.created_at
+    elif status == launcher_interfaces.ContainerStatus.RUNNING:
+        key = common_annotations.MAX_RUN_DURATION_ANNOTATION_KEY
+        since = started_at or container_execution.created_at
+    if since is None:
+        return False
+    # The Docker launcher gives a naive UTC start time.
+    since = since if since.tzinfo else since.replace(tzinfo=datetime.timezone.utc)
+    flagged = False
+    for execution_node in container_execution.execution_nodes:
+        limit = _get_duration_annotation(execution_node.task_spec, key)
+        if (
+            limit is not None
+            and current_time - since > limit
+            and not (execution_node.extra_data or {}).get("desired_state")
+        ):
+            _flag_timed_out(execution_node, f"Exceeded {key} of {limit}.")
+            flagged = True
+    return flagged
+
+
+def _flag_timed_out(execution_node: bts.ExecutionNode, reason: str) -> None:
+    """Flags a node as timed out, with the reason.
+
+    The next sweep stops it through the same code as a user cancel.
+    """
+    _logger.warning(f"Execution node {execution_node.id} timed out: {reason}")
+    execution_node.extra_data = {
+        **(execution_node.extra_data or {}),
+        "desired_state": _TIMED_OUT_STATE,
+        _TIMED_OUT_REASON_KEY: reason,
+    }
 
 
 # TODO: Cover with tests
