@@ -1391,11 +1391,13 @@ class _KubernetesJobLauncher(
         )
 
         job = self._transform_job_before_launching(job=job, annotations=annotations)
+        # The namespace chosen above is final; a hook that moves the Job is undone.
+        job.metadata.namespace = namespace
 
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=self._api_client)
         try:
             created_job: k8s_client_lib.V1Job = batch_api_client.create_namespaced_job(
-                namespace=job.metadata.namespace or namespace,
+                namespace=namespace,
                 body=job,
                 _request_timeout=self._request_timeout,
             )
