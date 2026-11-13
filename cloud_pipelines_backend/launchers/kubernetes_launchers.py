@@ -619,11 +619,12 @@ class _KubernetesPodLauncher(
         # Applying the pod post-processor
         if self._pod_postprocessor:
             pod = self._pod_postprocessor(pod=pod, annotations=annotations)
+            _keep_chosen_namespace(pod=pod, namespace=namespace)
 
         core_api_client = k8s_client_lib.CoreV1Api(api_client=self._api_client)
         try:
             created_pod: k8s_client_lib.V1Pod = core_api_client.create_namespaced_pod(
-                namespace=pod.metadata.namespace or namespace,
+                namespace=namespace,
                 body=pod,
                 _request_timeout=self._request_timeout,
             )
@@ -728,6 +729,14 @@ def _create_pod_postprocessor_stack(
         return pod
 
     return _post_processor
+
+
+def _keep_chosen_namespace(*, pod: k8s_client_lib.V1Pod, namespace: str) -> None:
+    if pod.metadata.namespace != namespace:
+        _logger.warning(
+            f"Ignoring the pod post-processor's namespace {pod.metadata.namespace!r}; using {namespace!r}. Pass a namespace chooser as namespace instead."
+        )
+        pod.metadata.namespace = namespace
 
 
 class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
@@ -1287,10 +1296,7 @@ class _KubernetesJobLauncher(
         assert pod.spec
         assert pod.spec.containers
 
-        # Changing the namespace to the final outcome from the pod_postprocessor.
-        # TODO: In the future (once consumers have migrated to _choose_namespace)
-        # we should prohibit/ignore changing pod namespace in the pod post-processor.
-        namespace = pod.metadata.namespace
+        _keep_chosen_namespace(pod=pod, namespace=namespace)
 
         service: k8s_client_lib.V1Service | None = None
         if enable_multi_node:
@@ -1385,11 +1391,13 @@ class _KubernetesJobLauncher(
         )
 
         job = self._transform_job_before_launching(job=job, annotations=annotations)
+        # The namespace chosen above is final; a hook that moves the Job is undone.
+        job.metadata.namespace = namespace
 
         batch_api_client = k8s_client_lib.BatchV1Api(api_client=self._api_client)
         try:
             created_job: k8s_client_lib.V1Job = batch_api_client.create_namespaced_job(
-                namespace=job.metadata.namespace or namespace,
+                namespace=namespace,
                 body=job,
                 _request_timeout=self._request_timeout,
             )
