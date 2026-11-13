@@ -1395,9 +1395,7 @@ def _flag_nodes_over_task_limit(
     since = None  # The clock start.
     if status == launcher_interfaces.ContainerStatus.PENDING:
         key = common_annotations.MAX_PENDING_DURATION_ANNOTATION_KEY
-        # A container that already started and waits again is not timed out.
-        if container_execution.started_at is None:
-            since = container_execution.created_at
+        since = container_execution.created_at
     elif status == launcher_interfaces.ContainerStatus.RUNNING:
         key = common_annotations.MAX_RUN_DURATION_ANNOTATION_KEY
         since = started_at or container_execution.created_at
@@ -1407,6 +1405,11 @@ def _flag_nodes_over_task_limit(
     since = since if since.tzinfo else since.replace(tzinfo=datetime.timezone.utc)
     flagged = False
     for execution_node in container_execution.execution_nodes:
+        # A node that already ran and waits again is not timed out on pending.
+        if status == launcher_interfaces.ContainerStatus.PENDING and _has_run(
+            execution_node
+        ):
+            continue
         limit = _get_duration_annotation(execution_node.task_spec, key)
         if (
             limit is not None
@@ -1416,6 +1419,20 @@ def _flag_nodes_over_task_limit(
             _flag_timed_out(execution_node, f"Exceeded {key} of {limit}.")
             flagged = True
     return flagged
+
+
+def _has_run(execution_node: bts.ExecutionNode) -> bool:
+    """Whether the node was ever RUNNING, from the status history master records.
+
+    Unlike `ContainerExecution.started_at`, the history is not reset on going back to PENDING.
+    """
+    history = (execution_node.extra_data or {}).get(
+        bts.EXECUTION_NODE_EXTRA_DATA_STATUS_HISTORY_KEY, []
+    )
+    return any(
+        entry.get("status") == bts.ContainerExecutionStatus.RUNNING.value
+        for entry in history
+    )
 
 
 def _flag_timed_out(execution_node: bts.ExecutionNode, reason: str) -> None:

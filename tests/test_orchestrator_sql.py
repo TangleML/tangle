@@ -1064,6 +1064,10 @@ def _error(session_factory) -> str | None:
     return _get_execution_node(session_factory(), "a").extra_data.get(_ERROR_KEY)
 
 
+RUNNING_NODE = bts.ContainerExecutionStatus.RUNNING
+PENDING_NODE = bts.ContainerExecutionStatus.PENDING
+
+
 class TestTimedOut:
     """The max pending / run duration annotations end a container as FAILED."""
 
@@ -1085,7 +1089,12 @@ class TestTimedOut:
         session = session_factory()
         container_execution = session.scalar(sql.select(bts.ContainerExecution))
         container_execution.created_at = _hours_ago(2)
-        container_execution.started_at = _hours_ago(2) if started_before else None
+        if started_before:
+            # It ran, then went back to PENDING. Master resets `started_at` to None
+            # then, so only the node's status history remembers that it ran.
+            for execution_node in container_execution.execution_nodes:
+                execution_node.container_execution_status = RUNNING_NODE
+                execution_node.container_execution_status = PENDING_NODE
         session.commit()
         orchestrator = _make_running_orchestrator(
             session_factory, launched_container_mock
