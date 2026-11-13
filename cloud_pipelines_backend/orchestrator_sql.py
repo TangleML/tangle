@@ -22,6 +22,7 @@ from cloud_pipelines.orchestration.launchers import naming_utils
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import filter_query_sql
+from . import secret_value_cipher
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import bugsnag_instrumentation
@@ -75,8 +76,10 @@ class OrchestratorService_Sql:
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
         queued_execution_interceptor: QueuedExecutionInterceptor | None = None,
+        secret_value_cipher: secret_value_cipher.SecretValueCipher | None = None,
     ):
         self._session_factory = session_factory
+        self._secret_value_cipher = secret_value_cipher
         self._launcher = launcher
         self._storage_provider = storage_provider
         self._data_root_uri = data_root_uri
@@ -714,6 +717,24 @@ class OrchestratorService_Sql:
                         f"{execution.id=}: User error: Error resolving a secret argument for {input_name=}: User {user_id} does not have secret {secret_name}."
                     )
                 secret_value = secret.secret_value
+                encryption = (secret.extra_data or {}).get(
+                    secret_value_cipher.EXTRA_DATA_ENCRYPTION_KEY
+                )
+                if encryption:
+                    cipher = self._secret_value_cipher
+                    encryption_type = encryption[
+                        secret_value_cipher.ENCRYPTION_TYPE_KEY
+                    ]
+                    if not cipher or cipher.type != encryption_type:
+                        raise OrchestratorError(
+                            f"{execution.id=}: Secret {secret_name} is encrypted with {encryption_type!r}, but the configured cipher is {getattr(cipher, 'type', None)!r}."
+                        )
+                    secret_value = cipher.decrypt(
+                        stored=secret_value,
+                        details=encryption[secret_value_cipher.ENCRYPTION_DETAILS_KEY],
+                        user_id=user_id,
+                        secret_name=secret_name,
+                    )
                 input_artifact_data[input_name] = bts.ArtifactData(
                     total_size=len(secret_value.encode("utf-8")),
                     is_dir=False,
