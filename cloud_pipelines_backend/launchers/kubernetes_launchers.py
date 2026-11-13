@@ -335,6 +335,7 @@ class _KubernetesContainerLauncherBase:
                     ),
                 )
             )
+        # get_input_path leaves secret volumes unnamed; the name is chosen here, once, since its fallback is random.
         for volume in pod.spec.volumes or []:
             if volume.secret and not volume.secret.secret_name:
                 volume.secret.secret_name = kubernetes_secret_name
