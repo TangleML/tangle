@@ -587,6 +587,10 @@ class _KubernetesPodLauncher(
                 env_var_name = "__TANGLE_SECRET_" + re.sub(
                     "[^_0-9a-zA-Z]+", "_", input_name.upper()
                 )
+                if env_var_name in secret_env_name_to_secret_name:
+                    raise interfaces.LauncherError(
+                        f"Two secret inputs map to the environment variable {env_var_name}; rename {input_name!r} or the other one"
+                    )
                 secret_name_to_secret_value[secret_name] = input_argument.value
                 secret_env_name_to_secret_name[env_var_name] = secret_name
                 # Hiding the secret value by replacing it with env variable sourced from a Kubernetes Secret

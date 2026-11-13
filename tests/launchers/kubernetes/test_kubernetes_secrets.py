@@ -188,3 +188,13 @@ def test_container_reads_the_value_from_the_secret() -> None:
         )
     ]
     assert _SECRET_VALUE not in pod.spec.containers[0].args[0]
+
+
+def test_two_secret_inputs_on_one_env_var_name_are_a_launcher_error() -> None:
+    first, second = _make_secret_argument(), _make_secret_argument()
+    second.dynamic_data = {"secret": {"name": "anthropic-key"}}
+
+    with pytest.raises(interfaces.LauncherError, match="__TANGLE_SECRET_API_KEY"):
+        _make_launcher()._handle_secrets_before_preparing_pod(
+            input_arguments={"api-key": first, "api_key": second}
+        )
