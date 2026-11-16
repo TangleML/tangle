@@ -51,7 +51,10 @@ class LaunchedContainerNotFoundError(LauncherError):
 class InputArgument:
     total_size: int
     is_dir: bool
-    value: str | None = None
+    # A secret consumed as a value arrives here in plaintext, and the generated repr of this
+    # class is interpolated into launcher error messages, which are logged, reported and
+    # stored. `repr=False` keeps the value out of every one of those strings.
+    value: str | None = dataclasses.field(default=None, repr=False)
     uri: str | None = None
     staging_uri: str
     dynamic_data: str | dict[str, Any] | None = None
