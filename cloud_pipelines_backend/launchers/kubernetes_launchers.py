@@ -181,6 +181,10 @@ class PodPostProcessor(typing.Protocol):
     ) -> k8s_client_lib.V1Pod: ...
 
 
+class NamespaceChooser(typing.Protocol):
+    def __call__(self, *, annotations: dict[str, str] | None = None) -> str: ...
+
+
 class _KubernetesContainerLauncherBase:
     """Launcher that launches container using Kubernetes"""
 
@@ -188,7 +192,7 @@ class _KubernetesContainerLauncherBase:
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -236,7 +240,8 @@ class _KubernetesContainerLauncherBase:
                 # The SharedInformer class can only either watch all namespaces or a single namespace.
                 # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
                 list_func=core_api_client.list_namespaced_pod,
-                initial_namespaces=[namespace],
+                # A chooser's namespaces are watched as launches reach them.
+                initial_namespaces=[namespace] if isinstance(namespace, str) else [],
                 # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
                 # But Tangle has only recently started labeling it's pods/jobs, so if we add filtering too soon, this will become a breaking change.
                 # label_selector=f"{_TANGLE_KUBERNETES_LABEL_KEY}=true",
@@ -665,8 +670,9 @@ class _KubernetesContainerLauncherBase:
 
         Override this method to choose namespace dynamically.
         """
-        del annotations
-        return self._namespace
+        if isinstance(self._namespace, str):
+            return self._namespace
+        return self._namespace(annotations=annotations)
 
 
 class _KubernetesPodLauncher(
@@ -679,7 +685,7 @@ class _KubernetesPodLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -909,7 +915,7 @@ class KubernetesWithHostPathContainerLauncher(_KubernetesPodLauncher):
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -938,7 +944,7 @@ class GoogleKubernetesEngineLauncher(_KubernetesPodLauncher):
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_name_prefix: str = "task-pod-",
@@ -1287,7 +1293,7 @@ class _KubernetesJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
@@ -1323,7 +1329,8 @@ class _KubernetesJobLauncher(
                 # The SharedInformer class can only either watch all namespaces or a single namespace.
                 # So, we're using our custom `MultiNamespaceInformer` class that supports watching multiple namespaces.
                 list_func=batch_api_client.list_namespaced_job,
-                initial_namespaces=[namespace],
+                # A chooser's namespaces are watched as launches reach them.
+                initial_namespaces=[namespace] if isinstance(namespace, str) else [],
                 # list_func=batch_api_client.list_job_for_all_namespaces,
                 # namespace=None,
                 # TODO: Use label selector so that only Tangle pods/jobs get into the cache.
@@ -2232,7 +2239,7 @@ class _KubernetesPodOrJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
@@ -2338,7 +2345,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         # job_name_prefix: str = "task-",
@@ -2366,7 +2373,7 @@ class Local_Kubernetes_UsingHostPathStorage_KubernetesPodOrJobLauncher(
         self,
         *,
         api_client: k8s_client_lib.ApiClient,
-        namespace: str = "default",
+        namespace: str | NamespaceChooser = "default",
         service_account_name: str | None = None,
         request_timeout: int | tuple[int, int] = 10,
         pod_labels: dict[str, str] | None = None,
