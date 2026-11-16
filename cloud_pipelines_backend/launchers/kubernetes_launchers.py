@@ -1360,6 +1360,9 @@ class _KubernetesJobLauncher(
             _MULTI_NODE_NODE_0_ADDRESS_DYNAMIC_DATA_KEY: node_0_address,
             _MULTI_NODE_ALL_NODE_ADDRESSES_DYNAMIC_DATA_KEY: all_node_addresses_str,
         }
+        secret_name_to_secret_value, secret_env_name_to_secret_name = (
+            self._handle_secrets_before_preparing_pod(input_arguments=input_arguments)
+        )
 
         for input_name, input_argument in list(input_arguments.items()):
             if input_argument.value is not None or input_argument.uri is not None:
@@ -1401,6 +1404,13 @@ class _KubernetesJobLauncher(
         # TODO: In the future (once consumers have migrated to _choose_namespace)
         # we should prohibit/ignore changing pod namespace in the pod post-processor.
         namespace = pod.metadata.namespace
+
+        self._handle_secrets_after_preparing_pod(
+            pod=pod,
+            secret_name_to_secret_value=secret_name_to_secret_value,
+            secret_env_name_to_secret_name=secret_env_name_to_secret_name,
+            annotations=annotations,
+        )
 
         service: k8s_client_lib.V1Service | None = None
         if enable_multi_node:
