@@ -15,6 +15,8 @@ def _launcher(monkeypatch, *, service_error=None):
 
     def create_job(namespace, body, _request_timeout):
         events.append("job")
+        # Kubernetes rejects a Job whose namespace differs from the request's.
+        assert body.metadata.namespace in (None, namespace)
         body.metadata.namespace = namespace
         body.metadata.uid = "job-uid"
         batch.created.append((namespace, body, _request_timeout))
@@ -129,8 +131,8 @@ def test_service_creation_failure_rolls_back_the_job(monkeypatch):
     ]
 
 
-def test_service_is_created_in_the_namespace_the_job_landed_in(monkeypatch):
-    launcher, _, core, _ = _launcher(monkeypatch)
+def test_hook_cannot_move_the_job_or_its_service(monkeypatch):
+    launcher, batch, core, _ = _launcher(monkeypatch)
 
     def move_job(job, annotations):
         job.metadata.namespace = "other-jobs"
@@ -140,10 +142,11 @@ def test_service_is_created_in_the_namespace_the_job_landed_in(monkeypatch):
 
     launched = _launch(launcher)
 
+    assert batch.created[0][0] == "tangle-jobs"
     namespace, service, _ = core.created[0]
-    assert namespace == "other-jobs"
-    assert service.metadata.namespace == "other-jobs"
-    assert launched._namespace == "other-jobs"
+    assert namespace == "tangle-jobs"
+    assert service.metadata.namespace == "tangle-jobs"
+    assert launched._namespace == "tangle-jobs"
 
 
 def _launched_job(monkeypatch, *, service, service_delete_status=None):
