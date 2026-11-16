@@ -995,3 +995,85 @@ class TestRefreshMetrics:
         app_metrics.record_completion_lag.assert_called_once_with(
             ended_at=self._ENDED_AT, status=bts.ContainerExecutionStatus.FAILED
         )
+
+
+class TestLaunchRejection:
+    _MESSAGE = 'admission webhook "validate.example" denied the request: no'
+
+    def test_rejected_launch_is_failed_and_skips_downstream(self) -> None:
+        root_task = _make_graph_task_spec(
+            tasks={
+                "upstream": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component(outputs=["out"])
+                    ),
+                ),
+                "downstream": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component(inputs=["in"])
+                    ),
+                    arguments={"in": _output_argument("upstream", "out")},
+                ),
+            },
+        )
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, root_task)
+        launched_container_mock = mock.MagicMock(
+            side_effect=launcher_interfaces.LaunchRejectedError(
+                self._MESSAGE, reason="admission_denied"
+            )
+        )
+
+        with (
+            mock.patch.object(orchestrator_sql, "app_metrics") as app_metrics,
+            mock.patch.object(orchestrator_sql, "bugsnag_instrumentation") as bugsnag,
+        ):
+            _process_queued_executions(session_factory, launched_container_mock)
+
+        session = session_factory()
+        upstream = _get_execution_node(session, "upstream")
+        downstream = _get_execution_node(session, "downstream")
+        assert (
+            upstream.container_execution_status == bts.ContainerExecutionStatus.FAILED
+        )
+        assert (
+            upstream.extra_data[
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+            ]
+            == self._MESSAGE
+        )
+        assert (
+            bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY
+            not in upstream.extra_data
+        )
+        assert upstream.container_execution is None
+        assert (
+            downstream.container_execution_status
+            == bts.ContainerExecutionStatus.SKIPPED
+        )
+        app_metrics.execution_system_errors.add.assert_not_called()
+        bugsnag.notify.assert_not_called()
+        app_metrics.execution_launch_rejections.add.assert_called_once_with(
+            1, attributes={"execution.launch_rejection.reason": "admission_denied"}
+        )
+
+    def test_other_launcher_errors_are_still_system_errors(self) -> None:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launched_container_mock = mock.MagicMock(
+            side_effect=launcher_interfaces.LauncherError("Failed to create pod")
+        )
+
+        with (
+            mock.patch.object(orchestrator_sql, "app_metrics") as app_metrics,
+            mock.patch.object(orchestrator_sql, "bugsnag_instrumentation") as bugsnag,
+        ):
+            _process_queued_executions(session_factory, launched_container_mock)
+
+        node = _get_execution_node(session_factory(), "task")
+        assert (
+            node.container_execution_status == bts.ContainerExecutionStatus.SYSTEM_ERROR
+        )
+        app_metrics.execution_system_errors.add.assert_called_once_with(1)
+        bugsnag.notify.assert_called_once()
+        app_metrics.execution_launch_rejections.add.assert_not_called()

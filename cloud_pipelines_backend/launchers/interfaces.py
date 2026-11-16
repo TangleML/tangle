@@ -47,6 +47,17 @@ class LaunchedContainerNotFoundError(LauncherError):
     """
 
 
+class LaunchRejectedError(LauncherError):
+    """The platform refused to launch the container (e.g. an admission webhook denied it).
+
+    `reason` is a short code for metrics, such as "admission_denied".
+    """
+
+    def __init__(self, *args: object, reason: str) -> None:
+        super().__init__(*args)
+        self.reason = reason
+
+
 @dataclasses.dataclass(kw_only=True)
 class InputArgument:
     total_size: int
