@@ -208,3 +208,14 @@ def test_placeholder_names_the_environment_variable_the_pod_defines() -> None:
     assert [env.name for env in container.env] == ["__TANGLE_SECRET_TOKEN"]
     assert container.args == ["$(__TANGLE_SECRET_TOKEN)"]
     assert _SECRET_VALUE not in container.args[0]
+
+
+def test_secret_carries_the_plain_value_in_string_data(
+    secrets_api: _SecretsApi,
+) -> None:
+    # `data` must be base64, so the API server would decode the plain value into other bytes.
+    _launch(launcher=_make_launcher())
+
+    [(_, secret)] = secrets_api.created
+    assert secret.string_data == {"hf-token": _SECRET_VALUE}
+    assert secret.data is None
