@@ -14,6 +14,14 @@ CONTAINER_EXECUTION_ID_ANNOTATION_KEY = (
     "cloud-pipelines.net/orchestration/container_execution.id"
 )
 
+# Durations like "PT30M". A task over its limit is stopped and ends as FAILED.
+MAX_PENDING_DURATION_ANNOTATION_KEY = "tangleml.com/orchestration/max_pending_duration"
+MAX_RUN_DURATION_ANNOTATION_KEY = "tangleml.com/orchestration/max_run_duration"
+# Set on the root task.
+MAX_PIPELINE_RUN_DURATION_ANNOTATION_KEY = (
+    "tangleml.com/orchestration/max_pipeline_run_duration"
+)
+
 # Annotations that configure the launchers
 
 # Launcher-agnostic number of ADDITIONAL attempts after the first one (integer, 0..5).
