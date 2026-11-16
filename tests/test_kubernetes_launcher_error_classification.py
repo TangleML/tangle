@@ -231,7 +231,9 @@ class TestAdmissionDenialMessage:
         exception = _api_exception_with_body(
             status, _status_body(message=message, code=status)
         )
-        assert kubernetes_launchers._admission_denial_message(exception) == message
+        assert (
+            kubernetes_launchers._extract_admission_denial_message(exception) == message
+        )
 
     @pytest.mark.parametrize(
         "exception",
@@ -257,7 +259,7 @@ class TestAdmissionDenialMessage:
         ],
     )
     def test_other_errors_are_not_denials(self, exception: Exception) -> None:
-        assert kubernetes_launchers._admission_denial_message(exception) is None
+        assert kubernetes_launchers._extract_admission_denial_message(exception) is None
 
 
 def _launcher(launcher_class, monkeypatch, *, create_error: Exception):

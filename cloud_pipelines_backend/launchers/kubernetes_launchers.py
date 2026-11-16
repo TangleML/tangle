@@ -622,11 +622,11 @@ class _KubernetesPodLauncher(
                 _request_timeout=self._request_timeout,
             )
         except Exception as ex:
-            raise _create_error(
+            raise _convert_exception_to_launcher_error(
                 ex,
                 workload=pod,
                 namespace=pod.metadata.namespace or namespace,
-                message=f"Failed to create pod: {_kubernetes_serialize(pod)}",
+                message=f"Failed to create pod: {_serialize_kubernetes_object_to_compact_dict_and_censor_it(obj=pod)}",
             ) from ex
 
         pod_name: str = created_pod.metadata.name
@@ -1390,11 +1390,11 @@ class _KubernetesJobLauncher(
                 _request_timeout=self._request_timeout,
             )
         except Exception as ex:
-            raise _create_error(
+            raise _convert_exception_to_launcher_error(
                 ex,
                 workload=job,
                 namespace=job.metadata.namespace or namespace,
-                message=f"Failed to create Kubernetes Job: {_kubernetes_serialize(job)}",
+                message=f"Failed to create Kubernetes Job: {_serialize_kubernetes_object_to_compact_dict_and_censor_it(obj=job)}",
             ) from ex
 
         job_name: str = created_job.metadata.name
@@ -2321,7 +2321,7 @@ def _is_kubelet_unreachable_error(
     )
 
 
-def _admission_denial_message(exception: Exception) -> str | None:
+def _extract_admission_denial_message(exception: Exception) -> str | None:
     """The message of an admission webhook denial, or None for any other error.
 
     The webhook chooses the status code; 400 and 403 are the ones seen in practice.
@@ -2347,14 +2347,14 @@ def _admission_denial_message(exception: Exception) -> str | None:
     return None
 
 
-def _create_error(
+def _convert_exception_to_launcher_error(
     exception: Exception,
     *,
     workload: k8s_client_lib.V1Pod | k8s_client_lib.V1Job,
     namespace: str,
     message: str,
 ) -> interfaces.LauncherError:
-    denial_message = _admission_denial_message(exception)
+    denial_message = _extract_admission_denial_message(exception)
     if denial_message is None:
         return interfaces.LauncherError(message)
     workload_dict = _serialize_kubernetes_object_to_compact_dict_and_censor_it(
