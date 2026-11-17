@@ -5,7 +5,7 @@ from typing import Callable
 from unittest import mock
 
 import pytest
-from sqlalchemy import orm
+from sqlalchemy import orm, event, exc
 from sqlalchemy import sql
 
 from cloud_pipelines_backend import api_server_sql
@@ -1077,3 +1077,242 @@ class TestLaunchRejection:
         app_metrics.execution_system_errors.add.assert_called_once_with(1)
         bugsnag.notify.assert_called_once()
         app_metrics.execution_launch_rejections.add.assert_not_called()
+
+
+class TestNativeWorkerAttachment:
+    @pytest.mark.parametrize("already_completed", [False, True])
+    @pytest.mark.parametrize("failure_point", ["read", "before_commit", "after_commit"])
+    def test_disconnect_retries_attachment_without_submitting_again(
+        self, failure_point, already_completed
+    ):
+        session_factory = _create_session_factory()
+        root_task = _make_graph_task_spec(
+            tasks={
+                "upstream": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component(outputs=["out"])
+                    )
+                ),
+                "downstream": structures.TaskSpec(
+                    component_ref=structures.ComponentReference(
+                        spec=_make_container_component(inputs=["in"])
+                    ),
+                    arguments={"in": _output_argument("upstream", "out")},
+                ),
+            }
+        )
+        _create_pipeline_run(session_factory, root_task)
+        launch = _make_launched_container_mock()
+        if already_completed:
+            launch.return_value.status = launcher_interfaces.ContainerStatus.SUCCEEDED
+        orchestrator = _make_running_orchestrator(session_factory, launch)
+        failed = False
+        attempts = 0
+
+        def attachment_session():
+            nonlocal attempts
+            attempts += 1
+            session = session_factory()
+
+            def disconnect(*args):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise exc.OperationalError(
+                        "test",
+                        {},
+                        OSError("connection lost"),
+                        connection_invalidated=True,
+                    )
+
+            event_name = "do_orm_execute" if failure_point == "read" else failure_point
+            event.listen(session, event_name, disconnect)
+            return session
+
+        orchestrator._session_factory = attachment_session
+        with mock.patch.object(orchestrator_sql.time, "sleep"):
+            orchestrator.internal_process_queued_executions_queue(
+                session=session_factory()
+            )
+        assert failed
+        assert attempts == 2
+        launch.assert_called_once()
+        with session_factory() as session:
+            upstream = _get_execution_node(session, "upstream")
+            assert (
+                upstream.container_execution_status
+                == bts.ContainerExecutionStatus.PENDING
+            )
+            assert upstream.container_execution.launcher_data == {"foo": "bar"}
+            assert len(session.scalars(sql.select(bts.ContainerExecution)).all()) == 1
+            assert (
+                _get_execution_node(session, "downstream").container_execution_status
+                == bts.ContainerExecutionStatus.WAITING_FOR_UPSTREAM
+            )
+        self._complete(orchestrator, session_factory)
+        with session_factory() as session:
+            assert (
+                _get_execution_node(session, "upstream").container_execution_status
+                == bts.ContainerExecutionStatus.SUCCEEDED
+            )
+            assert (
+                _get_execution_node(session, "downstream").container_execution_status
+                == bts.ContainerExecutionStatus.QUEUED
+            )
+            assert (
+                session.scalar(
+                    sql.select(bts.ArtifactData).where(
+                        bts.ArtifactData.hash == "test=hash"
+                    )
+                )
+                is not None
+            )
+
+    @staticmethod
+    def _complete(orchestrator, session_factory):
+        handle = mock.MagicMock(
+            status=launcher_interfaces.ContainerStatus.SUCCEEDED,
+            exit_code=0,
+            started_at=None,
+            ended_at=datetime.datetime.now(datetime.timezone.utc),
+            to_dict=lambda: {"foo": "bar"},
+        )
+        orchestrator._launcher.get_refreshed_launched_container_from_dict.return_value = (
+            handle
+        )
+        reader = (
+            orchestrator._storage_provider.make_uri.return_value.get_reader.return_value
+        )
+        reader.exists.return_value = True
+        reader.get_info.return_value = mock.MagicMock(
+            is_dir=False, total_size=2, hashes={"test": "hash"}
+        )
+        reader.download_as_bytes.return_value = b"ok"
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            launcher_interfaces.ContainerStatus.SUCCEEDED,
+            launcher_interfaces.ContainerStatus.FAILED,
+            launcher_interfaces.ContainerStatus.ERROR,
+        ],
+    )
+    def test_already_terminal_handle_still_runs_normal_completion(self, status):
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launch = _make_launched_container_mock()
+        launch.return_value.status = status
+        launch.return_value.exit_code = (
+            0 if status == launcher_interfaces.ContainerStatus.SUCCEEDED else 1
+        )
+        launch.return_value.started_at = None
+        launch.return_value.ended_at = datetime.datetime.now(datetime.timezone.utc)
+        launch.return_value.launcher_error_message = None
+        orchestrator = _make_running_orchestrator(session_factory, launch)
+        orchestrator.internal_process_queued_executions_queue(session=session_factory())
+        with session_factory() as session:
+            assert (
+                session.scalar(sql.select(bts.ContainerExecution)).status
+                == bts.ContainerExecutionStatus.PENDING
+            )
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        with session_factory() as session:
+            assert session.scalar(sql.select(bts.ContainerExecution)).status == (
+                bts.ContainerExecutionStatus.SYSTEM_ERROR
+                if status == launcher_interfaces.ContainerStatus.ERROR
+                else bts.ContainerExecutionStatus(status)
+            )
+        launch.assert_called_once()
+
+    @pytest.mark.parametrize("invalidated, expected_attempts", [(True, 3), (False, 1)])
+    def test_attachment_retries_are_bounded_and_only_for_disconnects(
+        self, invalidated, expected_attempts
+    ):
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launch = _make_launched_container_mock()
+        orchestrator = _make_orchestrator(
+            session_factory=session_factory, launched_container_mock=launch
+        )
+        factory = mock.MagicMock(
+            side_effect=exc.OperationalError(
+                "test", {}, OSError("lost"), connection_invalidated=invalidated
+            )
+        )
+        orchestrator._session_factory = factory
+        with mock.patch.object(orchestrator_sql.time, "sleep"):
+            orchestrator.internal_process_queued_executions_queue(
+                session=session_factory()
+            )
+        assert factory.call_count == expected_attempts
+        launch.assert_called_once()
+        with session_factory() as session:
+            assert (
+                _get_execution_node(session, "task").container_execution_status
+                == bts.ContainerExecutionStatus.SYSTEM_ERROR
+            )
+
+    def test_cancel_during_submit_survives_attachment(self):
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launch = _make_launched_container_mock()
+
+        def cancel(**kwargs):
+            with session_factory() as session:
+                _request_termination(session=session, task_id="task")
+            return launch.return_value
+
+        launch.side_effect = cancel
+        orchestrator = _make_running_orchestrator(session_factory, launch)
+        orchestrator.internal_process_queued_executions_queue(session=session_factory())
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        launch.return_value.terminate.assert_called_once()
+        with session_factory() as session:
+            assert (
+                _get_execution_node(session, "task").container_execution_status
+                == bts.ContainerExecutionStatus.CANCELLED
+            )
+
+    def test_attachment_conflict_cannot_replace_an_existing_worker(self):
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        launch = _make_launched_container_mock()
+        orchestrator = _make_orchestrator(
+            session_factory=session_factory, launched_container_mock=launch
+        )
+        original = orchestrator._attach_launched_container
+        saved = {}
+
+        def capture(**kwargs):
+            saved.update(kwargs)
+            original(**kwargs)
+
+        with mock.patch.object(
+            orchestrator, "_attach_launched_container", side_effect=capture
+        ):
+            orchestrator.internal_process_queued_executions_queue(
+                session=session_factory()
+            )
+        original(**saved)  # A lost success acknowledgement is idempotent.
+        conflicting = dict(
+            saved["attachment"],
+            extra_data={"initial_launcher_data_sha256": "different-worker"},
+        )
+        with pytest.raises(orchestrator_sql.OrchestratorError, match="conflicts"):
+            original(**{**saved, "attachment": conflicting})
+        with pytest.raises(orchestrator_sql.OrchestratorError, match="changed"):
+            original(
+                **{**saved, "attachment": dict(saved["attachment"], id="different-id")}
+            )
+        with session_factory() as session:
+            containers = session.scalars(sql.select(bts.ContainerExecution)).all()
+            assert len(containers) == 1
+            assert containers[0].id == saved["attachment"]["id"]
+            assert containers[0].launcher_data == {"foo": "bar"}

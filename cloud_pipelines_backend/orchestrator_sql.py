@@ -1,5 +1,6 @@
 import copy
 import json
+import hashlib
 import datetime
 import logging
 import itertools
@@ -786,6 +787,21 @@ class OrchestratorService_Sql:
             container_execution_uuid
         )
 
+        # Snapshot ORM inputs before the remote launch. A connection can disappear
+        # during submit; reading expired ORM values afterwards would lose the handle
+        # before attachment recovery even starts.
+        execution_id = execution.id
+        input_data = {
+            name: dict(
+                id=data.id,
+                is_dir=data.is_dir,
+                total_size=data.total_size,
+                hash=data.hash,
+            )
+            for name, data in input_artifact_data.items()
+        }
+        session.rollback()
+
         try:
             launched_container: launcher_interfaces.LaunchedContainer = (
                 self._launcher.launch_container_task(
@@ -800,6 +816,9 @@ class OrchestratorService_Sql:
             if launched_container.status not in (
                 launcher_interfaces.ContainerStatus.PENDING,
                 launcher_interfaces.ContainerStatus.RUNNING,
+                launcher_interfaces.ContainerStatus.SUCCEEDED,
+                launcher_interfaces.ContainerStatus.FAILED,
+                launcher_interfaces.ContainerStatus.ERROR,
             ):
                 raise OrchestratorError(
                     f"Unexpected status of just launched container: {launched_container.status=}, {launched_container=}"
@@ -832,42 +851,127 @@ class OrchestratorService_Sql:
 
         current_time = _get_current_time()
 
-        container_execution = bts.ContainerExecution(
-            status=bts.ContainerExecutionStatus(launched_container.status),
+        # Terminal handles still need one ordinary polling pass to validate outputs,
+        # record artifacts, and unblock (or skip) descendants.
+        status = (
+            bts.ContainerExecutionStatus.SYSTEM_ERROR
+            if launched_container.status == launcher_interfaces.ContainerStatus.ERROR
+            else bts.ContainerExecutionStatus(launched_container.status)
+        )
+        if status not in (
+            bts.ContainerExecutionStatus.PENDING,
+            bts.ContainerExecutionStatus.RUNNING,
+        ):
+            status = bts.ContainerExecutionStatus.PENDING
+        launcher_data = launched_container.to_dict()
+        attachment = dict(
+            id=container_execution_uuid,
+            status=status,
             last_processed_at=current_time,
             created_at=current_time,
-            launcher_data=launched_container.to_dict(),
-            # Updating the map with uploaded value URIs and downloaded values.
+            launcher_data=launcher_data,
+            extra_data={
+                "initial_launcher_data_sha256": hashlib.sha256(
+                    json.dumps(
+                        launcher_data, sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest()
+            },
             input_artifact_data_map={
-                input_name: dict(
-                    id=artifact_data.id,
-                    is_dir=artifact_data.is_dir,
-                    total_size=artifact_data.total_size,
-                    hash=artifact_data.hash,
-                    # The value and URI might have been updated during launching.
-                    value=input_arguments[input_name].value,
-                    uri=input_arguments[input_name].uri,
+                name: dict(
+                    **data,
+                    value=input_arguments[name].value,
+                    uri=input_arguments[name].uri,
                 )
-                for input_name, artifact_data in input_artifact_data.items()
+                for name, data in input_data.items()
             },
             output_artifact_data_map={
-                output_name: dict(
-                    uri=uri,
-                )
-                for output_name, uri in output_artifact_uris.items()
+                name: dict(uri=uri) for name, uri in output_artifact_uris.items()
             },
             log_uri=log_uri,
         )
-        container_execution.id = container_execution_uuid
+        self._attach_launched_container(
+            execution_id=execution_id, cache_key=cache_key, attachment=attachment
+        )
+        session.expire_all()
 
-        # Need to commit/rollback before explicitly beginning non-nested transaction.
-        session.rollback()
-        with session.begin():
-            session.add(container_execution)
-            execution.container_execution = container_execution
-            execution.container_execution_cache_key = cache_key
-            execution.container_execution_status = container_execution.status
-            # TODO: Maybe add artifact value and URI to input ArtifactData.
+    def _attach_launched_container(
+        self, *, execution_id: str, cache_key: str, attachment: dict[str, Any]
+    ) -> None:
+        """Retry only DB attachment, never submit, after a lost connection.
+
+        A commit may have succeeded before its response was lost. A fresh session
+        verifies the exact attachment before treating that case as success. This
+        bounded retry does not provide process-crash recovery of an unrecorded handle.
+        """
+        for attempt in range(3):
+            try:
+                with self._session_factory() as attach_session, attach_session.begin():
+                    node = attach_session.scalar(
+                        sql.select(bts.ExecutionNode)
+                        .where(bts.ExecutionNode.id == execution_id)
+                        .with_for_update()
+                    )
+                    if node is None:
+                        raise OrchestratorError(
+                            "Execution disappeared before native worker attachment"
+                        )
+                    existing = attach_session.get(
+                        bts.ContainerExecution, attachment["id"]
+                    )
+                    if existing is not None:
+                        same = (
+                            node.container_execution_id == existing.id
+                            and node.container_execution_cache_key == cache_key
+                            and existing.log_uri == attachment["log_uri"]
+                            and existing.input_artifact_data_map
+                            == attachment["input_artifact_data_map"]
+                            and {
+                                name: {"uri": data.get("uri")}
+                                for name, data in (
+                                    existing.output_artifact_data_map or {}
+                                ).items()
+                            }
+                            == attachment["output_artifact_data_map"]
+                            and (existing.extra_data or {}).get(
+                                "initial_launcher_data_sha256"
+                            )
+                            == attachment["extra_data"]["initial_launcher_data_sha256"]
+                        )
+                        if not same:
+                            raise OrchestratorError(
+                                "Native worker attachment conflicts with persisted execution"
+                            )
+                        return
+                    if (
+                        node.container_execution_id is not None
+                        or node.container_execution_status
+                        != bts.ContainerExecutionStatus.QUEUED
+                    ):
+                        raise OrchestratorError(
+                            "Execution changed before native worker attachment"
+                        )
+                    container = bts.ContainerExecution(
+                        **{
+                            key: value
+                            for key, value in attachment.items()
+                            if key != "id"
+                        }
+                    )
+                    container.id = attachment["id"]
+                    attach_session.add(container)
+                    node.container_execution = container
+                    node.container_execution_cache_key = cache_key
+                    node.container_execution_status = container.status
+                return
+            except sql.exc.DBAPIError as error:
+                if not error.connection_invalidated or attempt == 2:
+                    raise
+                _logger.warning(
+                    "Lost DB connection attaching native worker; retrying attachment only (attempt %s)",
+                    attempt + 1,
+                )
+                time.sleep((0.25, 1.0)[attempt])
 
     def internal_process_one_running_execution(
         self, session: orm.Session, container_execution: bts.ContainerExecution
@@ -882,7 +986,9 @@ class OrchestratorService_Sql:
         launched_container: launcher_interfaces.LaunchedContainer = (
             self._launcher.deserialize_launched_container_from_dict(launcher_data)
         )
-        previous_status = launched_container.status
+        # The database tracks which transitions have been processed. The launcher
+        # handle may already be terminal when submit reconciliation attaches it.
+        previous_status = container_execution.status
         if previous_status not in (
             bts.ContainerExecutionStatus.PENDING,
             bts.ContainerExecutionStatus.RUNNING,
