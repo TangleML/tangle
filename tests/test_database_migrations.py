@@ -2021,3 +2021,79 @@ def test_migrate_secret_value_column_idempotent(
     our_msgs = [m for m in caplog.messages if m.startswith("migrate column to TEXT:")]
     assert our_msgs[-2] == "migrate column to TEXT: complete"
     assert our_msgs[-1] == "migrate column to TEXT: skipped (already TEXT)"
+
+
+# ---------------------------------------------------------------------------
+# component.text column migration (TEXT -> MEDIUMTEXT)
+# ---------------------------------------------------------------------------
+
+
+def _create_component_table_with_text_65535(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> None:
+    """Create the component table with TEXT(65535) to simulate MySQL TEXT."""
+    with db_engine.connect() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "CREATE TABLE component ("
+                "  digest VARCHAR(255) NOT NULL PRIMARY KEY,"
+                "  text TEXT(65535) NOT NULL,"
+                "  spec JSON,"
+                "  extra_data JSON"
+                ")"
+            )
+        )
+        conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO component (digest, text)"
+                " VALUES ('test-digest', 'hello world')"
+            )
+        )
+        conn.commit()
+
+
+def test_migrate_component_text_column(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Migration widens TEXT(65535) to TEXT(2**24) and preserves data."""
+    db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+    _create_component_table_with_text_65535(db_engine=db_engine)
+
+    inspector = sqlalchemy.inspect(db_engine)
+    cols_before = {c["name"]: c for c in inspector.get_columns("component")}
+    assert cols_before["text"]["type"].length == 65535
+
+    with caplog.at_level(logging.INFO):
+        database_migrations.migrate_component_text_column(db_engine=db_engine)
+
+    inspector_after = sqlalchemy.inspect(db_engine)
+    cols_after = {c["name"]: c for c in inspector_after.get_columns("component")}
+    assert cols_after["text"]["type"].length == bts._MEDIUMTEXT_LENGTH
+
+    with db_engine.connect() as conn:
+        row = conn.execute(
+            sqlalchemy.text("SELECT text FROM component WHERE digest = 'test-digest'")
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "hello world"
+
+    migrate_msgs = [m for m in caplog.messages if "MEDIUMTEXT" in m]
+    assert any("complete" in m for m in migrate_msgs)
+
+
+def test_migrate_component_text_column_idempotent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Second call is a no-op when column is already MEDIUMTEXT-sized."""
+    db_engine = database_ops.create_db_engine(database_uri="sqlite://")
+    _create_component_table_with_text_65535(db_engine=db_engine)
+
+    database_migrations.migrate_component_text_column(db_engine=db_engine)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        database_migrations.migrate_component_text_column(db_engine=db_engine)
+
+    migrate_msgs = [m for m in caplog.messages if "MEDIUMTEXT" in m]
+    assert migrate_msgs == [], "Second call should skip — column already widened"

@@ -1,6 +1,7 @@
 import dataclasses
 import enum
 import logging
+import time
 from typing import Any
 
 from alembic import migration as alembic_migration
@@ -9,6 +10,7 @@ import sqlalchemy
 from sqlalchemy import orm
 
 from . import backend_types_sql as bts
+from . import component_library_api_server as components_api
 from . import filter_query_sql
 
 _logger = logging.getLogger(__name__)
@@ -794,4 +796,75 @@ def migrate_secret_value_column(
             f"migrate column to TEXT failed: table={table.name},"
             f" column={column.name}, current_type={curr_col_type},"
             f" target_type={type_sql}, dialect={dialect}"
+        )
+
+
+def migrate_component_text_column(
+    *,
+    db_engine: sqlalchemy.Engine,
+) -> None:
+    """Widen component.text from TEXT to MEDIUMTEXT (16 MB).
+
+    Idempotent: inspects the actual DB column and skips if already
+    MEDIUMTEXT/LONGTEXT (MySQL) or unlimited TEXT (PG/SQLite).
+    """
+    table = components_api.ComponentRow.__table__
+    text_column = table.c.text
+    target_type = sqlalchemy.Text(length=bts._MEDIUMTEXT_LENGTH)
+
+    inspector = sqlalchemy.inspect(db_engine)
+    db_columns = {c["name"]: c for c in inspector.get_columns(table.name)}
+    curr_text_col_type = db_columns[text_column.name]["type"]
+
+    # Both TEXT and MEDIUMTEXT are sqlalchemy.types.Text instances.
+    # We must check the length to distinguish them.
+    #
+    # | MySQL Type   | isinstance(Text) | .length      |
+    # |------------- |------------------|------------- |
+    # | TEXT         | True             | 65535 / None |
+    # | MEDIUMTEXT   | True             | 16,777,215   |
+    # | LONGTEXT     | True             | 4,294,967,295|
+    #
+    # PG/SQLite: TEXT has no length limit → always skip.
+
+    if isinstance(curr_text_col_type, sqlalchemy.types.Text):
+        curr_length = getattr(curr_text_col_type, "length", None)
+        # None means unlimited (PG/SQLite) — already sufficient
+        if curr_length is None or curr_length >= bts._MEDIUMTEXT_LENGTH:
+            return
+
+    _logger.info(
+        f"migrate {table.name}.{text_column.name} to MEDIUMTEXT: "
+        f"current_length={curr_length:,}, target_length={bts._MEDIUMTEXT_LENGTH:,}"
+    )
+
+    start_time = time.time()
+    try:
+        with db_engine.connect() as conn:
+            ctx = alembic_migration.MigrationContext.configure(conn)
+            op = alembic_operations.Operations(ctx)
+            with op.batch_alter_table(table.name) as batch_op:
+                batch_op.alter_column(
+                    text_column.name,
+                    type_=target_type,
+                    # existing_* tells Alembic the column's current attributes.
+                    # MySQL MODIFY COLUMN needs the full column spec — without
+                    # these, MySQL may silently reset nullability or add a default.
+                    existing_type=curr_text_col_type,
+                    # orm.Mapped[str] (not str | None) = NOT NULL
+                    existing_nullable=False,
+                    # column has no SQL DEFAULT clause
+                    existing_server_default=None,
+                )
+            conn.commit()
+        elapsed = time.time() - start_time
+        _logger.info(
+            f"migrate {table.name}.{text_column.name} to MEDIUMTEXT: "
+            f"complete in {elapsed:.1f}s"
+        )
+    except Exception:
+        elapsed = time.time() - start_time
+        _logger.exception(
+            f"migrate {table.name}.{text_column.name} to MEDIUMTEXT: "
+            f"failed after {elapsed:.1f}s"
         )
