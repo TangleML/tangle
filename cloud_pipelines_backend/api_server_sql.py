@@ -25,6 +25,10 @@ _logger = logging.getLogger(__name__)
 
 T = typing.TypeVar("T")
 
+_CANCELLED_CONTAINER_EXECUTION_LAST_PROCESSED_AT = datetime.datetime(
+    1970, 1, 1, tzinfo=datetime.timezone.utc
+)
+
 
 class ApiServiceError(RuntimeError):
     pass
@@ -243,6 +247,10 @@ class PipelineRunsApiService_Sql:
             if execution_node.extra_data is None:
                 execution_node.extra_data = {}
             execution_node.extra_data["desired_state"] = "TERMINATED"
+            if execution_node.container_execution is not None:
+                execution_node.container_execution.last_processed_at = (
+                    _CANCELLED_CONTAINER_EXECUTION_LAST_PROCESSED_AT
+                )
         session.commit()
 
     # Note: This method must be last to not shadow the "list" type

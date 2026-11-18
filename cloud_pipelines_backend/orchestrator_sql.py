@@ -75,7 +75,7 @@ class OrchestratorService_Sql:
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
         _running_execution_refresh_interval: datetime.timedelta = datetime.timedelta(
-            seconds=30
+            seconds=60
         ),
         queued_execution_interceptor: QueuedExecutionInterceptor | None = None,
     ):
@@ -97,7 +97,6 @@ class OrchestratorService_Sql:
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
         self._running_execution_refresh_interval = _running_execution_refresh_interval
-        self._running_executions_queue_overdue = False
         self._queued_execution_interceptor = queued_execution_interceptor
 
     def run_loop(self):
@@ -113,16 +112,13 @@ class OrchestratorService_Sql:
 
     def process_each_queue_once(self) -> bool:
         """Processes each queue once; returns whether the next sweep should start without waiting."""
-        self._running_executions_queue_overdue = False
         queued_queue_has_items = self._process_queue_batch(
             self.internal_process_queued_executions_queue
         )
         running_queue_has_items = self._process_queue_batch(
             self.internal_process_running_executions_queue
         )
-        return queued_queue_has_items or (
-            running_queue_has_items and self._running_executions_queue_overdue
-        )
+        return queued_queue_has_items or running_queue_has_items
 
     def _process_queue_batch(
         self, queue_handler: typing.Callable[..., typing.Any]
@@ -156,14 +152,6 @@ class OrchestratorService_Sql:
             ):
                 break
         return queue_has_items
-
-    def _is_overdue(self, *, last_processed_at: datetime.datetime | None) -> bool:
-        """Whether a container execution last refreshed at `last_processed_at` is due for another refresh."""
-        return (
-            last_processed_at is None
-            or last_processed_at
-            < _get_current_time() - self._running_execution_refresh_interval
-        )
 
     def internal_process_queued_executions_queue(self, session: orm.Session):
         _logger.debug("Selecting queued execution to process.)")
@@ -237,7 +225,12 @@ class OrchestratorService_Sql:
                         bts.ContainerExecutionStatus.PENDING,
                         bts.ContainerExecutionStatus.RUNNING,
                     )
-                )
+                ),
+                sql.or_(
+                    bts.ContainerExecution.last_processed_at.is_(None),
+                    bts.ContainerExecution.last_processed_at
+                    < _get_current_time() - self._running_execution_refresh_interval,
+                ),
             )
             .order_by(bts.ContainerExecution.last_processed_at)
             .limit(1)
@@ -256,9 +249,6 @@ class OrchestratorService_Sql:
             return False
 
         self._running_executions_queue_idle = False
-        self._running_executions_queue_overdue = self._is_overdue(
-            last_processed_at=running_container_execution.last_processed_at
-        )
 
         execution_node_ids = list(
             session.scalars(

@@ -113,6 +113,7 @@ def _make_orchestrator(
         data_root_uri="file:///tmp/artifacts",
         logs_root_uri="file:///tmp/logs",
         queued_execution_interceptor=queued_execution_interceptor,
+        _running_execution_refresh_interval=datetime.timedelta(0),
     )
 
 
