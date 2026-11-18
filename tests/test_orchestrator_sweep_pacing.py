@@ -157,3 +157,62 @@ def test_sweeps_again_without_waiting_when_a_batch_raises_after_finding_work():
         side_effect=[True, True, RuntimeError("The database was unavailable")],
     ):
         assert orchestrator.process_each_queue_once() is True
+
+
+def test_skips_a_container_execution_refreshed_within_the_interval():
+    session_factory = _create_session_factory()
+    _create_pipeline_run(session_factory)
+    orchestrator = _make_orchestrator(session_factory)
+    orchestrator.process_each_queue_once()
+    _set_last_processed_at(
+        session_factory,
+        datetime.datetime.now(tz=datetime.timezone.utc)
+        - datetime.timedelta(seconds=59),
+    )
+
+    assert (
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        is False
+    )
+    orchestrator._launcher.get_refreshed_launched_container_from_dict.assert_not_called()
+
+
+def test_refreshes_a_container_execution_once_the_interval_passed():
+    session_factory = _create_session_factory()
+    _create_pipeline_run(session_factory)
+    orchestrator = _make_orchestrator(session_factory)
+    orchestrator.process_each_queue_once()
+    _set_last_processed_at(
+        session_factory,
+        datetime.datetime.now(tz=datetime.timezone.utc)
+        - datetime.timedelta(seconds=61),
+    )
+
+    assert (
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        is True
+    )
+    orchestrator._launcher.get_refreshed_launched_container_from_dict.assert_called_once()
+
+
+def test_cancelling_a_run_refreshes_its_container_execution_without_waiting():
+    session_factory = _create_session_factory()
+    _create_pipeline_run(session_factory)
+    orchestrator = _make_orchestrator(session_factory)
+    orchestrator.process_each_queue_once()
+    with session_factory() as session:
+        pipeline_run_id = session.scalar(sql.select(bts.PipelineRun.id))
+        api_server_sql.PipelineRunsApiService_Sql().terminate(
+            session=session, id=pipeline_run_id, skip_user_check=True
+        )
+
+    assert (
+        orchestrator.internal_process_running_executions_queue(
+            session=session_factory()
+        )
+        is True
+    )

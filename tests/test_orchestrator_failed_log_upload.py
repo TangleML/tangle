@@ -133,6 +133,7 @@ def test_failed_execution_survives_log_upload_failure() -> None:
         storage_provider=mock.MagicMock(),
         data_root_uri="file:///tmp/artifacts",
         logs_root_uri="file:///tmp/logs",
+        _running_execution_refresh_interval=datetime.timedelta(0),
     )
 
     # Launch the queued executions: `upstream` becomes PENDING, `downstream` stays

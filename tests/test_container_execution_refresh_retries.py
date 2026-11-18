@@ -1,5 +1,6 @@
 """Tests for the refresh-failure budget in the running-executions queue."""
 
+import datetime
 from typing import Any, Callable
 from unittest import mock
 
@@ -124,6 +125,7 @@ def _make_orchestrator(
         data_root_uri="file:///tmp/artifacts",
         logs_root_uri="file:///tmp/logs",
         _max_container_execution_refresh_error_retries=max_failures,
+        _running_execution_refresh_interval=datetime.timedelta(0),
     )
 
 
