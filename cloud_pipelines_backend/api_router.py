@@ -18,6 +18,7 @@ from . import errors
 from .instrumentation import contextual_logging
 
 if typing.TYPE_CHECKING:
+    from . import secret_value_store
     from .launchers import interfaces as launcher_interfaces
 
 
@@ -40,6 +41,7 @@ def setup_routes(
     container_launcher_for_log_streaming: "launcher_interfaces.ContainerTaskLauncher[launcher_interfaces.LaunchedContainer] | None" = None,
     default_component_library_owner_username: str = "admin",
     do_skip_backfill: bool = False,
+    secret_value_store: "secret_value_store.SecretValueStore | None" = None,
 ):
     def get_session():
         with orm.Session(autocommit=False, autoflush=False, bind=db_engine) as session:
@@ -76,6 +78,7 @@ def setup_routes(
         user_details_getter=user_details_getter,
         get_launcher=get_launcher,
         lifespan=lifespan,
+        secret_value_store=secret_value_store,
     )
 
 
@@ -93,6 +96,7 @@ def _setup_routes_internal(
         | typing.Callable[..., abc.Iterator[typing.Any]]
         | None
     ) = None,
+    secret_value_store: "secret_value_store.SecretValueStore | None" = None,
 ):
     # We request `app: fastapi.FastAPI` instead of just returning the router
     # because we want to add exception handler which is only supported for `FastAPI`.
@@ -148,6 +152,15 @@ def _setup_routes_internal(
         return fastapi.responses.JSONResponse(
             status_code=422,
             content={"detail": str(exc)},
+        )
+
+    @app.exception_handler(errors.SecretStorageTypeMismatchError)
+    def handle_secret_storage_type_mismatch_error(
+        request: fastapi.Request, exc: errors.SecretStorageTypeMismatchError
+    ):
+        return fastapi.responses.JSONResponse(
+            status_code=fastapi.status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"message": str(exc)},
         )
 
     @app.exception_handler(NotImplementedError)
@@ -462,7 +475,9 @@ def _setup_routes_internal(
         )
 
     ### Secrets routes
-    secrets_service = api_server_sql.SecretsApiService()
+    secrets_service = api_server_sql.SecretsApiService(
+        secret_value_store=secret_value_store
+    )
 
     router.get("/api/secrets/", tags=["secrets"], **default_config)(
         inject_session_dependency(

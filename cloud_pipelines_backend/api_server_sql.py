@@ -13,6 +13,7 @@ from . import errors
 from .access_control import checks as access_control_checks
 from .access_control import runs as access_control_runs
 from . import filter_query_sql
+from . import secret_value_store
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -1256,6 +1257,13 @@ class ListSecretsResponse:
 
 
 class SecretsApiService:
+    def __init__(
+        self,
+        *,
+        secret_value_store: secret_value_store.SecretValueStore | None = None,
+    ):
+        self._secret_value_store = secret_value_store
+
     def create_secret(
         self,
         *,
@@ -1318,7 +1326,9 @@ class SecretsApiService:
                 raise errors.ItemAlreadyExistsError(
                     f"Secret with name '{secret_name}' already exists."
                 )
-            secret.secret_value = secret_value
+            secret_value_store.raise_if_storage_type_mismatch(
+                secret=secret, store=self._secret_value_store
+            )
             secret.updated_at = current_time
         else:
             if raise_if_not_exists:
@@ -1328,17 +1338,30 @@ class SecretsApiService:
             secret = bts.Secret(
                 user_id=user_id,
                 secret_name=secret_name,
-                secret_value=secret_value,
+                # Set below, through the store when there is one.
+                secret_value="",
                 created_at=current_time,
                 updated_at=current_time,
             )
             session.add(secret)
+        # The new value is saved before the row commits, and the one it replaces is retired after,
+        # so the row never names a value that is already gone.
+        previous_storage_details = secret_value_store.store_secret_value(
+            secret=secret, value=secret_value, store=self._secret_value_store
+        )
         if description:
             secret.description = description
         if expires_at:
             secret.expires_at = expires_at
         response = SecretInfoResponse.from_db(secret)
         session.commit()
+        if previous_storage_details is not None:
+            secret_value_store.retire_secret_value(
+                store=self._secret_value_store,
+                storage_details=previous_storage_details,
+                user_id=user_id,
+                secret_name=secret_name,
+            )
         return response
 
     def delete_secret(
@@ -1353,8 +1376,19 @@ class SecretsApiService:
             raise errors.ItemNotFoundError(
                 f"Secret with name '{secret_name}' does not exist."
             )
+        secret_value_store.raise_if_storage_type_mismatch(
+            secret=secret, store=self._secret_value_store
+        )
+        storage_details = secret_value_store.get_storage_details(secret=secret)
         session.delete(secret)
         session.commit()
+        if storage_details is not None:
+            secret_value_store.retire_secret_value(
+                store=self._secret_value_store,
+                storage_details=storage_details,
+                user_id=user_id,
+                secret_name=secret_name,
+            )
 
     def list_secrets(
         self,
