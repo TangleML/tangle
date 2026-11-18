@@ -634,6 +634,22 @@ def _setup_routes_internal(
             execution_node = session.get(backend_types_sql.ExecutionNode, id)
             execution_node.container_execution_status = status
 
+    @router.post(
+        "/api/admin/secrets/backfill_storage",
+        tags=["admin"],
+        dependencies=[ensure_admin_user_dependency],
+        **default_config,
+    )
+    def admin_backfill_secret_storage(
+        session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],
+        limit: typing.Annotated[int, fastapi.Query(ge=1, le=1000)] = 50,
+        user_id: str | None = None,
+        secret_name: str | None = None,
+    ) -> dict[str, int]:
+        return secrets_service.backfill_secret_storage(
+            session=session, limit=limit, user_id=user_id, secret_name=secret_name
+        )
+
     @router.get("/api/admin/sql_engine_connection_pool_status")
     async def get_sql_engine_connection_pool_status(
         session: typing.Annotated[orm.Session, fastapi.Depends(get_session)],

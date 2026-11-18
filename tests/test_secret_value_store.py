@@ -29,6 +29,7 @@ class _FakeStore:
         engine: sqlalchemy.Engine | None = None,
         fail_delete: bool = False,
         fail_get: bool = False,
+        fail_save_value: str | None = None,
     ) -> None:
         self.type = type
         self.versions: dict[str, str] = {}
@@ -38,11 +39,14 @@ class _FakeStore:
         self.row_version_at_delete: list[str | None] = []
         self._fail_delete = fail_delete
         self._fail_get = fail_get
+        self._fail_save_value = fail_save_value
 
     def save(
         self, *, user_id: str, secret_name: str, value: str
     ) -> tuple[str, dict[str, Any]]:
-        """Saves the value as the next version."""
+        """Saves the value as the next version, or fails for `fail_save_value`."""
+        if value == self._fail_save_value:
+            raise RuntimeError("store unavailable")
         version = str(len(self.versions) + 1)
         self.versions[version] = value
         return "", {"version": version}
@@ -227,14 +231,16 @@ def test_a_failed_retire_is_logged_and_the_update_stands(
     assert "v1" not in caplog.text and "v2" not in caplog.text
 
 
-def _client(*, engine: sqlalchemy.Engine, store: _FakeStore | None) -> TestClient:
+def _client(
+    *, engine: sqlalchemy.Engine, store: _FakeStore | None, admin: bool = False
+) -> TestClient:
     """Returns an API client for alice, with the given store passed to setup_routes."""
     app = fastapi.FastAPI()
     api_router.setup_routes(
         app=app,
         db_engine=engine,
         user_details_getter=lambda: api_router.UserDetails(
-            name="alice", permissions={"read": True, "write": True, "admin": False}
+            name="alice", permissions={"read": True, "write": True, "admin": admin}
         ),
         secret_value_store=store,
     )
@@ -373,3 +379,176 @@ def test_launch_fails_when_the_store_cannot_read(tmp_path: pathlib.Path):
     )
     launch.assert_not_called()
     assert "store unavailable" in _system_error(execution=execution)
+
+
+def _plain_rows(
+    *, engine: sqlalchemy.Engine, names: list[str], user_id: str = "alice"
+) -> None:
+    """Creates the owner's secrets as plain-text rows, each valued as its name in lower case."""
+    service = api_server_sql.SecretsApiService()
+    with orm.Session(bind=engine) as session:
+        for name in names:
+            service.create_secret(
+                session=session,
+                user_id=user_id,
+                secret_name=name,
+                secret_value=name.lower(),
+            )
+
+
+def _backfill(
+    *,
+    engine: sqlalchemy.Engine,
+    store: _FakeStore | None,
+    limit: int = 50,
+    **filters: str,
+) -> dict[str, int]:
+    """Runs one backfill call through the service, narrowed by any `user_id` or `secret_name` given."""
+    service = api_server_sql.SecretsApiService(secret_value_store=store)
+    with orm.Session(bind=engine) as session:
+        return service.backfill_secret_storage(session=session, limit=limit, **filters)
+
+
+def _rows(*, engine: sqlalchemy.Engine) -> dict[str, tuple[str, Any]]:
+    """Reads every committed row as name -> (secret_value, extra_data)."""
+    with orm.Session(bind=engine) as session:
+        return {
+            row.secret_name: (row.secret_value, row.extra_data)
+            for row in session.scalars(sqlalchemy.select(bts.Secret))
+        }
+
+
+def _stored(version: str, type: str = "fake") -> tuple[str, Any]:
+    """Returns how a row looks once its value is in the store."""
+    return "", {"storage": {"type": type, "details": {"version": version}}}
+
+
+def test_backfill_moves_plain_rows_into_the_store(tmp_path: pathlib.Path):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A", "B"])
+    store = _FakeStore()
+    result = _backfill(engine=engine, store=store)
+    assert result == {"moved_to_store": 2, "already_stored": 0, "still_plaintext": 0}
+    assert _rows(engine=engine) == {"A": _stored("1"), "B": _stored("2")}
+    assert store.versions == {"1": "a", "2": "b"}
+
+
+def test_backfill_rerun_skips_moved_rows(tmp_path: pathlib.Path):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A", "B"])
+    store = _FakeStore()
+    _backfill(engine=engine, store=store)
+    result = _backfill(engine=engine, store=store)
+    assert result == {"moved_to_store": 0, "already_stored": 2, "still_plaintext": 0}
+    assert store.versions == {"1": "a", "2": "b"}
+
+
+def test_backfill_stops_at_the_limit(tmp_path: pathlib.Path):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A", "B", "C"])
+    store = _FakeStore()
+    first = _backfill(engine=engine, store=store, limit=2)
+    assert first == {"moved_to_store": 2, "already_stored": 0, "still_plaintext": 1}
+    second = _backfill(engine=engine, store=store, limit=2)
+    assert second == {"moved_to_store": 1, "already_stored": 2, "still_plaintext": 0}
+
+
+def test_a_failed_save_stops_the_backfill_and_keeps_earlier_rows(
+    tmp_path: pathlib.Path,
+):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A", "B", "C"])
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        _backfill(engine=engine, store=_FakeStore(fail_save_value="b"))
+    assert _rows(engine=engine) == {
+        "A": _stored("1"),
+        "B": ("b", None),
+        "C": ("c", None),
+    }
+
+
+def test_backfill_leaves_rows_in_another_store_alone(tmp_path: pathlib.Path):
+    engine = _engine(tmp_path=tmp_path)
+    _save(engine=engine, store=_FakeStore(type="other"), value="s3cret")
+    _plain_rows(engine=engine, names=["A"])
+    result = _backfill(engine=engine, store=_FakeStore())
+    assert result == {"moved_to_store": 1, "already_stored": 1, "still_plaintext": 0}
+    assert _rows(engine=engine) == {
+        "A": _stored("1"),
+        "TOKEN": _stored("1", type="other"),
+    }
+
+
+def test_backfill_without_a_store_is_refused(tmp_path: pathlib.Path):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A"])
+    with pytest.raises(errors.ApiValidationError, match="No secret value store"):
+        _backfill(engine=engine, store=None)
+    assert _rows(engine=engine) == {"A": ("a", None)}
+
+
+@pytest.mark.parametrize("admin", [False, True], ids=["user", "admin"])
+def test_the_backfill_route_is_for_admins_only(tmp_path: pathlib.Path, admin: bool):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A"])
+    response = _client(engine=engine, store=_FakeStore(), admin=admin).post(
+        "/api/admin/secrets/backfill_storage", params={"limit": 10}
+    )
+    if admin:
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "moved_to_store": 1,
+            "already_stored": 0,
+            "still_plaintext": 0,
+        }
+        assert _rows(engine=engine) == {"A": _stored("1")}
+    else:
+        assert response.status_code == 403, response.text
+        assert _rows(engine=engine) == {"A": ("a", None)}
+
+
+def _stored_keys(*, engine: sqlalchemy.Engine) -> set[tuple[str, str]]:
+    """Returns (user_id, secret_name) of every committed row whose value is in a store."""
+    with orm.Session(bind=engine) as session:
+        return {
+            (row.user_id, row.secret_name)
+            for row in session.scalars(sqlalchemy.select(bts.Secret))
+            if row.extra_data
+        }
+
+
+@pytest.mark.parametrize(
+    ("filters", "moved"),
+    [
+        ({"user_id": "alice", "secret_name": "A"}, {("alice", "A")}),
+        ({"user_id": "alice"}, {("alice", "A"), ("alice", "B")}),
+        ({"secret_name": "A"}, {("alice", "A"), ("bob", "A")}),
+    ],
+    ids=["one-secret", "one-owner", "one-name"],
+)
+def test_backfill_moves_only_the_matching_rows(
+    tmp_path: pathlib.Path, filters: dict[str, str], moved: set[tuple[str, str]]
+):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A", "B"])
+    _plain_rows(engine=engine, names=["A"], user_id="bob")
+    result = _backfill(engine=engine, store=_FakeStore(), **filters)
+    assert result["moved_to_store"] == len(moved)
+    assert _stored_keys(engine=engine) == moved
+
+
+def test_the_backfill_route_passes_the_filters(tmp_path: pathlib.Path):
+    engine = _engine(tmp_path=tmp_path)
+    _plain_rows(engine=engine, names=["A", "B"])
+    _plain_rows(engine=engine, names=["A"], user_id="bob")
+    response = _client(engine=engine, store=_FakeStore(), admin=True).post(
+        "/api/admin/secrets/backfill_storage",
+        params={"user_id": "alice", "secret_name": "A"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "moved_to_store": 1,
+        "already_stored": 0,
+        "still_plaintext": 2,
+    }
+    assert _stored_keys(engine=engine) == {("alice", "A")}

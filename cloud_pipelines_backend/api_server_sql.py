@@ -1364,6 +1364,61 @@ class SecretsApiService:
             )
         return response
 
+    def backfill_secret_storage(
+        self,
+        *,
+        session: orm.Session,
+        limit: int,
+        user_id: str | None = None,
+        secret_name: str | None = None,
+    ) -> dict[str, int]:
+        """Moves up to `limit` plain-text secrets into the store, committing each row, and reports how many are left.
+
+        `user_id` and `secret_name`, when given, move only matching rows; both together pick one secret.
+        """
+        if not self._secret_value_store:
+            raise errors.ApiValidationError("No secret value store is configured.")
+        is_plaintext = sql.func.json_extract(
+            bts.Secret.extra_data, f"$.{secret_value_store.EXTRA_DATA_STORAGE_KEY}"
+        ).is_(None)
+        secrets_for_backfill = session.execute(
+            sql.select(bts.Secret.user_id, bts.Secret.secret_name)
+            .where(is_plaintext)
+            .filter_by(
+                **({"user_id": user_id} if user_id is not None else {}),
+                **({"secret_name": secret_name} if secret_name is not None else {}),
+            )
+            .order_by(bts.Secret.user_id, bts.Secret.secret_name)
+            .limit(limit)
+        ).all()
+        moved_to_store = 0
+        for user_id, secret_name in secrets_for_backfill:
+            # Re-read under a row lock: an update or another backfill may have moved or deleted it since.
+            secret = session.scalars(
+                sql.select(bts.Secret)
+                .where(
+                    bts.Secret.user_id == user_id,
+                    bts.Secret.secret_name == secret_name,
+                    is_plaintext,
+                )
+                .with_for_update()
+            ).one_or_none()
+            if secret is None:
+                continue
+            secret_value_store.store_secret_value(
+                secret=secret, value=secret.secret_value, store=self._secret_value_store
+            )
+            # Each value is already saved in the store, so its row commits before the next is touched.
+            session.commit()
+            moved_to_store += 1
+        count = sql.select(sql.func.count()).select_from(bts.Secret)
+        return {
+            "moved_to_store": moved_to_store,
+            "already_stored": session.scalar(count.where(~is_plaintext))
+            - moved_to_store,
+            "still_plaintext": session.scalar(count.where(is_plaintext)),
+        }
+
     def delete_secret(
         self,
         *,
