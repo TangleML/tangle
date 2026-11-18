@@ -4,6 +4,7 @@ import datetime
 import logging
 import itertools
 import os
+import threading
 import time
 import traceback
 import typing
@@ -35,6 +36,10 @@ _T = typing.TypeVar("_T")
 
 DYNAMIC_DATA_SECRET_KEY = "secret"
 DYNAMIC_DATA_SECRET_NAME_KEY = "name"
+
+_CHANGED_CONTAINER_EXECUTION_PRIORITY = datetime.timedelta(minutes=2)
+
+_MAX_CHANGED_CONTAINER_EXECUTION_IDS = 10_000
 
 
 class OrchestratorError(RuntimeError):
@@ -94,6 +99,11 @@ class OrchestratorService_Sql:
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
         self._queued_execution_interceptor = queued_execution_interceptor
+        self._changed_container_execution_ids: set[str] = set()
+        self._changed_container_execution_ids_lock = threading.Lock()
+        self._launcher.subscribe_to_container_execution_changes(
+            listener=self._record_container_execution_change
+        )
 
     def run_loop(self):
         while True:
@@ -197,6 +207,7 @@ class OrchestratorService_Sql:
         return True
 
     def internal_process_running_executions_queue(self, session: orm.Session):
+        self._move_changed_container_executions_to_front(session=session)
         _logger.debug("Selecting running container execution to process.)")
 
         # Select only the ID to avoid loading large JSON columns into the sort buffer.
@@ -340,6 +351,51 @@ class OrchestratorService_Sql:
                     processing_duration_ms=duration_ms,
                 )
         return True
+
+    def _record_container_execution_change(
+        self, change: launcher_interfaces.ContainerExecutionChange
+    ) -> None:
+        """Records a container execution the launcher saw change, for the next running sweep to check first.
+
+        Runs on the launcher's thread; past the cap new ids are dropped, so those executions just wait their normal turn.
+        """
+        with self._changed_container_execution_ids_lock:
+            if (
+                len(self._changed_container_execution_ids)
+                < _MAX_CHANGED_CONTAINER_EXECUTION_IDS
+            ):
+                self._changed_container_execution_ids.add(change.container_execution_id)
+
+    def _move_changed_container_executions_to_front(self, session: orm.Session) -> None:
+        """Moves each pending or running execution the launcher saw change to `_CHANGED_CONTAINER_EXECUTION_PRIORITY` ago, unless it's already further ahead.
+
+        Changes are served in the order recorded, an execution that keeps changing can't starve the rest, and a change
+        seen mid-refresh (such as the container finishing) moves that execution forward again.
+        """
+        with self._changed_container_execution_ids_lock:
+            container_execution_ids = self._changed_container_execution_ids
+            self._changed_container_execution_ids = set()
+        if not container_execution_ids:
+            return
+        front_of_queue_last_processed_at = (
+            _get_current_time() - _CHANGED_CONTAINER_EXECUTION_PRIORITY
+        )
+        session.execute(
+            sql.update(bts.ContainerExecution)
+            .where(
+                bts.ContainerExecution.id.in_(container_execution_ids),
+                bts.ContainerExecution.status.in_(
+                    (
+                        bts.ContainerExecutionStatus.PENDING,
+                        bts.ContainerExecutionStatus.RUNNING,
+                    )
+                ),
+                bts.ContainerExecution.last_processed_at
+                > front_of_queue_last_processed_at,
+            )
+            .values(last_processed_at=front_of_queue_last_processed_at)
+        )
+        session.commit()
 
     def internal_process_one_queued_execution(
         self, session: orm.Session, execution: bts.ExecutionNode
