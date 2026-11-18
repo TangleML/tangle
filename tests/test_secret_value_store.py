@@ -1,6 +1,7 @@
 import logging
 import pathlib
 from typing import Any
+from unittest import mock
 
 import fastapi
 import pytest
@@ -11,8 +12,11 @@ from starlette.testclient import TestClient
 from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import api_server_sql
 from cloud_pipelines_backend import backend_types_sql as bts
+from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import errors
+from cloud_pipelines_backend import orchestrator_sql
+from cloud_pipelines_backend.launchers import interfaces as launcher_interfaces
 
 
 class _FakeStore:
@@ -24,6 +28,7 @@ class _FakeStore:
         type: str = "fake",
         engine: sqlalchemy.Engine | None = None,
         fail_delete: bool = False,
+        fail_get: bool = False,
     ) -> None:
         self.type = type
         self.versions: dict[str, str] = {}
@@ -32,6 +37,7 @@ class _FakeStore:
         self._engine = engine
         self.row_version_at_delete: list[str | None] = []
         self._fail_delete = fail_delete
+        self._fail_get = fail_get
 
     def save(
         self, *, user_id: str, secret_name: str, value: str
@@ -44,7 +50,9 @@ class _FakeStore:
     def get(
         self, *, storage_details: dict[str, Any], user_id: str, secret_name: str
     ) -> str:
-        """Returns the saved version."""
+        """Returns the saved version, or fails when told to."""
+        if self._fail_get:
+            raise RuntimeError("store unavailable")
         return self.versions[storage_details["version"]]
 
     def delete(
@@ -254,3 +262,114 @@ def test_a_refusal_is_a_503_naming_both_stores(tmp_path: pathlib.Path):
     assert "'fake' store" in response.json()["message"]
     assert "None" in response.json()["message"]
     assert _row(engine=engine) is not None
+
+
+def _launch_token(
+    *, tmp_path: pathlib.Path, read_store: _FakeStore | None
+) -> tuple[mock.MagicMock, bts.ExecutionNode]:
+    """Runs a one-task pipeline that takes alice's TOKEN as an input, with `read_store` as the orchestrator's store."""
+    engine = _engine(tmp_path=tmp_path)
+    session_factory = lambda: orm.Session(bind=engine)
+    component = structures.ComponentSpec(
+        inputs=[structures.InputSpec(name="token")],
+        implementation=structures.ContainerImplementation(
+            container=structures.ContainerSpec(image="python")
+        ),
+    )
+    task = structures.TaskSpec(
+        component_ref=structures.ComponentReference(spec=component),
+        arguments={
+            "token": structures.DynamicDataArgument(
+                dynamic_data={"secret": {"name": "TOKEN"}}
+            )
+        },
+    )
+    pipeline = structures.ComponentSpec(
+        implementation=structures.GraphImplementation(
+            graph=structures.GraphSpec(tasks={"task": task})
+        )
+    )
+    api_server_sql.PipelineRunsApiService_Sql().create(
+        session=session_factory(),
+        root_task=structures.TaskSpec(
+            component_ref=structures.ComponentReference(spec=pipeline)
+        ),
+        created_by="alice",
+    )
+    launch = mock.MagicMock(
+        return_value=mock.MagicMock(
+            status=launcher_interfaces.ContainerStatus.PENDING, to_dict=lambda: {}
+        )
+    )
+    orchestrator_sql.OrchestratorService_Sql(
+        session_factory=session_factory,
+        launcher=mock.MagicMock(launch_container_task=launch),
+        storage_provider=mock.MagicMock(),
+        data_root_uri="file:///tmp/artifacts",
+        logs_root_uri="file:///tmp/logs",
+        secret_value_store=read_store,
+    ).process_each_queue_once()
+    execution = (
+        session_factory()
+        .query(bts.ExecutionNode)
+        .filter(bts.ExecutionNode.container_execution_status.is_not(None))
+        .one()
+    )
+    return launch, execution
+
+
+def _launched_value(*, launch: mock.MagicMock) -> str:
+    """The value the launcher was given for the `token` input."""
+    return launch.call_args.kwargs["input_arguments"]["token"].value
+
+
+def _system_error(*, execution: bts.ExecutionNode) -> str:
+    """Asserts the launch failed as a system error, and returns its message."""
+    assert (
+        execution.container_execution_status
+        == bts.ContainerExecutionStatus.SYSTEM_ERROR
+    )
+    return execution.extra_data[
+        bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY
+    ]
+
+
+@pytest.mark.parametrize("read_store", [None, _FakeStore()], ids=["no-store", "store"])
+def test_launch_passes_a_plain_row_as_is(
+    tmp_path: pathlib.Path, read_store: _FakeStore | None
+):
+    _save(engine=_engine(tmp_path=tmp_path), store=None, value="s3cret")
+    launch, _ = _launch_token(tmp_path=tmp_path, read_store=read_store)
+    assert _launched_value(launch=launch) == "s3cret"
+
+
+def test_launch_reads_a_stored_row_through_the_store(tmp_path: pathlib.Path):
+    store = _FakeStore()
+    _save(engine=_engine(tmp_path=tmp_path), store=store, value="s3cret")
+    launch, _ = _launch_token(tmp_path=tmp_path, read_store=store)
+    assert _launched_value(launch=launch) == "s3cret"
+
+
+@pytest.mark.parametrize(
+    "read_store, configured",
+    [(None, "None"), (_FakeStore(type="other"), "'other'")],
+    ids=["no-store", "other-store"],
+)
+def test_launch_fails_when_the_store_does_not_match(
+    tmp_path: pathlib.Path, read_store: _FakeStore | None, configured: str
+):
+    _save(engine=_engine(tmp_path=tmp_path), store=_FakeStore(), value="s3cret")
+    launch, execution = _launch_token(tmp_path=tmp_path, read_store=read_store)
+    launch.assert_not_called()
+    message = _system_error(execution=execution)
+    assert "kept in the 'fake' store" in message
+    assert f"this server's secret store is {configured}" in message
+
+
+def test_launch_fails_when_the_store_cannot_read(tmp_path: pathlib.Path):
+    _save(engine=_engine(tmp_path=tmp_path), store=_FakeStore(), value="s3cret")
+    launch, execution = _launch_token(
+        tmp_path=tmp_path, read_store=_FakeStore(fail_get=True)
+    )
+    launch.assert_not_called()
+    assert "store unavailable" in _system_error(execution=execution)

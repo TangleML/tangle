@@ -22,6 +22,7 @@ from cloud_pipelines.orchestration.launchers import naming_utils
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import filter_query_sql
+from . import secret_value_store
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import bugsnag_instrumentation
@@ -70,6 +71,7 @@ class OrchestratorService_Sql:
         sleep_seconds_between_queue_sweeps: float = 1.0,
         output_data_purge_duration: datetime.timedelta = None,
         *,
+        secret_value_store: secret_value_store.SecretValueStore | None = None,
         # Internal/experimental:
         _max_container_execution_refresh_error_retries: int = 3,
         _max_queue_batch_size: int = 1,
@@ -94,6 +96,7 @@ class OrchestratorService_Sql:
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
         self._queued_execution_interceptor = queued_execution_interceptor
+        self._secret_value_store = secret_value_store
 
     def run_loop(self):
         while True:
@@ -713,7 +716,9 @@ class OrchestratorService_Sql:
                     raise OrchestratorError(
                         f"{execution.id=}: User error: Error resolving a secret argument for {input_name=}: User {user_id} does not have secret {secret_name}."
                     )
-                secret_value = secret.secret_value
+                secret_value = secret_value_store.read_secret_value(
+                    secret=secret, store=self._secret_value_store
+                )
                 input_artifact_data[input_name] = bts.ArtifactData(
                     total_size=len(secret_value.encode("utf-8")),
                     is_dir=False,

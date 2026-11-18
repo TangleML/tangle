@@ -104,6 +104,28 @@ def raise_if_storage_type_mismatch(
         )
 
 
+def read_secret_value(*, secret: bts.Secret, store: SecretValueStore | None) -> str:
+    """Returns the secret's value for a launch: from the row, or through the store that holds it.
+
+    Raises when the value is in a store other than this server's, so the launch fails instead of
+    passing the row's placeholder to the task as if it were the value.
+    """
+    storage_type = get_storage_type(secret=secret)
+    if storage_type is None:
+        return secret.secret_value
+    configured = store.type if store else None
+    if storage_type != configured:
+        raise errors.SecretStorageTypeMismatchError(
+            f"Secret '{secret.secret_name}' is kept in the {storage_type!r} store, "
+            f"but this server's secret store is {configured!r}; it cannot be read for this launch."
+        )
+    return store.get(
+        storage_details=get_storage_details(secret=secret),
+        user_id=secret.user_id,
+        secret_name=secret.secret_name,
+    )
+
+
 def retire_secret_value(
     *,
     store: SecretValueStore,
