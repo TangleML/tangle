@@ -1236,7 +1236,8 @@ class SecretInfoResponse:
     secret_name: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
-    expires_at: datetime.datetime | None = None
+    # Expiry is not enforced, so it is neither returned nor accepted; the column stays.
+    # expires_at: datetime.datetime | None = None
     description: str | None = None
 
     @classmethod
@@ -1245,7 +1246,7 @@ class SecretInfoResponse:
             secret_name=secret_row.secret_name,
             created_at=secret_row.created_at,
             updated_at=secret_row.updated_at,
-            expires_at=secret_row.expires_at,
+            # expires_at=secret_row.expires_at,
             description=secret_row.description,
         )
 
@@ -1264,7 +1265,8 @@ class SecretsApiService:
         secret_name: str,
         secret_value: str,
         description: str | None = None,
-        expires_at: datetime.datetime | None = None,
+        # A client that still sends expires_at gets 200; FastAPI ignores unknown query parameters.
+        # expires_at: datetime.datetime | None = None,
     ) -> SecretInfoResponse:
         secret_name = secret_name.strip()
         if not secret_name:
@@ -1275,7 +1277,7 @@ class SecretsApiService:
             secret_name=secret_name,
             secret_value=secret_value,
             description=description,
-            expires_at=expires_at,
+            # expires_at=expires_at,
             raise_if_exists=True,
         )
 
@@ -1287,7 +1289,7 @@ class SecretsApiService:
         secret_name: str,
         secret_value: str,
         description: str | None = None,
-        expires_at: datetime.datetime | None = None,
+        # expires_at: datetime.datetime | None = None,
     ) -> SecretInfoResponse:
         return self._create_or_update_secret(
             session=session,
@@ -1295,7 +1297,7 @@ class SecretsApiService:
             secret_name=secret_name,
             secret_value=secret_value,
             description=description,
-            expires_at=expires_at,
+            # expires_at=expires_at,
             raise_if_not_exists=True,
         )
 
@@ -1307,7 +1309,7 @@ class SecretsApiService:
         secret_name: str,
         secret_value: str,
         description: str | None = None,
-        expires_at: datetime.datetime | None = None,
+        # expires_at: datetime.datetime | None = None,
         raise_if_not_exists: bool = False,
         raise_if_exists: bool = False,
     ) -> SecretInfoResponse:
@@ -1335,8 +1337,8 @@ class SecretsApiService:
             session.add(secret)
         if description:
             secret.description = description
-        if expires_at:
-            secret.expires_at = expires_at
+        # if expires_at:
+        #     secret.expires_at = expires_at
         response = SecretInfoResponse.from_db(secret)
         session.commit()
         return response
