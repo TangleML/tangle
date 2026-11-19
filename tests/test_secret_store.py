@@ -1,3 +1,4 @@
+import builtins
 import dataclasses
 import pathlib
 
@@ -12,23 +13,27 @@ from cloud_pipelines_backend import api_server_sql
 from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import errors
-from cloud_pipelines_backend import secret_store
+from cloud_pipelines_backend import secret_interfaces
 
 
-class _FakeStore(secret_store.SecretStore):
+class _FakeStore(secret_interfaces.SecretStore):
     """An in-memory `SecretStore` that follows its contract, keyed by user and name."""
 
     def __init__(self) -> None:
-        self.secrets: dict[tuple[str, str], secret_store.StoredSecret] = {}
+        self.secrets: dict[tuple[str, str], secret_interfaces.StoredSecret] = {}
 
-    def create(self, *, secret: secret_store.StoredSecret) -> secret_store.StoredSecret:
+    def create(
+        self, *, secret: secret_interfaces.StoredSecret
+    ) -> secret_interfaces.StoredSecret:
         key = (secret.user_id, secret.secret_name)
         if key in self.secrets:
             raise errors.ItemAlreadyExistsError("exists")
         self.secrets[key] = secret
         return dataclasses.replace(secret, value=None)
 
-    def update(self, *, secret: secret_store.StoredSecret) -> secret_store.StoredSecret:
+    def update(
+        self, *, secret: secret_interfaces.StoredSecret
+    ) -> secret_interfaces.StoredSecret:
         key = (secret.user_id, secret.secret_name)
         old = self.secrets.get(key)
         if old is None:
@@ -47,7 +52,7 @@ class _FakeStore(secret_store.SecretStore):
         secret = self.secrets.get((user_id, secret_name))
         return secret.value if secret else None
 
-    def list_secrets(self, *, user_id: str) -> list[secret_store.StoredSecret]:
+    def list(self, *, user_id: str) -> builtins.list[secret_interfaces.StoredSecret]:
         return [
             dataclasses.replace(secret, value=None)
             for (owner, _), secret in self.secrets.items()
@@ -67,7 +72,7 @@ def _engine(*, tmp_path: pathlib.Path) -> sqlalchemy.Engine:
 
 
 def _service(*, store: _FakeStore | None) -> api_server_sql.SecretsApiService:
-    return api_server_sql.SecretsApiService(secret_store=store)
+    return api_server_sql.SecretsApiService(_secret_store=store)
 
 
 def _create(
@@ -135,9 +140,9 @@ def test_create_saves_in_the_store_and_writes_no_row(tmp_path: pathlib.Path) -> 
     assert _rows(engine=engine) == []
 
 
-def _stored(*, value: str) -> secret_store.StoredSecret:
+def _stored(*, value: str) -> secret_interfaces.StoredSecret:
     now = api_server_sql._get_current_time()
-    return secret_store.StoredSecret(
+    return secret_interfaces.StoredSecret(
         user_id="alice",
         secret_name="TOKEN",
         value=value,
@@ -280,7 +285,7 @@ def _client(*, engine: sqlalchemy.Engine, store: _FakeStore | None) -> TestClien
         user_details_getter=lambda: api_router.UserDetails(
             name="alice", permissions={"read": True, "write": True, "admin": False}
         ),
-        secret_store=store,
+        _secret_store=store,
     )
     return TestClient(app)
 
