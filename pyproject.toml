@@ -46,3 +46,9 @@ addopts = "--import-mode=importlib"
 [tool.setuptools.packages.find]
 include = ["cloud_pipelines_backend*"]
 namespaces = true
+
+[tool.setuptools.package-data]
+# The Alembic revision scripts under `migrations/versions/` are picked up as
+# modules by the namespace-package discovery above, but `script.py.mako` (the
+# template for `alembic revision`) is not a module and has to be listed here.
+"cloud_pipelines_backend.migrations" = ["script.py.mako"]
