@@ -16,15 +16,12 @@ from cloud_pipelines_backend import secret_store
 
 
 class _FakeStore(secret_store.SecretStore):
-    """An in-memory `SecretStore` that follows the base class's contract, keyed by user and name."""
+    """An in-memory `SecretStore` that follows its contract, keyed by user and name."""
 
-    def __init__(self, *, fail_create: bool = False) -> None:
+    def __init__(self) -> None:
         self.secrets: dict[tuple[str, str], secret_store.StoredSecret] = {}
-        self._fail_create = fail_create
 
     def create(self, *, secret: secret_store.StoredSecret) -> secret_store.StoredSecret:
-        if self._fail_create:
-            raise RuntimeError("store unavailable")
         key = (secret.user_id, secret.secret_name)
         if key in self.secrets:
             raise errors.ItemAlreadyExistsError("exists")
@@ -138,28 +135,53 @@ def test_create_saves_in_the_store_and_writes_no_row(tmp_path: pathlib.Path) -> 
     assert _rows(engine=engine) == []
 
 
-def test_create_of_a_name_still_in_the_table_moves_it_and_conflicts(
-    tmp_path: pathlib.Path,
-) -> None:
+def _stored(*, value: str) -> secret_store.StoredSecret:
+    now = api_server_sql._get_current_time()
+    return secret_store.StoredSecret(
+        user_id="alice",
+        secret_name="TOKEN",
+        value=value,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _delete(*, engine: sqlalchemy.Engine, store: _FakeStore | None) -> None:
+    with orm.Session(bind=engine) as session:
+        _service(store=store).delete_secret(
+            session=session, user_id="alice", secret_name="TOKEN"
+        )
+
+
+def test_create_of_a_name_still_in_the_table_conflicts(tmp_path: pathlib.Path) -> None:
     engine = _engine(tmp_path=tmp_path)
     _create(engine=engine, store=None, value="old")
     store = _FakeStore()
     with pytest.raises(errors.ItemAlreadyExistsError):
         _create(engine=engine, store=store, value="new")
-    assert store.get(user_id="alice", secret_name="TOKEN") == "old"
-    assert _rows(engine=engine) == []
+    assert store.secrets == {}
+    assert [row.secret_value for row in _rows(engine=engine)] == ["old"]
 
 
-def test_update_moves_the_row_then_saves_the_new_value(tmp_path: pathlib.Path) -> None:
+def test_update_of_a_row_updates_it_where_it_is(tmp_path: pathlib.Path) -> None:
     engine = _engine(tmp_path=tmp_path)
-    _create(engine=engine, store=None, value="old", description="from the row")
-    [row] = _rows(engine=engine)
+    _create(engine=engine, store=None, value="old")
     store = _FakeStore()
+    _update(engine=engine, store=store, value="new")
+    assert store.secrets == {}
+    assert [row.secret_value for row in _rows(engine=engine)] == ["new"]
+
+
+def test_update_of_a_secret_in_the_store_updates_the_store(
+    tmp_path: pathlib.Path,
+) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    store = _FakeStore()
+    created = _create(engine=engine, store=store, value="old", description="d")
     response = _update(engine=engine, store=store, value="new")
     assert store.get(user_id="alice", secret_name="TOKEN") == "new"
-    assert response.created_at == row.created_at
-    assert response.updated_at > row.updated_at
-    assert response.description == "from the row"
+    assert response.created_at == created.created_at
+    assert response.description == "d"
     assert _rows(engine=engine) == []
 
 
@@ -178,141 +200,75 @@ def test_update_of_a_missing_secret_is_not_found(tmp_path: pathlib.Path) -> None
         _update(engine=_engine(tmp_path=tmp_path), store=_FakeStore(), value="v")
 
 
-def test_delete_removes_a_secret_still_in_the_table(tmp_path: pathlib.Path) -> None:
+def test_delete_of_a_row_deletes_the_row(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _create(engine=engine, store=None)
+    _delete(engine=engine, store=_FakeStore())
+    assert _rows(engine=engine) == []
+
+
+def test_delete_of_a_row_also_deletes_a_copy_left_in_the_store(
+    tmp_path: pathlib.Path,
+) -> None:
     engine = _engine(tmp_path=tmp_path)
     _create(engine=engine, store=None)
     store = _FakeStore()
-    with orm.Session(bind=engine) as session:
-        _service(store=store).delete_secret(
-            session=session, user_id="alice", secret_name="TOKEN"
-        )
+    store.create(secret=_stored(value="copy"))
+    _delete(engine=engine, store=store)
     assert store.secrets == {}
     assert _rows(engine=engine) == []
-    with orm.Session(bind=engine) as session, pytest.raises(errors.ItemNotFoundError):
-        _service(store=store).delete_secret(
-            session=session, user_id="alice", secret_name="TOKEN"
-        )
 
 
-def test_list_moves_only_the_callers_rows(tmp_path: pathlib.Path) -> None:
+def test_delete_of_a_secret_in_the_store(tmp_path: pathlib.Path) -> None:
     engine = _engine(tmp_path=tmp_path)
-    _create(engine=engine, store=None, secret_name="A")
-    _create(engine=engine, store=None, secret_name="B")
-    _create(engine=engine, store=None, user_id="bob", secret_name="C")
     store = _FakeStore()
-    _create(engine=engine, store=store, secret_name="D")
+    _create(engine=engine, store=store)
+    _delete(engine=engine, store=store)
+    assert store.secrets == {}
+    with pytest.raises(errors.ItemNotFoundError):
+        _delete(engine=engine, store=store)
+
+
+def test_list_reads_only_the_store(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _create(engine=engine, store=None, secret_name="IN_TABLE")
+    store = _FakeStore()
+    _create(engine=engine, store=store, secret_name="IN_STORE")
+    _create(engine=engine, store=store, user_id="bob", secret_name="BOBS")
     with orm.Session(bind=engine) as session:
         listed = _service(store=store).list_secrets(session=session, user_id="alice")
-    assert sorted(secret.secret_name for secret in listed.secrets) == ["A", "B", "D"]
-    assert [(row.user_id, row.secret_name) for row in _rows(engine=engine)] == [
-        ("bob", "C")
-    ]
+    assert [secret.secret_name for secret in listed.secrets] == ["IN_STORE"]
+    assert [row.secret_name for row in _rows(engine=engine)] == ["IN_TABLE"]
 
 
-def test_move_rows_carries_every_column(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize("with_store", [True, False])
+def test_the_row_is_locked_only_with_a_store(
+    tmp_path: pathlib.Path, with_store: bool
+) -> None:
+    """A backfill moving the row then waits; without a store the read stays as before."""
     engine = _engine(tmp_path=tmp_path)
-    _create(engine=engine, store=None, value="v1", description="d")
+    _create(engine=engine, store=None)
+    store = _FakeStore() if with_store else None
+    locks = []
     with orm.Session(bind=engine) as session:
-        session.get(bts.Secret, ("alice", "TOKEN")).extra_data = {"k": "v"}
-        session.commit()
-    [row] = _rows(engine=engine)
-    store = _FakeStore()
-    with orm.Session(bind=engine) as session:
-        secret_store.move_rows(
-            session=session, secret_store=store, user_id="alice", secret_name="TOKEN"
+        sqlalchemy.event.listen(
+            session,
+            "do_orm_execute",
+            lambda state: locks.append(state.statement._for_update_arg is not None),
         )
-    assert store.secrets[("alice", "TOKEN")] == secret_store.StoredSecret(
-        user_id="alice",
-        secret_name="TOKEN",
-        value="v1",
-        description="d",
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        extra_data={"k": "v"},
-    )
-    assert _rows(engine=engine) == []
-
-
-def test_move_rows_keeps_the_row_when_the_store_fails(tmp_path: pathlib.Path) -> None:
-    engine = _engine(tmp_path=tmp_path)
-    _create(engine=engine, store=None, value="v1")
-    with orm.Session(bind=engine) as session, pytest.raises(RuntimeError):
-        secret_store.move_rows(
-            session=session,
-            secret_store=_FakeStore(fail_create=True),
-            user_id="alice",
-            secret_name="TOKEN",
+        service = _service(store=store)
+        service.update_secret(
+            session=session, user_id="alice", secret_name="TOKEN", secret_value="v2"
         )
-    [row] = _rows(engine=engine)
-    assert row.secret_value == "v1"
+        session.expunge_all()
+        service.delete_secret(session=session, user_id="alice", secret_name="TOKEN")
+    assert locks[:1] + locks[-1:] == [with_store, with_store]
 
 
 def test_stored_secret_never_shows_its_value() -> None:
-    secret = secret_store.StoredSecret(
-        user_id="alice",
-        secret_name="TOKEN",
-        value="hunter2",
-        created_at=api_server_sql._get_current_time(),
-        updated_at=api_server_sql._get_current_time(),
-    )
+    secret = _stored(value="hunter2")
     assert "hunter2" not in repr(secret)
     assert "hunter2" not in f"{secret}"
-
-
-def test_every_store_method_a_subclass_defines_moves_rows_first() -> None:
-    for name in ("create", "update", "list_secrets", "delete"):
-        assert (
-            getattr(_FakeStore, name).__wrapped__.__qualname__ == f"_FakeStore.{name}"
-        )
-    assert not hasattr(_FakeStore.get, "__wrapped__")
-
-    class _Incomplete(secret_store.SecretStore):
-        def create(
-            self, *, secret: secret_store.StoredSecret
-        ) -> secret_store.StoredSecret:
-            return secret
-
-    with pytest.raises(TypeError, match="abstract"):
-        _Incomplete()
-
-
-def test_a_call_without_a_session_leaves_the_table_alone(
-    tmp_path: pathlib.Path,
-) -> None:
-    engine = _engine(tmp_path=tmp_path)
-    _create(engine=engine, store=None, value="v1")
-    store = _FakeStore()
-    assert store.get(user_id="alice", secret_name="TOKEN") is None
-    assert len(_rows(engine=engine)) == 1
-
-
-def test_get_never_moves_and_refuses_a_session(tmp_path: pathlib.Path) -> None:
-    engine = _engine(tmp_path=tmp_path)
-    _create(engine=engine, store=None, value="v1")
-    with orm.Session(bind=engine) as session, pytest.raises(TypeError):
-        _FakeStore().get(session=session, user_id="alice", secret_name="TOKEN")
-    assert len(_rows(engine=engine)) == 1
-
-
-def test_a_move_that_failed_before_deleting_the_row_finishes_next_time(
-    tmp_path: pathlib.Path,
-) -> None:
-    engine = _engine(tmp_path=tmp_path)
-    _create(engine=engine, store=None, value="old")
-    [row] = _rows(engine=engine)
-    store = _FakeStore()
-    store.create(
-        secret=secret_store.StoredSecret(
-            user_id="alice",
-            secret_name="TOKEN",
-            value="old",
-            created_at=row.created_at,
-            updated_at=row.updated_at,
-        )
-    )
-    _update(engine=engine, store=store, value="new")
-    assert store.get(user_id="alice", secret_name="TOKEN") == "new"
-    assert _rows(engine=engine) == []
 
 
 def _client(*, engine: sqlalchemy.Engine, store: _FakeStore | None) -> TestClient:
