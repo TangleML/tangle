@@ -10,11 +10,10 @@ from sqlalchemy import orm
 from . import backend_types_sql as bts
 from . import errors
 
-# The `SecretStore` methods that move the caller's rows out of the `secret` table first.
+# The `SecretStore` methods that move the caller's rows out of the `secret` table first; `get` only reads.
 _STORE_METHODS: Final[tuple[str, ...]] = (
     "create",
     "update",
-    "get",
     "list_secrets",
     "delete",
 )
@@ -57,9 +56,10 @@ def _moves_rows_first(method: Callable[..., Any]) -> Callable[..., Any]:
 class SecretStore(abc.ABC):
     """Keeps secrets outside the database, for example in a cloud secret manager.
 
-    With a store, the `secret` table only holds rows not yet moved. Each method below, as a subclass defines
-    it, is wrapped so that a call with `session=` first moves the caller's rows from the table into the store;
-    the subclass's own code never sees the session or the table.
+    With a store, the `secret` table only holds rows not yet moved. Each method below except `get`, as a
+    subclass defines it, is wrapped so that a call with `session=` first moves the caller's rows from the
+    table into the store; the subclass's own code never sees the session or the table. `get` never moves,
+    so reading a secret writes nothing.
     """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:

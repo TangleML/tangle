@@ -260,10 +260,11 @@ def test_stored_secret_never_shows_its_value() -> None:
 
 
 def test_every_store_method_a_subclass_defines_moves_rows_first() -> None:
-    for name in ("create", "update", "get", "list_secrets", "delete"):
+    for name in ("create", "update", "list_secrets", "delete"):
         assert (
             getattr(_FakeStore, name).__wrapped__.__qualname__ == f"_FakeStore.{name}"
         )
+    assert not hasattr(_FakeStore.get, "__wrapped__")
 
     class _Incomplete(secret_store.SecretStore):
         def create(
@@ -285,14 +286,12 @@ def test_a_call_without_a_session_leaves_the_table_alone(
     assert len(_rows(engine=engine)) == 1
 
 
-def test_get_with_a_session_moves_the_row_first(tmp_path: pathlib.Path) -> None:
+def test_get_never_moves_and_refuses_a_session(tmp_path: pathlib.Path) -> None:
     engine = _engine(tmp_path=tmp_path)
     _create(engine=engine, store=None, value="v1")
-    store = _FakeStore()
-    with orm.Session(bind=engine) as session:
-        value = store.get(session=session, user_id="alice", secret_name="TOKEN")
-    assert value == "v1"
-    assert _rows(engine=engine) == []
+    with orm.Session(bind=engine) as session, pytest.raises(TypeError):
+        _FakeStore().get(session=session, user_id="alice", secret_name="TOKEN")
+    assert len(_rows(engine=engine)) == 1
 
 
 def test_a_move_that_failed_before_deleting_the_row_finishes_next_time(
