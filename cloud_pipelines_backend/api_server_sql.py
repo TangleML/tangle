@@ -1328,14 +1328,20 @@ class SecretsApiService:
         raise_if_exists: bool = False,
     ) -> SecretInfoResponse:
         current_time = _get_current_time()
-        if self._secret_store:
+        # With a store, lock the row so that a backfill moving it waits, or has already finished.
+        secret = session.get(
+            bts.Secret,
+            (user_id, secret_name),
+            with_for_update=self._secret_store is not None,
+        )
+        # Not in the table (new, or already moved): the store keeps it. A row is updated where it is.
+        if not secret and self._secret_store:
             store_method = (
                 self._secret_store.create
                 if raise_if_exists
                 else self._secret_store.update
             )
             saved = store_method(
-                session=session,
                 secret=secret_store.StoredSecret(
                     user_id=user_id,
                     secret_name=secret_name,
@@ -1347,7 +1353,6 @@ class SecretsApiService:
                 ),
             )
             return SecretInfoResponse.from_store(saved)
-        secret = session.get(bts.Secret, (user_id, secret_name))
         if secret:
             if raise_if_exists:
                 raise errors.ItemAlreadyExistsError(
@@ -1443,12 +1448,20 @@ class SecretsApiService:
         user_id: str,
         secret_name: str,
     ) -> None:
+        secret = session.get(
+            bts.Secret,
+            (user_id, secret_name),
+            with_for_update=self._secret_store is not None,
+        )
         if self._secret_store:
-            self._secret_store.delete(
-                session=session, user_id=user_id, secret_name=secret_name
-            )
-            return
-        secret = session.get(bts.Secret, (user_id, secret_name))
+            # Also deletes a copy left by a backfill that stopped before deleting the row.
+            try:
+                self._secret_store.delete(user_id=user_id, secret_name=secret_name)
+            except errors.ItemNotFoundError:
+                if not secret:
+                    raise
+            if not secret:
+                return
         if not secret:
             raise errors.ItemNotFoundError(
                 f"Secret with name '{secret_name}' does not exist."
@@ -1463,7 +1476,7 @@ class SecretsApiService:
         user_id: str,
     ) -> ListSecretsResponse:
         if self._secret_store:
-            stored = self._secret_store.list_secrets(session=session, user_id=user_id)
+            stored = self._secret_store.list_secrets(user_id=user_id)
             return ListSecretsResponse(
                 secrets=[SecretInfoResponse.from_store(secret) for secret in stored]
             )
