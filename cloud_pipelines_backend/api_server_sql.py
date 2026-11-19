@@ -1,3 +1,4 @@
+import builtins
 import dataclasses
 import datetime
 import logging
@@ -166,7 +167,7 @@ class PipelineRunsApiService_Sql:
         session: orm.Session,
         root_task: structures.TaskSpec,
         # Component library to avoid repeating component specs inside task specs
-        components: Optional[list[structures.ComponentReference]] = None,
+        components: Optional[builtins.list[structures.ComponentReference]] = None,
         # Arbitrary metadata. Can be used to specify user.
         annotations: Optional[dict[str, Any]] = None,
         created_by: str | None = None,
