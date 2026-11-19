@@ -517,3 +517,60 @@ def test_backfill_needs_an_admin(tmp_path: pathlib.Path) -> None:
     )
     assert response.status_code == 403, response.text
 
+
+def test_backfill_carries_every_column(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    now = api_server_sql._get_current_time()
+    with orm.Session(bind=engine) as session:
+        session.add(
+            bts.Secret(
+                user_id="Alice",
+                secret_name="Token",
+                secret_value="v1",
+                description="d",
+                extra_data={"k": [1]},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+    store = _FakeStore()
+    assert _backfill(engine=engine, store=store, user_id="Alice")["moved"] == 1
+    assert store.secrets[("Alice", "Token")] == secret_store.StoredSecret(
+        user_id="Alice",
+        secret_name="Token",
+        value="v1",
+        description="d",
+        extra_data={"k": [1]},
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_backfill_replaces_a_copy_left_by_a_stopped_run(
+    tmp_path: pathlib.Path,
+) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _seed(engine=engine, names=[("alice", "TOKEN")])
+    _update(engine=engine, store=None, value="newer")
+    store = _FakeStore()
+    store.create(secret=_stored(value="stale copy"))
+    assert _backfill(engine=engine, store=store)["moved"] == 1
+    assert store.get(user_id="alice", secret_name="TOKEN") == "newer"
+    assert _rows(engine=engine) == []
+
+
+def test_backfill_locks_the_row_it_moves(tmp_path: pathlib.Path) -> None:
+    """A PUT or DELETE of the same row then waits for the move to commit."""
+    engine = _engine(tmp_path=tmp_path)
+    _seed(engine=engine, names=[("alice", "TOKEN")])
+    locked = []
+    with orm.Session(bind=engine) as session:
+        sqlalchemy.event.listen(
+            session,
+            "do_orm_execute",
+            lambda state: state.statement._for_update_arg is not None
+            and locked.append(True),
+        )
+        _service(store=_FakeStore()).backfill_secret_storage(session=session, limit=10)
+    assert locked == [True]

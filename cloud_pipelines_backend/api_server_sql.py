@@ -1412,14 +1412,11 @@ class SecretsApiService:
             if moved == limit:
                 break
             try:
-                secret_store.move_rows(
-                    session=session,
-                    secret_store=self._secret_store,
-                    user_id=row_user_id,
-                    secret_name=row_secret_name,
+                self._move_row(
+                    session=session, user_id=row_user_id, secret_name=row_secret_name
                 )
             except errors.ApiValidationError:
-                # Releases the row lock `move_rows` took, so the skipped row is usable during the run.
+                # Releases the row lock `_move_row` took, so the skipped row is usable during the run.
                 session.rollback()
                 skipped.append({"user_id": row_user_id, "secret_name": row_secret_name})
                 continue
@@ -1440,6 +1437,30 @@ class SecretsApiService:
             ),
             "stopped_on": stopped_on,
         }
+
+    def _move_row(
+        self, *, session: orm.Session, user_id: str, secret_name: str
+    ) -> None:
+        """Copies one row into the store and deletes it, in one commit; a PUT or DELETE of it waits on the lock."""
+        row = session.get(bts.Secret, (user_id, secret_name), with_for_update=True)
+        if not row:
+            return
+        secret = secret_store.StoredSecret(
+            user_id=row.user_id,
+            secret_name=row.secret_name,
+            value=row.secret_value,
+            description=row.description,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            extra_data=row.extra_data,
+        )
+        try:
+            self._secret_store.create(secret=secret)
+        except errors.ItemAlreadyExistsError:
+            # An earlier run stopped after copying the row; the row is still the truth, so it replaces the copy.
+            self._secret_store.update(secret=secret)
+        session.delete(row)
+        session.commit()
 
     def delete_secret(
         self,
