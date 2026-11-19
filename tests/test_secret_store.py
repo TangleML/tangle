@@ -1,5 +1,6 @@
 import dataclasses
 import pathlib
+from unittest import mock
 
 import fastapi
 import pytest
@@ -10,17 +11,21 @@ from starlette.testclient import TestClient
 from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import api_server_sql
 from cloud_pipelines_backend import backend_types_sql as bts
+from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import errors
+from cloud_pipelines_backend import orchestrator_sql
 from cloud_pipelines_backend import secret_store
+from cloud_pipelines_backend.launchers import interfaces as launcher_interfaces
 
 
 class _FakeStore(secret_store.SecretStore):
     """An in-memory `SecretStore` that follows the base class's contract, keyed by user and name."""
 
-    def __init__(self, *, fail_create: bool = False) -> None:
+    def __init__(self, *, fail_create: bool = False, fail_get: bool = False) -> None:
         self.secrets: dict[tuple[str, str], secret_store.StoredSecret] = {}
         self._fail_create = fail_create
+        self._fail_get = fail_get
 
     def create(self, *, secret: secret_store.StoredSecret) -> secret_store.StoredSecret:
         if self._fail_create:
@@ -47,6 +52,8 @@ class _FakeStore(secret_store.SecretStore):
         return dataclasses.replace(self.secrets[key], value=None)
 
     def get(self, *, user_id: str, secret_name: str) -> str | None:
+        if self._fail_get:
+            raise RuntimeError("store unavailable")
         secret = self.secrets.get((user_id, secret_name))
         return secret.value if secret else None
 
@@ -345,3 +352,113 @@ def test_setup_routes_passes_the_store_to_secret_routes(tmp_path: pathlib.Path) 
     assert [s["secret_name"] for s in listed.json()["secrets"]] == ["TOKEN"]
     assert store.get(user_id="alice", secret_name="TOKEN") == "v1"
     assert _rows(engine=engine) == []
+
+
+def _launch_token(
+    *, engine: sqlalchemy.Engine, store: _FakeStore | None
+) -> tuple[mock.MagicMock, bts.ExecutionNode]:
+    """Runs a one-task pipeline that takes alice's TOKEN as an input, with `store` as the orchestrator's store."""
+    session_factory = lambda: orm.Session(bind=engine)
+    component = structures.ComponentSpec(
+        inputs=[structures.InputSpec(name="token")],
+        implementation=structures.ContainerImplementation(
+            container=structures.ContainerSpec(image="python")
+        ),
+    )
+    task = structures.TaskSpec(
+        component_ref=structures.ComponentReference(spec=component),
+        arguments={
+            "token": structures.DynamicDataArgument(
+                dynamic_data={"secret": {"name": "TOKEN"}}
+            )
+        },
+    )
+    pipeline = structures.ComponentSpec(
+        implementation=structures.GraphImplementation(
+            graph=structures.GraphSpec(tasks={"task": task})
+        )
+    )
+    api_server_sql.PipelineRunsApiService_Sql().create(
+        session=session_factory(),
+        root_task=structures.TaskSpec(
+            component_ref=structures.ComponentReference(spec=pipeline)
+        ),
+        created_by="alice",
+    )
+    launch = mock.MagicMock(
+        return_value=mock.MagicMock(
+            status=launcher_interfaces.ContainerStatus.PENDING, to_dict=lambda: {}
+        )
+    )
+    orchestrator_sql.OrchestratorService_Sql(
+        session_factory=session_factory,
+        launcher=mock.MagicMock(launch_container_task=launch),
+        storage_provider=mock.MagicMock(),
+        data_root_uri="file:///tmp/artifacts",
+        logs_root_uri="file:///tmp/logs",
+        secret_store=store,
+    ).process_each_queue_once()
+    execution = (
+        session_factory()
+        .query(bts.ExecutionNode)
+        .filter(bts.ExecutionNode.container_execution_status.is_not(None))
+        .one()
+    )
+    return launch, execution
+
+
+def _launched_value(*, launch: mock.MagicMock) -> str:
+    """The value the launcher was given for the `token` input."""
+    return launch.call_args.kwargs["input_arguments"]["token"].value
+
+
+def _system_error(*, execution: bts.ExecutionNode) -> str:
+    """Asserts the launch failed as a system error, and returns its message."""
+    assert (
+        execution.container_execution_status
+        == bts.ContainerExecutionStatus.SYSTEM_ERROR
+    )
+    return execution.extra_data[
+        bts.EXECUTION_NODE_EXTRA_DATA_SYSTEM_ERROR_EXCEPTION_MESSAGE_KEY
+    ]
+
+
+@pytest.mark.parametrize("with_store", [False, True], ids=["no-store", "store"])
+def test_launch_reads_a_row_and_leaves_it_in_the_table(
+    tmp_path: pathlib.Path, with_store: bool
+) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _create(engine=engine, store=None, value="s3cret")
+    store = _FakeStore() if with_store else None
+    launch, _ = _launch_token(engine=engine, store=store)
+    assert _launched_value(launch=launch) == "s3cret"
+    assert len(_rows(engine=engine)) == 1
+    if store:
+        assert store.secrets == {}
+
+
+def test_launch_reads_a_moved_secret_from_the_store(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    store = _FakeStore()
+    _create(engine=engine, store=store, value="s3cret")
+    launch, _ = _launch_token(engine=engine, store=store)
+    assert _launched_value(launch=launch) == "s3cret"
+
+
+@pytest.mark.parametrize("with_store", [False, True], ids=["no-store", "store"])
+def test_launch_of_a_missing_secret_is_a_user_error(
+    tmp_path: pathlib.Path, with_store: bool
+) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    launch, execution = _launch_token(
+        engine=engine, store=_FakeStore() if with_store else None
+    )
+    launch.assert_not_called()
+    assert "User alice does not have secret TOKEN" in _system_error(execution=execution)
+
+
+def test_launch_fails_when_the_store_cannot_read(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    launch, execution = _launch_token(engine=engine, store=_FakeStore(fail_get=True))
+    launch.assert_not_called()
+    assert "store unavailable" in _system_error(execution=execution)
