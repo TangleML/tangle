@@ -14,7 +14,7 @@ from . import errors
 from .access_control import checks as access_control_checks
 from .access_control import runs as access_control_runs
 from . import filter_query_sql
-from . import secret_store
+from . import secret_interfaces
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -1253,7 +1253,7 @@ class SecretInfoResponse:
         )
 
     @classmethod
-    def from_store(cls, secret: secret_store.StoredSecret) -> "SecretInfoResponse":
+    def from_store(cls, secret: secret_interfaces.StoredSecret) -> "SecretInfoResponse":
         return SecretInfoResponse(
             secret_name=secret.secret_name,
             created_at=secret.created_at,
@@ -1268,8 +1268,8 @@ class ListSecretsResponse:
 
 
 class SecretsApiService:
-    def __init__(self, *, secret_store: secret_store.SecretStore | None = None):
-        self._secret_store = secret_store
+    def __init__(self, *, _secret_store: secret_interfaces.SecretStore | None = None):
+        self._secret_store = _secret_store
 
     def create_secret(
         self,
@@ -1342,7 +1342,7 @@ class SecretsApiService:
                 else self._secret_store.update
             )
             saved = store_method(
-                secret=secret_store.StoredSecret(
+                secret=secret_interfaces.StoredSecret(
                     user_id=user_id,
                     secret_name=secret_name,
                     value=secret_value,
@@ -1416,7 +1416,7 @@ class SecretsApiService:
         user_id: str,
     ) -> ListSecretsResponse:
         if self._secret_store:
-            stored = self._secret_store.list_secrets(user_id=user_id)
+            stored = self._secret_store.list(user_id=user_id)
             return ListSecretsResponse(
                 secrets=[SecretInfoResponse.from_store(secret) for secret in stored]
             )

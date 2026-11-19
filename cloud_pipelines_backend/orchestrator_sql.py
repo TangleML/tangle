@@ -22,7 +22,7 @@ from cloud_pipelines.orchestration.launchers import naming_utils
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import filter_query_sql
-from . import secret_store
+from . import secret_interfaces
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import bugsnag_instrumentation
@@ -71,8 +71,8 @@ class OrchestratorService_Sql:
         sleep_seconds_between_queue_sweeps: float = 1.0,
         output_data_purge_duration: datetime.timedelta = None,
         *,
-        secret_store: secret_store.SecretStore | None = None,
         # Internal/experimental:
+        _secret_store: secret_interfaces.SecretStore | None = None,
         _max_container_execution_refresh_error_retries: int = 3,
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
@@ -96,7 +96,7 @@ class OrchestratorService_Sql:
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
         self._queued_execution_interceptor = queued_execution_interceptor
-        self._secret_store = secret_store
+        self._secret_store = _secret_store
 
     def run_loop(self):
         while True:
