@@ -22,10 +22,6 @@ class PermissionError(Exception):
     pass
 
 
-class SecretStorageTypeMismatchError(Exception):
-    """A secret's value is in a store of another type than this server's, or the server has none, so it cannot be changed."""
-
-
 class ApiValidationError(Exception):
     """Base for all filter/annotation validation errors -> 422."""
 
