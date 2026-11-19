@@ -634,7 +634,7 @@ def _setup_routes_internal(
         limit: typing.Annotated[int, fastapi.Query(ge=1, le=1000)] = 50,
         user_id: str | None = None,
         secret_name: str | None = None,
-    ) -> dict[str, int]:
+    ) -> dict[str, typing.Any]:
         return secrets_service.backfill_secret_storage(
             session=session, limit=limit, user_id=user_id, secret_name=secret_name
         )

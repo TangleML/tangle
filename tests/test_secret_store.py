@@ -22,14 +22,23 @@ from cloud_pipelines_backend.launchers import interfaces as launcher_interfaces
 class _FakeStore(secret_store.SecretStore):
     """An in-memory `SecretStore` that follows the base class's contract, keyed by user and name."""
 
-    def __init__(self, *, fail_create: bool = False, fail_get: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_create: bool = False,
+        fail_get: bool = False,
+        invalid_names: frozenset[str] = frozenset(),
+    ) -> None:
         self.secrets: dict[tuple[str, str], secret_store.StoredSecret] = {}
         self._fail_create = fail_create
         self._fail_get = fail_get
+        self._invalid_names = invalid_names
 
     def create(self, *, secret: secret_store.StoredSecret) -> secret_store.StoredSecret:
         if self._fail_create:
             raise RuntimeError("store unavailable")
+        if secret.secret_name in self._invalid_names:
+            raise errors.ApiValidationError("value too large")
         key = (secret.user_id, secret.secret_name)
         if key in self.secrets:
             raise errors.ItemAlreadyExistsError("exists")
@@ -322,14 +331,16 @@ def test_a_move_that_failed_before_deleting_the_row_finishes_next_time(
     assert _rows(engine=engine) == []
 
 
-def _client(*, engine: sqlalchemy.Engine, store: _FakeStore | None) -> TestClient:
+def _client(
+    *, engine: sqlalchemy.Engine, store: _FakeStore | None, admin: bool = False
+) -> TestClient:
     """Returns an API client for alice, with the given store passed to setup_routes."""
     app = fastapi.FastAPI()
     api_router.setup_routes(
         app=app,
         db_engine=engine,
         user_details_getter=lambda: api_router.UserDetails(
-            name="alice", permissions={"read": True, "write": True, "admin": False}
+            name="alice", permissions={"read": True, "write": True, "admin": admin}
         ),
         secret_store=store,
     )
@@ -462,3 +473,87 @@ def test_launch_fails_when_the_store_cannot_read(tmp_path: pathlib.Path) -> None
     launch, execution = _launch_token(engine=engine, store=_FakeStore(fail_get=True))
     launch.assert_not_called()
     assert "store unavailable" in _system_error(execution=execution)
+
+
+def _backfill(
+    *, engine: sqlalchemy.Engine, store: _FakeStore | None, **params: str | int
+) -> dict:
+    """Calls the backfill route as an admin and returns its JSON."""
+    response = _client(engine=engine, store=store, admin=True).post(
+        "/api/admin/secrets/backfill_storage", params=params
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _seed(*, engine: sqlalchemy.Engine, names: list[tuple[str, str]]) -> None:
+    for user_id, secret_name in names:
+        _create(engine=engine, store=None, user_id=user_id, secret_name=secret_name)
+
+
+def test_backfill_without_a_store_is_a_422(tmp_path: pathlib.Path) -> None:
+    response = _client(engine=_engine(tmp_path=tmp_path), store=None, admin=True).post(
+        "/api/admin/secrets/backfill_storage"
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_backfill_moves_up_to_the_limit(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _seed(engine=engine, names=[("alice", "A"), ("alice", "B"), ("bob", "C")])
+    store = _FakeStore()
+    result = _backfill(engine=engine, store=store, limit=2)
+    assert result == {"moved": 2, "skipped": [], "left_in_table": 1, "stopped_on": None}
+    assert sorted(store.secrets) == [("alice", "A"), ("alice", "B")]
+    assert _backfill(engine=engine, store=store)["left_in_table"] == 0
+
+
+def test_backfill_filters_by_user_and_name(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _seed(engine=engine, names=[("alice", "A"), ("alice", "B"), ("bob", "A")])
+    store = _FakeStore()
+    assert _backfill(engine=engine, store=store, user_id="bob")["moved"] == 1
+    assert _backfill(engine=engine, store=store, secret_name="B")["moved"] == 1
+    assert sorted(store.secrets) == [("alice", "B"), ("bob", "A")]
+
+
+def test_backfill_skips_an_invalid_row_without_counting_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _seed(engine=engine, names=[("alice", "A"), ("alice", "BIG"), ("alice", "C")])
+    store = _FakeStore(invalid_names=frozenset({"BIG"}))
+    result = _backfill(engine=engine, store=store, limit=2)
+    assert result == {
+        "moved": 2,
+        "skipped": [{"user_id": "alice", "secret_name": "BIG"}],
+        "left_in_table": 1,
+        "stopped_on": None,
+    }
+    assert [row.secret_name for row in _rows(engine=engine)] == ["BIG"]
+
+
+def test_backfill_stops_on_an_error_and_can_be_repeated(
+    tmp_path: pathlib.Path,
+) -> None:
+    engine = _engine(tmp_path=tmp_path)
+    _seed(engine=engine, names=[("alice", "A"), ("alice", "B")])
+    result = _backfill(engine=engine, store=_FakeStore(fail_create=True))
+    assert result == {
+        "moved": 0,
+        "skipped": [],
+        "left_in_table": 2,
+        "stopped_on": {
+            "user_id": "alice",
+            "secret_name": "A",
+            "error": "RuntimeError: store unavailable",
+        },
+    }
+    assert _backfill(engine=engine, store=_FakeStore())["left_in_table"] == 0
+
+
+def test_backfill_needs_an_admin(tmp_path: pathlib.Path) -> None:
+    response = _client(engine=_engine(tmp_path=tmp_path), store=_FakeStore()).post(
+        "/api/admin/secrets/backfill_storage"
+    )
+    assert response.status_code == 403, response.text

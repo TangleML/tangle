@@ -1383,52 +1383,57 @@ class SecretsApiService:
         limit: int,
         user_id: str | None = None,
         secret_name: str | None = None,
-    ) -> dict[str, int]:
-        """Moves up to `limit` plain-text secrets into the store, committing each row, and reports how many are left.
+    ) -> dict[str, typing.Any]:
+        """Moves up to `limit` rows from the `secret` table into the store, committing each, and reports what is left.
 
-        `user_id` and `secret_name`, when given, move only matching rows; both together pick one secret.
+        `user_id` and `secret_name`, when given, move only matching rows. A row the store refuses as invalid (for
+        example, a value too large) is skipped and listed by name; any other error stops the run, which can then
+        be repeated.
         """
-        if not self._secret_value_store:
-            raise errors.ApiValidationError("No secret value store is configured.")
-        is_plaintext = sql.func.json_extract(
-            bts.Secret.extra_data, f"$.{secret_value_store.EXTRA_DATA_STORAGE_KEY}"
-        ).is_(None)
-        secrets_for_backfill = session.execute(
+        if not self._secret_store:
+            raise errors.ApiValidationError("No secret store is configured.")
+        rows = session.execute(
             sql.select(bts.Secret.user_id, bts.Secret.secret_name)
-            .where(is_plaintext)
             .filter_by(
                 **({"user_id": user_id} if user_id is not None else {}),
                 **({"secret_name": secret_name} if secret_name is not None else {}),
             )
             .order_by(bts.Secret.user_id, bts.Secret.secret_name)
-            .limit(limit)
         ).all()
-        moved_to_store = 0
-        for user_id, secret_name in secrets_for_backfill:
-            # Re-read under a row lock: an update or another backfill may have moved or deleted it since.
-            secret = session.scalars(
-                sql.select(bts.Secret)
-                .where(
-                    bts.Secret.user_id == user_id,
-                    bts.Secret.secret_name == secret_name,
-                    is_plaintext,
+        moved = 0
+        skipped = []
+        stopped_on = None
+        for row_user_id, row_secret_name in rows:
+            if moved == limit:
+                break
+            try:
+                secret_store.move_rows(
+                    session=session,
+                    secret_store=self._secret_store,
+                    user_id=row_user_id,
+                    secret_name=row_secret_name,
                 )
-                .with_for_update()
-            ).one_or_none()
-            if secret is None:
+            except errors.ApiValidationError:
+                # Releases the row lock `move_rows` took, so the skipped row is usable during the run.
+                session.rollback()
+                skipped.append({"user_id": row_user_id, "secret_name": row_secret_name})
                 continue
-            secret_value_store.store_secret_value(
-                secret=secret, value=secret.secret_value, store=self._secret_value_store
-            )
-            # Each value is already saved in the store, so its row commits before the next is touched.
-            session.commit()
-            moved_to_store += 1
-        count = sql.select(sql.func.count()).select_from(bts.Secret)
+            except Exception as e:
+                session.rollback()
+                stopped_on = {
+                    "user_id": row_user_id,
+                    "secret_name": row_secret_name,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+                break
+            moved += 1
         return {
-            "moved_to_store": moved_to_store,
-            "already_stored": session.scalar(count.where(~is_plaintext))
-            - moved_to_store,
-            "still_plaintext": session.scalar(count.where(is_plaintext)),
+            "moved": moved,
+            "skipped": skipped,
+            "left_in_table": session.scalar(
+                sql.select(sql.func.count()).select_from(bts.Secret)
+            ),
+            "stopped_on": stopped_on,
         }
 
     def delete_secret(
