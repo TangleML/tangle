@@ -91,6 +91,7 @@ def test_running_pipeline_with_secrets():
         )
         assert list_secrets_response.secrets
         assert list_secrets_response.secrets[0].secret_name == secret_name
+        assert not hasattr(list_secrets_response.secrets[0], "expires_at")
 
         pipeline_runs_service.create(
             session=session_factory(),
