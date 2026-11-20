@@ -13,6 +13,7 @@ from . import errors
 from .access_control import checks as access_control_checks
 from .access_control import runs as access_control_runs
 from . import filter_query_sql
+from . import secret_interfaces
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -1250,6 +1251,15 @@ class SecretInfoResponse:
             description=secret_row.description,
         )
 
+    @classmethod
+    def from_store(cls, secret: secret_interfaces.StoredSecret) -> "SecretInfoResponse":
+        return SecretInfoResponse(
+            secret_name=secret.secret_name,
+            created_at=secret.created_at,
+            updated_at=secret.updated_at,
+            description=secret.description,
+        )
+
 
 @dataclasses.dataclass(kw_only=True)
 class ListSecretsResponse:
@@ -1257,6 +1267,9 @@ class ListSecretsResponse:
 
 
 class SecretsApiService:
+    def __init__(self, *, _secret_store: secret_interfaces.SecretStore | None = None):
+        self._secret_store = _secret_store
+
     def create_secret(
         self,
         *,
@@ -1314,7 +1327,31 @@ class SecretsApiService:
         raise_if_exists: bool = False,
     ) -> SecretInfoResponse:
         current_time = _get_current_time()
-        secret = session.get(bts.Secret, (user_id, secret_name))
+        # With a store, lock the row so that a backfill moving it waits, or has already finished.
+        secret = session.get(
+            bts.Secret,
+            (user_id, secret_name),
+            with_for_update=self._secret_store is not None,
+        )
+        # Not in the table (new, or already moved): the store keeps it. A row is updated where it is.
+        if not secret and self._secret_store:
+            store_method = (
+                self._secret_store.create
+                if raise_if_exists
+                else self._secret_store.update
+            )
+            saved = store_method(
+                secret=secret_interfaces.StoredSecret(
+                    user_id=user_id,
+                    secret_name=secret_name,
+                    value=secret_value,
+                    # None keeps the stored description, as an empty one leaves the row's alone below.
+                    description=description or None,
+                    created_at=current_time,
+                    updated_at=current_time,
+                ),
+            )
+            return SecretInfoResponse.from_store(saved)
         if secret:
             if raise_if_exists:
                 raise errors.ItemAlreadyExistsError(
@@ -1350,7 +1387,20 @@ class SecretsApiService:
         user_id: str,
         secret_name: str,
     ) -> None:
-        secret = session.get(bts.Secret, (user_id, secret_name))
+        secret = session.get(
+            bts.Secret,
+            (user_id, secret_name),
+            with_for_update=self._secret_store is not None,
+        )
+        if self._secret_store:
+            # Also deletes a copy left by a backfill that stopped before deleting the row.
+            try:
+                self._secret_store.delete(user_id=user_id, secret_name=secret_name)
+            except errors.ItemNotFoundError:
+                if not secret:
+                    raise
+            if not secret:
+                return
         if not secret:
             raise errors.ItemNotFoundError(
                 f"Secret with name '{secret_name}' does not exist."
@@ -1364,6 +1414,11 @@ class SecretsApiService:
         session: orm.Session,
         user_id: str,
     ) -> ListSecretsResponse:
+        if self._secret_store:
+            stored = self._secret_store.list(user_id=user_id)
+            return ListSecretsResponse(
+                secrets=[SecretInfoResponse.from_store(secret) for secret in stored]
+            )
         secrets = session.scalars(
             sql.select(bts.Secret).where(bts.Secret.user_id == user_id)
         ).all()

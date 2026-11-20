@@ -22,6 +22,7 @@ from cloud_pipelines.orchestration.launchers import naming_utils
 from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import filter_query_sql
+from . import secret_interfaces
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import bugsnag_instrumentation
@@ -71,6 +72,7 @@ class OrchestratorService_Sql:
         output_data_purge_duration: datetime.timedelta = None,
         *,
         # Internal/experimental:
+        _secret_store: secret_interfaces.SecretStore | None = None,
         _max_container_execution_refresh_error_retries: int = 3,
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
@@ -94,6 +96,7 @@ class OrchestratorService_Sql:
         self._max_queue_batch_size = _max_queue_batch_size
         self._max_queue_batch_duration = _max_queue_batch_duration
         self._queued_execution_interceptor = queued_execution_interceptor
+        self._secret_store = _secret_store
 
     def run_loop(self):
         while True:
@@ -709,11 +712,17 @@ class OrchestratorService_Sql:
                 user_id = pipeline_run.created_by
                 secret_name = secret_parameters[DYNAMIC_DATA_SECRET_NAME_KEY]
                 secret = session.get(bts.Secret, (user_id, secret_name))
-                if not secret:
+                secret_value = secret.secret_value if secret else None
+                if secret_value is None and self._secret_store:
+                    # The row first, then the store: a row not yet moved holds the same value as any copy
+                    # the store has, and a launch only reads.
+                    secret_value = self._secret_store.get(
+                        user_id=user_id, secret_name=secret_name
+                    )
+                if secret_value is None:
                     raise OrchestratorError(
                         f"{execution.id=}: User error: Error resolving a secret argument for {input_name=}: User {user_id} does not have secret {secret_name}."
                     )
-                secret_value = secret.secret_value
                 input_artifact_data[input_name] = bts.ArtifactData(
                     total_size=len(secret_value.encode("utf-8")),
                     is_dir=False,
