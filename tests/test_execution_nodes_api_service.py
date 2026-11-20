@@ -7,6 +7,7 @@ from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import errors
+from cloud_pipelines_backend import troubleshooting_interfaces
 from cloud_pipelines_backend.api_server_sql import (
     ExecutionNodesApiService_Sql,
     GetExecutionInfoResponse,
@@ -635,6 +636,120 @@ class TestGetContainerExecutionLog:
 
             with pytest.raises(errors.ContainerExecutionNotReadyError):
                 self.service.get_container_execution_log(session=session, id=node.id)
+
+
+class _GuideProvider:
+    def __init__(self, *, error: Exception | None = None):
+        self.references: list[troubleshooting_interfaces.TroubleshootingReference] = []
+        self._error = error
+
+    def render(
+        self, *, reference: troubleshooting_interfaces.TroubleshootingReference
+    ) -> troubleshooting_interfaces.TroubleshootingGuide | None:
+        self.references.append(reference)
+        if self._error:
+            raise self._error
+        if reference.code != "known_failure":
+            return None
+        return troubleshooting_interfaces.TroubleshootingGuide(
+            title="Known failure",
+            severity=troubleshooting_interfaces.TroubleshootingSeverity.WARNING,
+            body_markdown=f"Run {reference.params['run_id']} needs a fix.",
+            actions=[
+                troubleshooting_interfaces.TroubleshootingAction(
+                    label="Read the guide", url="https://example.com/guide"
+                )
+            ],
+        )
+
+
+class TestGetContainerExecutionLogTroubleshooting:
+    def setup_method(self):
+        self.session_factory = _initialize_db_and_get_session_factory()
+
+    def _read_log(self, *, service: ExecutionNodesApiService_Sql, extra_data: dict):
+        with self.session_factory() as session:
+            node = _make_execution_node(
+                task_spec=_make_task_spec_dict(),
+                container_execution_status=bts.ContainerExecutionStatus.FAILED,
+            )
+            node.extra_data = {
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY: "denied",
+                **extra_data,
+            }
+            session.add(node)
+            session.flush()
+            return service.get_container_execution_log(session=session, id=node.id)
+
+    def _reference(self, code: str) -> dict:
+        return {
+            bts.EXECUTION_NODE_EXTRA_DATA_TROUBLESHOOTING_KEY: {
+                "code": code,
+                "params": {"run_id": "run-1"},
+            }
+        }
+
+    def test_stored_reference_is_rendered_into_a_guide(self):
+        provider = _GuideProvider()
+        service = ExecutionNodesApiService_Sql(troubleshooting_provider=provider)
+
+        result = self._read_log(
+            service=service, extra_data=self._reference("known_failure")
+        )
+
+        assert result.troubleshooting is not None
+        assert result.troubleshooting.title == "Known failure"
+        assert result.troubleshooting.body_markdown == "Run run-1 needs a fix."
+        assert result.troubleshooting.actions[0].url == "https://example.com/guide"
+        assert result.system_error_exception_full == "denied"
+        assert provider.references == [
+            troubleshooting_interfaces.TroubleshootingReference(
+                code="known_failure", params={"run_id": "run-1"}
+            )
+        ]
+
+    def test_unknown_code_returns_no_guide(self):
+        service = ExecutionNodesApiService_Sql(
+            troubleshooting_provider=_GuideProvider()
+        )
+
+        result = self._read_log(
+            service=service, extra_data=self._reference("unknown_code")
+        )
+
+        assert result.troubleshooting is None
+        assert result.system_error_exception_full == "denied"
+
+    def test_without_a_provider_returns_no_guide(self):
+        result = self._read_log(
+            service=ExecutionNodesApiService_Sql(),
+            extra_data=self._reference("known_failure"),
+        )
+
+        assert result.troubleshooting is None
+
+    def test_without_a_reference_the_provider_is_not_called(self):
+        provider = _GuideProvider()
+
+        result = self._read_log(
+            service=ExecutionNodesApiService_Sql(troubleshooting_provider=provider),
+            extra_data={},
+        )
+
+        assert result.troubleshooting is None
+        assert provider.references == []
+
+    def test_provider_error_returns_no_guide(self):
+        service = ExecutionNodesApiService_Sql(
+            troubleshooting_provider=_GuideProvider(error=RuntimeError("boom"))
+        )
+
+        result = self._read_log(
+            service=service, extra_data=self._reference("known_failure")
+        )
+
+        assert result.troubleshooting is None
+        assert result.system_error_exception_full == "denied"
 
 
 if __name__ == "__main__":
