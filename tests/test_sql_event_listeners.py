@@ -66,4 +66,73 @@ class TestStatusHistoryListeners:
         assert mock_record.call_args.kwargs["attributes"] == {
             "execution.status.from": bts.ContainerExecutionStatus.QUEUED,
             "execution.status.to": bts.ContainerExecutionStatus.RUNNING,
+            "execution.run_attempt": "first",
         }
+
+
+class TestRunAttempt:
+    """A preempted execution reaches RUNNING more than once; only the first is a start."""
+
+    @staticmethod
+    def _history(*statuses: str) -> list[dict[str, str]]:
+        return [
+            {"status": s, "first_observed_at": "2024-01-01T00:00:00+00:00"}
+            for s in statuses
+        ]
+
+    @pytest.mark.parametrize(
+        ("statuses", "expected"),
+        [
+            ((), "none"),
+            (("QUEUED",), "none"),
+            (("QUEUED", "PENDING"), "none"),
+            (("QUEUED", "PENDING", "RUNNING"), "first"),
+            (("QUEUED", "PENDING", "RUNNING", "PENDING"), "none"),
+            (("QUEUED", "PENDING", "RUNNING", "PENDING", "RUNNING"), "repeat"),
+            (
+                (
+                    "QUEUED",
+                    "PENDING",
+                    "RUNNING",
+                    "PENDING",
+                    "RUNNING",
+                    "PENDING",
+                    "RUNNING",
+                ),
+                "repeat",
+            ),
+            (("QUEUED", "PENDING", "RUNNING", "SUCCEEDED"), "none"),
+        ],
+    )
+    def test_run_attempt_for_history(
+        self, statuses: tuple[str, ...], expected: str
+    ) -> None:
+        assert metrics._run_attempt(history=self._history(*statuses)) == expected
+
+    def test_resumed_execution_is_labelled_repeat_end_to_end(
+        self, session: orm.Session
+    ) -> None:
+        """The preemption walk: three PENDING->RUNNING samples, first then repeat twice."""
+        node = bts.ExecutionNode(task_spec={})
+        session.add(node)
+        attempts = []
+        for status in [
+            bts.ContainerExecutionStatus.QUEUED,
+            bts.ContainerExecutionStatus.PENDING,
+            bts.ContainerExecutionStatus.RUNNING,
+            bts.ContainerExecutionStatus.PENDING,
+            bts.ContainerExecutionStatus.RUNNING,
+            bts.ContainerExecutionStatus.PENDING,
+            bts.ContainerExecutionStatus.RUNNING,
+        ]:
+            node.container_execution_status = status
+            with unittest.mock.patch.object(
+                metrics.execution_status_transition_duration, "record"
+            ) as mock_record:
+                session.commit()
+            for call in mock_record.call_args_list:
+                attrs = call.kwargs["attributes"]
+                if attrs["execution.status.to"] == bts.ContainerExecutionStatus.RUNNING:
+                    attempts.append(attrs["execution.run_attempt"])
+
+        assert attempts == ["first", "repeat", "repeat"]
