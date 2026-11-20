@@ -23,6 +23,7 @@ from . import backend_types_sql as bts
 from . import component_structures as structures
 from . import filter_query_sql
 from . import secret_interfaces
+from . import troubleshooting_interfaces
 from .launchers import common_annotations
 from .launchers import interfaces as launcher_interfaces
 from .instrumentation import bugsnag_instrumentation
@@ -77,6 +78,9 @@ class OrchestratorService_Sql:
         _max_queue_batch_size: int = 1,
         _max_queue_batch_duration: datetime.timedelta = datetime.timedelta(),
         queued_execution_interceptor: QueuedExecutionInterceptor | None = None,
+        troubleshooting_classifier: (
+            troubleshooting_interfaces.TroubleshootingClassifier | None
+        ) = None,
     ):
         self._session_factory = session_factory
         self._launcher = launcher
@@ -97,6 +101,7 @@ class OrchestratorService_Sql:
         self._max_queue_batch_duration = _max_queue_batch_duration
         self._queued_execution_interceptor = queued_execution_interceptor
         self._secret_store = _secret_store
+        self._troubleshooting_classifier = troubleshooting_classifier
 
     def run_loop(self):
         while True:
@@ -821,6 +826,9 @@ class OrchestratorService_Sql:
                     bts.ContainerExecutionStatus.FAILED
                 )
                 _record_launch_rejection(execution=execution, exception=ex)
+                self._record_troubleshooting_reference(
+                    execution=execution, exception=ex
+                )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution
                 )
@@ -834,6 +842,9 @@ class OrchestratorService_Sql:
                     bts.ContainerExecutionStatus.SYSTEM_ERROR
                 )
                 record_system_error_exception(execution=execution, exception=ex)
+                self._record_troubleshooting_reference(
+                    execution=execution, exception=ex
+                )
                 _mark_all_downstream_executions_as_skipped(
                     session=session, execution=execution
                 )
@@ -1254,6 +1265,28 @@ class OrchestratorService_Sql:
                 _logger.exception(
                     f"Processing running container execution {container_execution.id}: Error doing launched container cleanup."
                 )
+
+    def _record_troubleshooting_reference(
+        self, *, execution: bts.ExecutionNode, exception: Exception
+    ) -> None:
+        """Stores the classifier's guide reference on a failed launch; a classifier error never blocks recording the failure."""
+        if self._troubleshooting_classifier is None:
+            return
+        try:
+            reference = self._troubleshooting_classifier.classify(
+                execution=execution, exception=exception
+            )
+        except Exception:
+            _logger.exception(f"Troubleshooting classifier failed for {execution.id=}")
+            return
+        if reference is None:
+            return
+        if execution.extra_data is None:
+            execution.extra_data = {}
+        execution.extra_data[bts.EXECUTION_NODE_EXTRA_DATA_TROUBLESHOOTING_KEY] = {
+            "code": reference.code,
+            "params": {str(key): str(value) for key, value in reference.params.items()},
+        }
 
 
 def _get_direct_downstream_executions(

@@ -19,6 +19,7 @@ from .instrumentation import contextual_logging
 
 if typing.TYPE_CHECKING:
     from . import secret_interfaces
+    from . import troubleshooting_interfaces
     from .launchers import interfaces as launcher_interfaces
 
 
@@ -42,6 +43,7 @@ def setup_routes(
     default_component_library_owner_username: str = "admin",
     do_skip_backfill: bool = False,
     _secret_store: "secret_interfaces.SecretStore | None" = None,
+    troubleshooting_provider: "troubleshooting_interfaces.TroubleshootingProvider | None" = None,
 ):
     def get_session():
         with orm.Session(autocommit=False, autoflush=False, bind=db_engine) as session:
@@ -79,6 +81,7 @@ def setup_routes(
         get_launcher=get_launcher,
         lifespan=lifespan,
         _secret_store=_secret_store,
+        troubleshooting_provider=troubleshooting_provider,
     )
 
 
@@ -97,6 +100,7 @@ def _setup_routes_internal(
         | None
     ) = None,
     _secret_store: "secret_interfaces.SecretStore | None" = None,
+    troubleshooting_provider: "troubleshooting_interfaces.TroubleshootingProvider | None" = None,
 ):
     # We request `app: fastapi.FastAPI` instead of just returning the router
     # because we want to add exception handler which is only supported for `FastAPI`.
@@ -217,7 +221,9 @@ def _setup_routes_internal(
         )
 
     artifact_service = api_server_sql.ArtifactNodesApiService_Sql()
-    execution_service = api_server_sql.ExecutionNodesApiService_Sql()
+    execution_service = api_server_sql.ExecutionNodesApiService_Sql(
+        troubleshooting_provider=troubleshooting_provider
+    )
     pipeline_run_service = api_server_sql.PipelineRunsApiService_Sql()
 
     # Can be used by admins to disable methods that modify the DB
