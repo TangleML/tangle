@@ -228,6 +228,7 @@ from fastapi import staticfiles
 
 from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import database_ops
+from cloud_pipelines_backend import local_web_app_cors
 from cloud_pipelines_backend.instrumentation import api_tracing
 from cloud_pipelines_backend.instrumentation import contextual_logging
 
@@ -259,6 +260,7 @@ otel.instrument_fastapi(app)
 
 # Add request context middleware for automatic request_id generation
 app.add_middleware(api_tracing.RequestContextMiddleware)
+local_web_app_cors.allow_local_web_app_origins(app)
 
 
 @app.exception_handler(Exception)

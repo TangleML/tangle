@@ -206,6 +206,7 @@ def run_configured_orchestrator():
 # region: API server
 from cloud_pipelines_backend.instrumentation import api_tracing
 from cloud_pipelines_backend.instrumentation import contextual_logging
+from cloud_pipelines_backend import local_web_app_cors
 
 
 @contextlib.asynccontextmanager
@@ -224,6 +225,7 @@ app = fastapi.FastAPI(
 )
 otel.instrument_fastapi(app)
 app.add_middleware(api_tracing.RequestContextMiddleware)
+local_web_app_cors.allow_local_web_app_origins(app)
 
 
 @app.exception_handler(Exception)
