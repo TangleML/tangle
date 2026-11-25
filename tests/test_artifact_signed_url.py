@@ -1,6 +1,8 @@
 """Tests for ArtifactNodesApiService_Sql.get_signed_artifact_url."""
 
 import datetime
+import sys
+import types
 import unittest.mock
 
 import pytest
@@ -34,32 +36,60 @@ def _add_artifact_node(session: orm.Session, uri: str) -> bts.IdType:
 
 
 @pytest.fixture()
-def google_mocks():
-    with (
-        unittest.mock.patch("google.auth.default") as auth_default,
-        unittest.mock.patch("google.auth.compute_engine.Credentials") as compute_credentials,
-        unittest.mock.patch("google.auth.iam.Signer") as iam_signer,
-        unittest.mock.patch(
-            "google.oauth2.service_account.Credentials"
-        ) as service_account_credentials,
-        unittest.mock.patch("google.cloud.storage.Client") as storage_client,
-        unittest.mock.patch("google.cloud.storage.Blob.from_string") as blob_from_string,
-    ):
-        default_credentials = unittest.mock.MagicMock()
-        default_credentials.token = "developer-access-token"
-        auth_default.return_value = (default_credentials, "example-project")
-        blob = blob_from_string.return_value
-        blob.generate_signed_url.return_value = "https://signed.example/url"
-        yield unittest.mock.Mock(
-            auth_default=auth_default,
-            default_credentials=default_credentials,
-            compute_credentials=compute_credentials,
-            iam_signer=iam_signer,
-            service_account_credentials=service_account_credentials,
-            storage_client=storage_client,
-            blob_from_string=blob_from_string,
-            blob=blob,
-        )
+def google_mocks(monkeypatch):
+    # google-auth and google-cloud-storage are not test dependencies, so the modules the
+    # handler imports lazily are replaced in sys.modules, which import resolves first.
+    modules = {
+        name: types.ModuleType(name)
+        for name in [
+            "google",
+            "google.auth",
+            "google.auth.compute_engine",
+            "google.auth.iam",
+            "google.auth.transport",
+            "google.auth.transport.requests",
+            "google.cloud",
+            "google.cloud.storage",
+            "google.oauth2",
+            "google.oauth2.service_account",
+        ]
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+        parent_name, _, child_name = name.rpartition(".")
+        if parent_name:
+            setattr(modules[parent_name], child_name, module)
+
+    auth_default = unittest.mock.MagicMock()
+    compute_credentials = unittest.mock.MagicMock()
+    iam_signer = unittest.mock.MagicMock()
+    service_account_credentials = unittest.mock.MagicMock()
+    storage_client = unittest.mock.MagicMock()
+    storage_blob = unittest.mock.MagicMock()
+    modules["google.auth"].default = auth_default
+    modules["google.auth.compute_engine"].Credentials = compute_credentials
+    modules["google.auth.iam"].Signer = iam_signer
+    modules["google.auth.transport.requests"].Request = unittest.mock.MagicMock()
+    modules["google.oauth2.service_account"].Credentials = service_account_credentials
+    modules["google.cloud.storage"].Client = storage_client
+    modules["google.cloud.storage"].Blob = storage_blob
+    blob_from_string = storage_blob.from_string
+
+    default_credentials = unittest.mock.MagicMock()
+    default_credentials.token = "developer-access-token"
+    auth_default.return_value = (default_credentials, "example-project")
+    blob = blob_from_string.return_value
+    blob.generate_signed_url.return_value = "https://signed.example/url"
+    yield unittest.mock.Mock(
+        auth_default=auth_default,
+        default_credentials=default_credentials,
+        compute_credentials=compute_credentials,
+        iam_signer=iam_signer,
+        service_account_credentials=service_account_credentials,
+        storage_client=storage_client,
+        blob_from_string=blob_from_string,
+        blob=blob,
+    )
 
 
 class TestGetSignedArtifactUrl:
