@@ -2,6 +2,7 @@ import builtins
 import dataclasses
 import datetime
 import logging
+import os
 import typing
 from typing import Any, Final, Optional
 
@@ -1199,11 +1200,37 @@ class ArtifactNodesApiService_Sql:
                 f"The get_signed_artifact_url method only supports Google Cloud Storage URIs, but got {artifact_data.uri=}."
             )
 
+        import google.auth
         from google.auth import compute_engine
         from google.auth import iam
         from google.auth.transport import requests as google_requests
         from google.cloud import storage
         from google.oauth2 import service_account
+
+        signer_service_account_email = os.environ.get(
+            "TANGLE_ARTIFACT_SIGNER_SERVICE_ACCOUNT"
+        )
+        if signer_service_account_email:
+            # A laptop has no metadata server, so local development signs as a dedicated
+            # service account using the developer's own Application Default Credentials,
+            # which only need iam.serviceAccounts.signBlob on that service account.
+            # Production leaves this variable unset and uses the path below.
+            credentials, _ = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            credentials.refresh(google_requests.Request())
+            storage_client = storage.Client(credentials=credentials)
+            blob = storage.Blob.from_string(
+                uri=artifact_data.uri, client=storage_client
+            )
+            signed_url = blob.generate_signed_url(
+                version="v4",
+                # Expiration is required. Max expiration value is 7 days.
+                expiration=datetime.timedelta(days=7),
+                service_account_email=signer_service_account_email,
+                access_token=credentials.token,
+            )
+            return GetArtifactSignedUrlResponse(signed_url=signed_url)
 
         # When running on GKE with Workload Identity, google.auth.default() returns
         # token-based Compute Engine credentials that have no private key and cannot
