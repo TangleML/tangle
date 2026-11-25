@@ -3,6 +3,7 @@ import traceback
 
 import bugsnag.middleware as bugsnag_middleware
 import fastapi
+from sqlalchemy import orm
 
 from cloud_pipelines_backend import api_router
 from cloud_pipelines_backend import database_ops
@@ -10,6 +11,10 @@ from cloud_pipelines_backend.instrumentation import api_tracing
 from cloud_pipelines_backend.instrumentation import bugsnag_instrumentation
 from cloud_pipelines_backend.instrumentation import contextual_logging
 from cloud_pipelines_backend.instrumentation import opentelemetry as otel
+
+# Importing the project routes registers the project tables, so this has to come before the
+# database tables are created below.
+from cloud_pipelines_backend.projects import api_routes as project_api_routes
 
 app = fastapi.FastAPI(
     title="Cloud Pipelines API",
@@ -77,4 +82,16 @@ api_router.setup_routes(
     db_engine=db_engine,
     user_details_getter=get_user_details,
     default_component_library_owner_username=ADMIN_USER_NAME,
+)
+
+
+def get_session():
+    with orm.Session(autocommit=False, autoflush=False, bind=db_engine) as session:
+        yield session
+
+
+project_api_routes.setup_project_routes(
+    app=app,
+    get_session=get_session,
+    user_details_getter=get_user_details,
 )
