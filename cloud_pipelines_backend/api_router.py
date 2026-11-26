@@ -634,6 +634,14 @@ def _setup_routes_internal(
 
     app.include_router(router=router)
 
+    from .user_pipelines import api_routes as user_pipeline_api_routes
+
+    user_pipeline_api_routes.setup_user_pipeline_routes(
+        app=app,
+        get_session=get_session,
+        user_details_getter=user_details_getter,
+    )
+
 
 # def partial_wraps(func, **kwargs):
 #     import inspect
