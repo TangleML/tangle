@@ -5,8 +5,11 @@ from sqlalchemy import orm
 
 from . import backend_types_sql as bts
 from . import database_migrations
+from .user_pipelines import db_models as user_pipeline_db_models
 
 _logger = logging.getLogger(__name__)
+
+user_pipeline_db_models.register_db_tables()
 
 
 def create_db_engine_and_migrate_db(
