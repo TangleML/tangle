@@ -26,3 +26,9 @@ class ApiValidationError(Exception):
     """Base for all filter/annotation validation errors -> 422."""
 
     pass
+
+
+class ConstantArgumentTooLargeError(ApiValidationError):
+    """An inline constant argument is too large to be stored -> 422."""
+
+    pass

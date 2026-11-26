@@ -487,7 +487,44 @@ def _split_type_spec(
 #     )
 
 
-def _construct_constant_artifact_data(value: str) -> bts.ArtifactData:
+# Constant argument values are stored in `ArtifactData.value`, a `TEXT` column.
+# On MySQL, `TEXT` holds at most 65,535 bytes, and a longer value fails the whole
+# insert with "Data too long for column 'value'".
+# The limit is enforced on every database so that a pipeline run that is accepted
+# by a local SQLite server is also accepted by a MySQL-backed one.
+MAX_CONSTANT_ARGUMENT_SIZE_BYTES = 65_535
+
+
+def _validate_constant_argument_size(
+    value: str,
+    *,
+    input_name: str | None = None,
+    task_id: str | None = None,
+) -> None:
+    # MySQL limits `TEXT` by bytes, not characters (utf8mb4 is UTF-8).
+    size_bytes = len(value.encode("utf-8"))
+    if size_bytes <= MAX_CONSTANT_ARGUMENT_SIZE_BYTES:
+        return
+    argument_description = "Constant argument"
+    if input_name is not None:
+        argument_description += f" for input '{input_name}'"
+    if task_id is not None:
+        argument_description += f" of task '{task_id}'"
+    raise errors.ConstantArgumentTooLargeError(
+        f"{argument_description} is {size_bytes} bytes, which is over the"
+        f" {MAX_CONSTANT_ARGUMENT_SIZE_BYTES}-byte limit for inline constant"
+        " arguments. Pass large values as an artifact/file instead of an inline"
+        " constant argument."
+    )
+
+
+def _construct_constant_artifact_data(
+    value: str,
+    *,
+    input_name: str | None = None,
+    task_id: str | None = None,
+) -> bts.ArtifactData:
+    _validate_constant_argument_size(value, input_name=input_name, task_id=task_id)
     # FIX: !!!
     # raise NotImplementedError("MUST insert into session. Need to de-duplicate")
     artifact_data = bts.ArtifactData(
@@ -503,12 +540,17 @@ def _construct_constant_artifact_data(value: str) -> bts.ArtifactData:
 def _construct_constant_artifact_node(
     value: str,
     artifact_type: structures.TypeSpecType | None = None,
+    *,
+    input_name: str | None = None,
+    task_id: str | None = None,
 ):
     type_name, type_properties = _split_type_spec(artifact_type)
     artifact_node = bts.ArtifactNode(
         type_name=type_name,
         type_properties=type_properties,
-        artifact_data=_construct_constant_artifact_data(value=value),
+        artifact_data=_construct_constant_artifact_data(
+            value=value, input_name=input_name, task_id=task_id
+        ),
         had_data_in_past=True,
     )
     return artifact_node
@@ -518,11 +560,17 @@ def _construct_constant_artifact_node_and_add_to_session(
     session: orm.Session,
     value: str,
     artifact_type: structures.TypeSpecType | None = None,
+    *,
+    input_name: str | None = None,
+    task_id: str | None = None,
 ):
     # FIX: !!!
     # raise NotImplementedError("MUST insert into session. Need to de-duplicate")
     artifact_node = _construct_constant_artifact_node(
-        value=value, artifact_type=artifact_type
+        value=value,
+        artifact_type=artifact_type,
+        input_name=input_name,
+        task_id=task_id,
     )
     session.add(artifact_node.artifact_data)
     session.add(artifact_node)
@@ -1707,7 +1755,9 @@ def _recursively_create_all_executions_and_artifacts_root(
                 #     session=session, value=input_argument, artifact_type=input_spec.type
                 # )
                 _construct_constant_artifact_node(
-                    value=input_argument, artifact_type=input_spec.type
+                    value=input_argument,
+                    artifact_type=input_spec.type,
+                    input_name=input_name,
                 )
             )
             # This constant artifact won't be added to the DB
@@ -1792,6 +1842,7 @@ def _recursively_create_all_executions_and_artifacts(
                         session=session,
                         value=input_spec.default,
                         artifact_type=input_spec.type,
+                        input_name=input_spec.name,
                     )
                 )
                 # # Not adding constant inputs to the DB. We'll add them to `ExecutionNode.constant_arguments`
@@ -1914,6 +1965,8 @@ def _recursively_create_all_executions_and_artifacts(
                             session=session,
                             value=input_argument,
                             artifact_type=input_spec.type,
+                            input_name=input_spec.name,
+                            task_id=child_task_id,
                         )
                     )
                     # Not adding constant inputs to the DB. We'll add them to `ExecutionNode.constant_arguments`
