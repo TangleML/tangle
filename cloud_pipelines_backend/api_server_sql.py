@@ -15,6 +15,7 @@ from .access_control import checks as access_control_checks
 from .access_control import runs as access_control_runs
 from . import filter_query_sql
 from . import secret_interfaces
+from . import troubleshooting_interfaces
 
 if typing.TYPE_CHECKING:
     from cloud_pipelines.orchestration.storage_providers import (
@@ -598,9 +599,19 @@ class GetContainerExecutionLogResponse:
     log_text: str | None = None
     system_error_exception_full: str | None = None
     orchestration_error_message: str | None = None
+    troubleshooting: troubleshooting_interfaces.TroubleshootingGuide | None = None
 
 
 class ExecutionNodesApiService_Sql:
+    def __init__(
+        self,
+        *,
+        troubleshooting_provider: (
+            troubleshooting_interfaces.TroubleshootingProvider | None
+        ) = None,
+    ):
+        self._troubleshooting_provider = troubleshooting_provider
+
     def get(self, session: orm.Session, id: bts.IdType) -> GetExecutionInfoResponse:
         execution_node = session.get(bts.ExecutionNode, id)
         if execution_node is None:
@@ -916,6 +927,9 @@ class ExecutionNodesApiService_Sql:
         system_error_exception_full = (
             system_error_exception_full or orchestration_error_message
         )
+        troubleshooting = self._render_troubleshooting_guide(
+            execution_extra_data=execution_extra_data
+        )
         if not container_execution:
             if execution.container_execution_status in (
                 bts.ContainerExecutionStatus.SYSTEM_ERROR,
@@ -924,6 +938,7 @@ class ExecutionNodesApiService_Sql:
                 return GetContainerExecutionLogResponse(
                     system_error_exception_full=system_error_exception_full,
                     orchestration_error_message=orchestration_error_message,
+                    troubleshooting=troubleshooting,
                 )
             raise errors.ContainerExecutionNotReadyError(
                 execution_node_id=id,
@@ -982,6 +997,7 @@ class ExecutionNodesApiService_Sql:
             log_text=log_text,
             system_error_exception_full=system_error_exception_full,
             orchestration_error_message=orchestration_error_message,
+            troubleshooting=troubleshooting,
         )
 
     def stream_container_execution_log(
@@ -1029,6 +1045,35 @@ class ExecutionNodesApiService_Sql:
                 storage_provider=storage_provider,
             )
             return (line + "\n" for line in log_text.split("\n"))
+
+    def _render_troubleshooting_guide(
+        self, *, execution_extra_data: dict[str, Any]
+    ) -> troubleshooting_interfaces.TroubleshootingGuide | None:
+        """The guide for the execution's stored reference, or None without a reference, provider or guide."""
+        stored_reference = execution_extra_data.get(
+            bts.EXECUTION_NODE_EXTRA_DATA_TROUBLESHOOTING_KEY
+        )
+        if self._troubleshooting_provider is None or not isinstance(
+            stored_reference, dict
+        ):
+            return None
+        code = stored_reference.get("code")
+        if not isinstance(code, str):
+            return None
+        stored_params = stored_reference.get("params")
+        reference = troubleshooting_interfaces.TroubleshootingReference(
+            code=code,
+            params=(
+                {str(key): str(value) for key, value in stored_params.items()}
+                if isinstance(stored_params, dict)
+                else {}
+            ),
+        )
+        try:
+            return self._troubleshooting_provider.render(reference=reference)
+        except Exception:
+            _logger.exception(f"Troubleshooting provider failed for {code=}")
+            return None
 
 
 _REDACTED_ON_READ: Final[str] = "<REDACTED_ON_READ>"

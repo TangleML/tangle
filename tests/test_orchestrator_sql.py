@@ -13,6 +13,7 @@ from cloud_pipelines_backend import backend_types_sql as bts
 from cloud_pipelines_backend import component_structures as structures
 from cloud_pipelines_backend import database_ops
 from cloud_pipelines_backend import orchestrator_sql
+from cloud_pipelines_backend import troubleshooting_interfaces
 from cloud_pipelines_backend.launchers import interfaces as launcher_interfaces
 
 
@@ -104,6 +105,9 @@ def _make_orchestrator(
     queued_execution_interceptor: (
         orchestrator_sql.QueuedExecutionInterceptor | None
     ) = None,
+    troubleshooting_classifier: (
+        troubleshooting_interfaces.TroubleshootingClassifier | None
+    ) = None,
 ) -> orchestrator_sql.OrchestratorService_Sql:
     """An orchestrator wired to mocks, launching through `launched_container_mock`."""
     return orchestrator_sql.OrchestratorService_Sql(
@@ -113,6 +117,7 @@ def _make_orchestrator(
         data_root_uri="file:///tmp/artifacts",
         logs_root_uri="file:///tmp/logs",
         queued_execution_interceptor=queued_execution_interceptor,
+        troubleshooting_classifier=troubleshooting_classifier,
     )
 
 
@@ -120,10 +125,14 @@ def _process_queued_executions(
     session_factory: Callable[[], orm.Session],
     launched_container_mock: mock.MagicMock,
     max_number_of_executions: int = 20,
+    troubleshooting_classifier: (
+        troubleshooting_interfaces.TroubleshootingClassifier | None
+    ) = None,
 ) -> None:
     orchestrator = _make_orchestrator(
         session_factory=session_factory,
         launched_container_mock=launched_container_mock,
+        troubleshooting_classifier=troubleshooting_classifier,
     )
     session = session_factory()
     # Process the queued queue until it is drained. A bound guards against the
@@ -1077,3 +1086,96 @@ class TestLaunchRejection:
         app_metrics.execution_system_errors.add.assert_called_once_with(1)
         bugsnag.notify.assert_called_once()
         app_metrics.execution_launch_rejections.add.assert_not_called()
+
+
+class TestTroubleshootingClassification:
+    _MESSAGE = 'admission webhook "validate.example" denied the request: no'
+
+    def _classifier(self, *, return_value=None, side_effect=None) -> mock.MagicMock:
+        classifier = mock.MagicMock()
+        classifier.classify.return_value = return_value
+        classifier.classify.side_effect = side_effect
+        return classifier
+
+    def _launch_and_get_node(
+        self, *, exception: Exception, classifier: mock.MagicMock
+    ) -> bts.ExecutionNode:
+        session_factory = _create_session_factory()
+        _create_pipeline_run(session_factory, _single_task_pipeline())
+        with (
+            mock.patch.object(orchestrator_sql, "app_metrics"),
+            mock.patch.object(orchestrator_sql, "bugsnag_instrumentation"),
+        ):
+            _process_queued_executions(
+                session_factory,
+                mock.MagicMock(side_effect=exception),
+                troubleshooting_classifier=classifier,
+            )
+        return _get_execution_node(session_factory(), "task")
+
+    def test_rejected_launch_stores_the_classified_reference(self) -> None:
+        exception = launcher_interfaces.LaunchRejectedError(
+            self._MESSAGE, reason="admission_denied"
+        )
+        classifier = self._classifier(
+            return_value=troubleshooting_interfaces.TroubleshootingReference(
+                code="known_failure", params={"run_id": "run-1"}
+            )
+        )
+
+        node = self._launch_and_get_node(exception=exception, classifier=classifier)
+
+        assert node.container_execution_status == bts.ContainerExecutionStatus.FAILED
+        assert node.extra_data[bts.EXECUTION_NODE_EXTRA_DATA_TROUBLESHOOTING_KEY] == {
+            "code": "known_failure",
+            "params": {"run_id": "run-1"},
+        }
+        classifier.classify.assert_called_once()
+        assert classifier.classify.call_args.kwargs["exception"] is exception
+
+    def test_system_error_launch_is_classified_too(self) -> None:
+        classifier = self._classifier(
+            return_value=troubleshooting_interfaces.TroubleshootingReference(
+                code="known_failure"
+            )
+        )
+
+        node = self._launch_and_get_node(
+            exception=launcher_interfaces.LauncherError("Failed to create pod"),
+            classifier=classifier,
+        )
+
+        assert (
+            node.container_execution_status == bts.ContainerExecutionStatus.SYSTEM_ERROR
+        )
+        assert node.extra_data[bts.EXECUTION_NODE_EXTRA_DATA_TROUBLESHOOTING_KEY] == {
+            "code": "known_failure",
+            "params": {},
+        }
+
+    def test_unrecognized_failure_stores_no_reference(self) -> None:
+        node = self._launch_and_get_node(
+            exception=launcher_interfaces.LaunchRejectedError(
+                self._MESSAGE, reason="admission_denied"
+            ),
+            classifier=self._classifier(return_value=None),
+        )
+
+        assert bts.EXECUTION_NODE_EXTRA_DATA_TROUBLESHOOTING_KEY not in node.extra_data
+
+    def test_classifier_error_still_records_the_failure(self) -> None:
+        node = self._launch_and_get_node(
+            exception=launcher_interfaces.LaunchRejectedError(
+                self._MESSAGE, reason="admission_denied"
+            ),
+            classifier=self._classifier(side_effect=RuntimeError("boom")),
+        )
+
+        assert node.container_execution_status == bts.ContainerExecutionStatus.FAILED
+        assert (
+            node.extra_data[
+                bts.EXECUTION_NODE_EXTRA_DATA_ORCHESTRATION_ERROR_MESSAGE_KEY
+            ]
+            == self._MESSAGE
+        )
+        assert bts.EXECUTION_NODE_EXTRA_DATA_TROUBLESHOOTING_KEY not in node.extra_data
